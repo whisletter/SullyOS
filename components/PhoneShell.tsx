@@ -4,6 +4,7 @@
 import React, { useState, useEffect, useMemo, useRef, Suspense } from 'react';
 import { IMPORT_IN_PROGRESS_KEY, useOS } from '../context/OSContext';
 import MingLightApp from '../apps/MingLightApp';
+import MingLightMiniBall from './os/MingLightMiniBall';
 import StatusBar from './os/StatusBar';
 import Launcher from '../apps/Launcher';
 import CompanionLockChrome from './os/CompanionLockChrome';
