@@ -10,6 +10,8 @@ import {
 } from '@phosphor-icons/react';
 
 import { useOS } from '../../context/OSContext';
+import { AppID } from '../../types';
+import { subscribeMingLightBridge, getMingLightLastBook } from '../../utils/mingLightBridge';
 
 const MingLightMiniBall: React.FC = () => {
   const {
@@ -18,7 +20,7 @@ const MingLightMiniBall: React.FC = () => {
   } = useOS();
 
   const [visible, setVisible] =
-    useState(true);
+    useState(false);
 
   const [position, setPosition] =
     useState({
@@ -115,11 +117,21 @@ const MingLightMiniBall: React.FC = () => {
         return;
       }
 
-      openApp?.('Reading');
+      openApp?.(AppID.Reading);
       setVisible(false);
     }, [openApp]);
 
-  if (!visible) {
+  // 眠光那边点了「缩小」按钮时，冒出这个球；
+  // 眠光正常打开/关闭时，球要让开，不重叠显示。
+  React.useEffect(() => {
+    const unsub = subscribeMingLightBridge((event) => {
+      if (event === 'minimized') setVisible(true);
+      if (event === 'opened' || event === 'closed') setVisible(false);
+    });
+    return unsub;
+  }, []);
+
+  if (!visible || !getMingLightLastBook()) {
     return null;
   }
 
