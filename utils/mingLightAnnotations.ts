@@ -1,381 +1,166 @@
 /**
  * 「眠光」第二步：划线 / 批注 / 共读讨论 / 记忆归档
  */
-import type { CharacterProfile, Message } from '../types';
-import type {
-  MingLightAnnotation,
-  MingLightThreadMessage,
-} from './mingLightDb';
-import {
-  extractMemoriesFromBuffer,
-} from './memoryPalace/extraction';
-import {
-  vectorizeAndStore,
-} from './memoryPalace/vectorStore';
-import type { LightLLMConfig } from './memoryPalace/pipeline';
+import type { APIConfig, CharacterProfile } from '../types';
+import type { MingLightAnnotation, MingLightThreadMessage } from './mingLightDb';
+import { MemoryNodeDB } from './memoryPalace/db';
+import type { MemoryNode, MemoryRoom } from './memoryPalace/types';
 
-export const TA_REVIEW_INTERVAL = 750;
-export const TA_REVIEW_WINDOW = 900;
+export const TA_CHECK_INTERVAL = 750;
 
-type ChatApiConfig = {
-  baseUrl: string;
-  apiKey: string;
-  model: string;
-};
+const MEMORY_ROOMS: MemoryRoom[] = [
+  'living_room',
+  'bedroom',
+  'study',
+  'user_room',
+  'self_room',
+  'attic',
+  'windowsill',
+];
 
-export function makeAnnotationId() {
-  return `mla_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-}
-
-export function makeThreadId() {
-  return `mlt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-}
-
-async function callChatApi(
-  config: ChatApiConfig,
+const callLlm = async (
+  api: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model'>,
   systemPrompt: string,
-  userPrompt: string,
-): Promise<string> {
-  if (!config?.baseUrl || !config?.apiKey || !config?.model) {
-    throw new Error('聊天 API 尚未配置完整');
-  }
-
-  const response = await fetch(
-    `${config.baseUrl.replace(/\/+$/, '')}/chat/completions`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: config.model,
-        messages: [
-          {
-            role: 'system',
-            content: systemPrompt,
-          },
-          {
-            role: 'user',
-            content: userPrompt,
-          },
-        ],
-        temperature: 0.7,
-      }),
+  userMessage: string,
+): Promise<string> => {
+  if (!api.baseUrl || !api.model) throw new Error('请先配置可用的模型 API。');
+  const response = await fetch(`${api.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${api.apiKey || 'sk-none'}`,
     },
-  );
+    body: JSON.stringify({
+      model: api.model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userMessage },
+      ],
+      temperature: 0.8,
+      stream: false,
+    }),
+  } as RequestInit);
 
   if (!response.ok) {
-    throw new Error(`API Error ${response.status}`);
+    throw new Error(`LLM API ${response.status}`);
   }
 
   const data = await response.json();
-  const text =
-    data?.choices?.[0]?.message?.content?.trim() || '';
+  return String(data?.choices?.[0]?.message?.content || '');
+};
 
-  if (!text) {
-    throw new Error('AI 没有返回内容');
-  }
-
-  return text;
-}
-
-function parseJsonObject(text: string): Record<string, unknown> | null {
+const extractJson = <T,>(raw: string): T | null => {
+  const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/) || raw.match(/(\{[\s\S]*\})/);
+  if (!match) return null;
   try {
-    return JSON.parse(text);
+    return JSON.parse(match[1]) as T;
   } catch {
-    const match = text.match(/\{[\s\S]*\}/);
-    if (!match) return null;
-
-    try {
-      return JSON.parse(match[0]);
-    } catch {
-      return null;
-    }
+    return null;
   }
-}
+};
 
-function buildCharacterContext(
-  char: CharacterProfile,
-  userName: string,
-): string {
-  let context =
-    `你的名字：${char.name}\n` +
-    `你的角色设定：\n${char.systemPrompt || '无'}\n`;
+const compactPersona = (char: CharacterProfile): string =>
+  (char.systemPrompt || '').slice(0, 6000);
 
-  if (char.worldview?.trim()) {
-    context += `你的世界观：\n${char.worldview}\n`;
-  }
+export async function askTaForInsight(args: {
+  api: APIConfig;
+  char: CharacterProfile;
+  visibleText: string;
+}): Promise<{ quote: string; comment: string } | null> {
+  const text = args.visibleText.trim();
+  if (!text) return null;
 
-  if (userName?.trim()) {
-    context += `用户称呼：${userName}\n`;
-  }
+  const systemPrompt = `你是角色「${args.char.name}」，现在正在和用户一起读一本书。\n你的角色设定：\n${compactPersona(args.char)}\n\n你只能根据用户已经读到的这小段文字产生感想，严禁猜测或讨论后文。不要为了评论而评论。只有真的有一句话让你有想法、联想到某件事、产生疑问或想和用户分享时才输出。\n\n严格输出 JSON：{"quote":"原文中完整的一句","comment":"像真实读者一样的一两句简短感想"}。没有特别想说的内容就输出：{"quote":"","comment":""}。quote 必须逐字来自原文。`;
 
-  return context;
-}
-
-/**
- * TA 主动阅读：
- * 只接收用户已经看到的最后一小段文字。
- * 绝不发送 visibleEnd 之后的任何内容。
- */
-export async function askTaForSpontaneousComment(
-  config: ChatApiConfig,
-  char: CharacterProfile,
-  userName: string,
-  bookTitle: string,
-  chapterTitle: string,
-  excerpt: string,
-): Promise<{
-  hasComment: boolean;
-  quote: string;
-  comment: string;
-}> {
-  const systemPrompt = `
-你现在正在和用户一起读一本书。
-你不是旁观者，也不能提前看书。
-你只能根据用户已经读到的这段文字产生真实、自然的个人感想。
-
-${buildCharacterContext(char, userName)}
-
-严格规则：
-1. 只能理解下面提供的文字。
-2. 不允许使用这段文字之后的任何剧情、人物信息或伏笔。
-3. 不要假装每一段都必须有感想。
-4. 只有真的有想说的话时，才返回 hasComment=true。
-5. 如果有感想，必须选择下面原文中的一句完整句子作为 quote，不能改写。
-6. comment 像一个正在一起读书的人说的话，可以有理解、联想、疑问、共鸣或不同意见。
-7. 不要总结整本书或预测后文。
-8. 只输出 JSON：
-
-{
-  "hasComment": true/false,
-  "quote": "原文中的完整句子",
-  "comment": "一句到三句自然的感想"
-}
-
-当前书名：${bookTitle}
-当前章节：${chapterTitle || '未知'}
-
-用户已经读到这里，以下文字就是你目前唯一能看到的内容：
----BEGIN---
-${excerpt}
----END---
-`;
-
-  const raw = await callChatApi(
-    config,
+  const raw = await callLlm(
+    args.api,
     systemPrompt,
-    '请判断你现在有没有真的想对其中一句话说点什么。',
+    `这是你目前看到的、且用户已经读到的最新文字：\n\n${text}`,
   );
 
-  const parsed = parseJsonObject(raw);
+  const parsed = extractJson<{ quote?: string; comment?: string }>(raw);
+  const quote = String(parsed?.quote || '').trim();
+  const comment = String(parsed?.comment || '').trim();
+  if (!quote || !comment || !text.includes(quote)) return null;
+  return { quote, comment };
+}
 
-  if (!parsed) {
-    return {
-      hasComment: false,
-      quote: '',
-      comment: '',
-    };
+export async function askTaToReply(args: {
+  api: APIConfig;
+  char: CharacterProfile;
+  quotedText: string;
+  paragraphText: string;
+  thread: MingLightThreadMessage[];
+  userMessage?: string;
+}): Promise<string> {
+  const systemPrompt = `你是角色「${args.char.name}」，正在和用户一起读书。\n你的角色设定：\n${compactPersona(args.char)}\n\n你只能讨论用户已经读到的当前句子及其附近上下文，不能推测后文。像真实共读伙伴一样交流，不要写成文学评论或分析报告。`;
+  const threadText = args.thread
+    .slice(-8)
+    .map(m => `${m.author === 'user' ? '用户' : args.char.name}：${m.content}`)
+    .join('\n');
+
+  return callLlm(
+    args.api,
+    systemPrompt,
+    `书中原句：\n${args.quotedText}\n\n当前段落：\n${args.paragraphText.slice(0, 1800)}\n\n此前讨论：\n${threadText || '暂无'}\n\n用户最新说：\n${args.userMessage || '请对这个句子说说你的看法。'}`,
+  ).then(text => text.trim());
+}
+
+export async function archiveAnnotationThread(args: {
+  lightLLM: { baseUrl?: string; apiKey?: string; model?: string } | null | undefined;
+  annotation: MingLightAnnotation;
+  char: CharacterProfile;
+  bookTitle: string;
+}): Promise<void> {
+  if (!args.lightLLM?.baseUrl || !args.lightLLM.model) {
+    throw new Error('记忆宫殿副 API 尚未配置。');
   }
 
-  const hasComment =
-    parsed.hasComment === true &&
-    typeof parsed.quote === 'string' &&
-    typeof parsed.comment === 'string';
+  const conversation = [
+    `书籍：《${args.bookTitle}》`,
+    `原句：${args.annotation.quotedText}`,
+    `首次批注：${args.annotation.source === 'ta' ? args.char.name : '用户'}：${args.annotation.comment}`,
+    ...args.annotation.thread.map(m => `${m.author === 'ta' ? args.char.name : '用户'}：${m.content}`),
+  ].join('\n');
 
-  if (!hasComment) {
-    return {
-      hasComment: false,
-      quote: '',
-      comment: '',
-    };
-  }
+  const raw = await callLlm(
+    {
+      baseUrl: args.lightLLM.baseUrl,
+      apiKey: args.lightLLM.apiKey || '',
+      model: args.lightLLM.model,
+    },
+    `你正在为角色「${args.char.name}」整理一段真正值得长期记住的共读经历。只根据提供的讨论内容判断，不补充后文。\n从以下七个房间中选一个：living_room, bedroom, study, user_room, self_room, attic, windowsill。\n输出 JSON：{"room":"...","content":"一条简洁的长期记忆","importance":1到10,"mood":"neutral 或一个简短情绪词","tags":["最多3个标签"]}。content 应该是可以在未来聊天中使用的自然记忆，而不是摘要报告。`,
+    conversation,
+  );
 
-  return {
-    hasComment: true,
-    quote: String(parsed.quote).trim(),
-    comment: String(parsed.comment).trim(),
+  const parsed = extractJson<{
+    room?: string;
+    content?: string;
+    importance?: number;
+    mood?: string;
+    tags?: string[];
+  }>(raw);
+
+  const room = MEMORY_ROOMS.includes(parsed?.room as MemoryRoom)
+    ? (parsed!.room as MemoryRoom)
+    : 'study';
+  const createdAt = Date.now();
+
+  const node: MemoryNode = {
+    id: `ml_mem_${createdAt}_${Math.random().toString(36).slice(2, 8)}`,
+    charId: args.char.id,
+    content: String(parsed?.content || conversation.slice(0, 500)),
+    room,
+    tags: Array.isArray(parsed?.tags) ? parsed!.tags.slice(0, 3).map(String) : ['共读'],
+    importance: Math.max(1, Math.min(10, Math.round(Number(parsed?.importance) || 6))),
+    mood: String(parsed?.mood || 'neutral'),
+    embedded: false,
+    createdAt,
+    lastAccessedAt: createdAt,
+    accessCount: 0,
+    eventBoxId: null,
+    origin: 'system',
   };
-}
 
-/**
- * 用户主动批注后，TA 回复。
- */
-export async function askTaToReplyToUserAnnotation(
-  config: ChatApiConfig,
-  char: CharacterProfile,
-  userName: string,
-  bookTitle: string,
-  quote: string,
-  userComment: string,
-  thread: MingLightThreadMessage[],
-): Promise<string> {
-  const threadText = thread
-    .slice(-10)
-    .map(
-      m =>
-        `${m.role === 'user' ? userName || '用户' : char.name}：${m.text}`,
-    )
-    .join('\n');
-
-  const systemPrompt = `
-你正在和用户一起读书。
-
-${buildCharacterContext(char, userName)}
-
-这是书中的一句原文：
-「${quote}」
-
-用户对它的感想：
-${userComment}
-
-之前这句话下面的讨论：
-${threadText || '暂无'}
-
-请像一个真实的共读伙伴一样回复。
-不要提前谈论用户尚未读到的内容。
-不要主动总结后文。
-回复自然一些，不必每次都很长。
-`;
-
-  return callChatApi(
-    config,
-    systemPrompt,
-    '请回应用户刚才对这句话的感想。',
-  );
-}
-
-/**
- * 批注讨论继续进行。
- */
-export async function askTaToContinueDiscussion(
-  config: ChatApiConfig,
-  char: CharacterProfile,
-  userName: string,
-  bookTitle: string,
-  quote: string,
-  thread: MingLightThreadMessage[],
-): Promise<string> {
-  const threadText = thread
-    .slice(-12)
-    .map(
-      m =>
-        `${m.role === 'user' ? userName || '用户' : char.name}：${m.text}`,
-    )
-    .join('\n');
-
-  const systemPrompt = `
-你正在和用户一起读《${bookTitle}》。
-
-${buildCharacterContext(char, userName)}
-
-当前讨论的原句：
-「${quote}」
-
-你们刚才的讨论：
-${threadText}
-
-只根据这句话和已经发生的讨论回答。
-不要读取、猜测或暗示后面的剧情。
-像真实的朋友一起讨论一本书一样继续聊。
-`;
-
-  return callChatApi(
-    config,
-    systemPrompt,
-    '继续这场讨论。',
-  );
-}
-
-/**
- * 用户点击「收藏进记忆宫殿」时才调用。
- * 不点击按钮绝不会进入记忆宫殿。
- */
-export async function archiveAnnotationDiscussion(
-  char: CharacterProfile,
-  userName: string,
-  quote: string,
-  annotationComment: string,
-  thread: MingLightThreadMessage[],
-  memoryPalaceConfig: any,
-): Promise<void> {
-  const lightLLM =
-    memoryPalaceConfig?.lightLLM as
-      | LightLLMConfig
-      | undefined;
-
-  const embeddingConfig =
-    char.embeddingConfig as any;
-
-  if (
-    !char.memoryPalaceEnabled ||
-    !lightLLM?.baseUrl ||
-    !lightLLM?.apiKey ||
-    !embeddingConfig?.baseUrl ||
-    !embeddingConfig?.apiKey
-  ) {
-    throw new Error(
-      '请先在记忆宫殿设置中配置好 API',
-    );
-  }
-
-  const discussion = [
-    `书中原句：「${quote}」`,
-    annotationComment
-      ? `最初批注：${annotationComment}`
-      : '',
-    ...thread.map(
-      m =>
-        `${m.role === 'user' ? userName || '用户' : char.name}：${m.text}`,
-    ),
-  ]
-    .filter(Boolean)
-    .join('\n');
-
-  const fakeMessage = {
-    id: -Math.floor(Math.random() * 1e9),
-    charId: char.id,
-    role: 'user',
-    type: 'text',
-    content:
-      `【眠光共读讨论】\n${discussion}`,
-    timestamp: Date.now(),
-  } as Message;
-
-  const charContext =
-    `[来源说明]\n这是用户主动从「眠光」共读讨论中收藏的一段内容。\n` +
-    `[角色档案]\n名字：${char.name}\n角色设定：${char.systemPrompt || '无'}\n` +
-    (char.worldview
-      ? `[世界观]\n${char.worldview}\n`
-      : '');
-
-  const extracted =
-    await extractMemoriesFromBuffer(
-      [fakeMessage],
-      char.id,
-      char.name,
-      lightLLM,
-      charContext,
-      userName || '用户',
-      [],
-      [],
-    );
-
-  if (!extracted.memories.length) {
-    throw new Error(
-      '这次讨论没有被提取为可归档的记忆',
-    );
-  }
-
-  for (const node of extracted.memories) {
-    node.origin = 'system';
-    node.createdAt = Date.now();
-    node.lastAccessedAt = Date.now();
-  }
-
-  await vectorizeAndStore(
-    extracted.memories,
-    embeddingConfig,
-  );
+  await MemoryNodeDB.save(node);
 }
