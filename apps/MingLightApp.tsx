@@ -37,6 +37,7 @@ import {
   BookmarkSimple,
   PaperPlaneTilt,
   Sparkle,
+  ArrowClockwise,
 } from '@phosphor-icons/react';
 
 import { useOS } from '../context/OSContext';
@@ -46,6 +47,7 @@ import type {
   MingLightProgress,
   MingLightTheme,
   MingLightChapterSummary,
+  MingLightChapter,
 } from '../utils/mingLightDb';
 import {
   getBooksForChar,
@@ -737,6 +739,75 @@ const MingLightApp: React.FC = () => {
 
   // ---------------- 章末总结 ----------------
 
+  /** 真正干活的那一步。自动触发和手动「重写」共用，区别只在要不要跳过已存在的检查。 */
+  const runChapterSummary = useCallback(
+    async (chapter: MingLightChapter) => {
+      if (!activeBook || !activeCharacterId || !char) return;
+      if (!apiConfig?.baseUrl || !apiConfig?.model) {
+        addToast?.('还没配置好接口，生成不了读后感', 'error');
+        return;
+      }
+
+      summaryBusyRef.current = true;
+      setGeneratingSummaryFor(chapter.index);
+
+      try {
+        const chapterText = activeBook.rawText.slice(chapter.startOffset, chapter.endOffset);
+
+        // 注意这里读的是「当前」的批注。所以事后补讨论几句再点重写，
+        // 新讨论会被一起带进去——这正是重写按钮要解决的场景。
+        const discussionExcerpt = (activeBook.annotations || [])
+          .filter(a => a.startOffset >= chapter.startOffset && a.startOffset < chapter.endOffset)
+          .map(a => {
+            const lines = [`原句：${a.quotedText}`, `${a.source === 'ta' ? char.name : '用户'}：${a.comment}`];
+            a.thread.forEach(m => lines.push(`${m.author === 'ta' ? char.name : '用户'}：${m.content}`));
+            return lines.join('\n');
+          })
+          .join('\n\n')
+          .slice(0, 3000);
+
+        const result = await generateChapterSummary({
+          api: apiConfig,
+          char,
+          chapterText,
+          discussionExcerpt,
+        });
+
+        const summary: MingLightChapterSummary = {
+          id: `${activeBook.id}__${chapter.index}__${activeCharacterId}`,
+          bookId: activeBook.id,
+          charId: activeCharacterId,
+          chapterIndex: chapter.index,
+          subjective: result.subjective,
+          objective: result.objective,
+          createdAt: Date.now(),
+        };
+
+        await saveChapterSummary(summary);
+        setChapterSummaries(prev => ({ ...prev, [chapter.index]: summary }));
+        addToast?.(`《${chapter.title || '本章'}》读后感已生成`, 'success');
+      } catch (error) {
+        console.warn('MingLight chapter summary failed:', error);
+        addToast?.('读后感生成失败，待会儿再试试', 'error');
+      } finally {
+        summaryBusyRef.current = false;
+        setGeneratingSummaryFor(null);
+      }
+    },
+    [activeBook, activeCharacterId, apiConfig, char, addToast],
+  );
+
+  /** 手动重写：丢掉旧的那份，拿现在的讨论重新生成一次。 */
+  const regenerateChapterSummary = useCallback(
+    async (chapterIndex: number) => {
+      if (!activeBook || summaryBusyRef.current) return;
+      const chapter = activeBook.chapters.find(ch => ch.index === chapterIndex);
+      if (!chapter) return;
+      await runChapterSummary(chapter);
+    },
+    [activeBook, runChapterSummary],
+  );
+
   const maybeGenerateChapterSummary = useCallback(
     async (offset: number) => {
       if (!activeBook || !activeCharacterId) return;
@@ -787,50 +858,9 @@ const MingLightApp: React.FC = () => {
       }
 
       readHighWaterRef.current = offset;
-      summaryBusyRef.current = true;
-      setGeneratingSummaryFor(finishedChapter.index);
-
-      try {
-        const chapterText = activeBook.rawText.slice(finishedChapter.startOffset, finishedChapter.endOffset);
-
-        const discussionExcerpt = (activeBook.annotations || [])
-          .filter(a => a.startOffset >= finishedChapter.startOffset && a.startOffset < finishedChapter.endOffset)
-          .map(a => {
-            const lines = [`原句：${a.quotedText}`, `${a.source === 'ta' ? char!.name : '用户'}：${a.comment}`];
-            a.thread.forEach(m => lines.push(`${m.author === 'ta' ? char!.name : '用户'}：${m.content}`));
-            return lines.join('\n');
-          })
-          .join('\n\n')
-          .slice(0, 3000);
-
-        const result = await generateChapterSummary({
-          api: apiConfig,
-          char: char!,
-          chapterText,
-          discussionExcerpt,
-        });
-
-        const summary: MingLightChapterSummary = {
-          id: `${activeBook.id}__${finishedChapter.index}__${activeCharacterId}`,
-          bookId: activeBook.id,
-          charId: activeCharacterId,
-          chapterIndex: finishedChapter.index,
-          subjective: result.subjective,
-          objective: result.objective,
-          createdAt: Date.now(),
-        };
-
-        await saveChapterSummary(summary);
-        setChapterSummaries(prev => ({ ...prev, [finishedChapter.index]: summary }));
-        addToast?.(`《${finishedChapter.title || '本章'}》读后感已生成`, 'success');
-      } catch (error) {
-        console.warn('MingLight chapter summary failed:', error);
-      } finally {
-        summaryBusyRef.current = false;
-        setGeneratingSummaryFor(null);
-      }
+      await runChapterSummary(finishedChapter);
     },
-    [activeBook, activeCharacterId, apiConfig, char, chapterSummaries, addToast],
+    [activeBook, activeCharacterId, apiConfig, chapterSummaries, runChapterSummary],
   );
 
   // ---------------- 选择文字 ----------------
@@ -1623,7 +1653,25 @@ const MingLightApp: React.FC = () => {
                 <div className="font-semibold text-sm">
                   {activeBook.chapters[viewingSummaryFor]?.title || `第 ${viewingSummaryFor + 1} 章`} · 读后感
                 </div>
-                <button onClick={() => setViewingSummaryFor(null)}><X size={18} /></button>
+                <div className="flex items-center gap-2 shrink-0 ml-2">
+                  <button
+                    onClick={() => regenerateChapterSummary(viewingSummaryFor)}
+                    disabled={generatingSummaryFor !== null}
+                    className="flex items-center gap-1 text-xs px-2 py-1 rounded-full border disabled:opacity-40"
+                    style={{ borderColor: `${theme.text}30` }}
+                  >
+                    <ArrowClockwise
+                      size={13}
+                      className={
+                        generatingSummaryFor === viewingSummaryFor
+                          ? 'animate-spin'
+                          : ''
+                      }
+                    />
+                    {generatingSummaryFor === viewingSummaryFor ? '重写中' : '重写'}
+                  </button>
+                  <button onClick={() => setViewingSummaryFor(null)}><X size={18} /></button>
+                </div>
               </div>
 
               <div className="mb-4">
@@ -1899,67 +1947,4 @@ const MingLightApp: React.FC = () => {
                   className="absolute top-1 right-1 bg-black/40 text-white rounded-full p-0.5 opacity-0 group-active:opacity-100"
                 >
                   <Trash size={12} />
-                </button>
-              </div>
-
-              <div className="text-xs text-center truncate w-full">
-                {book.title}
-              </div>
-
-              {book.author && (
-                <div className="text-[10px] text-gray-400 text-center truncate w-full">
-                  {book.author}
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* 导入弹窗 */}
-      {showImportModal && (
-        <div
-          className="absolute inset-0 bg-black/40 flex items-center justify-center z-10"
-          onClick={() => setShowImportModal(false)}
-        >
-          <div
-            className="bg-white rounded-xl p-5 w-[80%] flex flex-col items-center gap-3"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="text-sm text-gray-600 text-center">
-              支持导入 TXT 和 EPUB
-            </div>
-
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".txt,text/plain,.epub,application/epub+zip"
-              className="hidden"
-              onChange={e => {
-                const f = e.target.files?.[0];
-                if (f) handleFileChosen(f);
-                e.currentTarget.value = '';
-              }}
-            />
-
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="px-4 py-2 bg-amber-700 text-white rounded-full text-sm w-full"
-            >
-              选择文件
-            </button>
-
-            <button
-              onClick={() => setShowImportModal(false)}
-              className="text-xs text-gray-400"
-            >
-              取消
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-};
-
-export default MingLightApp;
+   
