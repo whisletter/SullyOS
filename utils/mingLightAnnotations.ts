@@ -164,3 +164,30 @@ export async function archiveAnnotationThread(args: {
 
   await MemoryNodeDB.save(node);
 }
+
+// ---------- 章末总结：主观读后感（带人设）+ 客观内容总结（不带人设） ----------
+
+export async function generateChapterSummary(args: {
+  api: APIConfig;
+  char: CharacterProfile;
+  chapterText: string;
+  discussionExcerpt: string;
+}): Promise<{ subjective: string; objective: string }> {
+  const subjectiveSystem = `你是角色「${args.char.name}」，刚和用户一起读完了这一章。\n你的角色设定：\n${compactPersona(args.char)}\n\n用你的人设语气，写一段简短的读后感：这一章你印象最深的句子是什么、你们讨论出了什么新想法。100-200字，自然说话的口吻，不要分点列举，不要写成书评报告。`;
+
+  const subjective = await callLlm(
+    args.api,
+    subjectiveSystem,
+    `本章原文：\n${args.chapterText.slice(0, 6000)}\n\n你们的讨论摘录：\n${args.discussionExcerpt || '（这一章你们暂时没有展开讨论）'}`,
+  );
+
+  const objectiveSystem = `你是一个客观的文本摘要工具，不扮演任何角色、不带任何感情色彩。请归纳以下章节的核心内容：剧情推进、人物变化、关键信息。150字以内，可以分点列出，不要加入任何主观评价或感想。`;
+
+  const objective = await callLlm(
+    args.api,
+    objectiveSystem,
+    args.chapterText.slice(0, 6000),
+  );
+
+  return { subjective: subjective.trim(), objective: objective.trim() };
+}
