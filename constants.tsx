@@ -20,6 +20,7 @@ import {
   GameController,
   Globe,
   PenNib,
+  BookOpen,
   PiggyBank,
   Compass,
   Camera,
