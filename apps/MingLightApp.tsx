@@ -37,11 +37,9 @@ import {
   BookmarkSimple,
   PaperPlaneTilt,
   Sparkle,
-  Minus,
 } from '@phosphor-icons/react';
 
 import { useOS } from '../context/OSContext';
-import { AppID } from '../types';
 import type {
   MingLightAnnotation,
   MingLightBook,
@@ -106,27 +104,6 @@ const THEME_STYLES: Record<
 
 const USER_MARK = '#5B8FF9';
 const TA_MARK = '#D6A84F';
-const MINGLIGHT_RESUME_KEY = 'minglight.resume.v1';
-
-function saveMingLightResume(bookId: string, charId: string) {
-  try {
-    localStorage.setItem(MINGLIGHT_RESUME_KEY, JSON.stringify({ bookId, charId }));
-  } catch {}
-}
-
-function clearMingLightResume() {
-  try { localStorage.removeItem(MINGLIGHT_RESUME_KEY); } catch {}
-}
-
-function readMingLightResume(): { bookId: string; charId: string } | null {
-  try {
-    const raw = localStorage.getItem(MINGLIGHT_RESUME_KEY);
-    if (!raw) return null;
-    const value = JSON.parse(raw);
-    if (typeof value?.bookId === 'string' && typeof value?.charId === 'string') return value;
-  } catch {}
-  return null;
-  }
 
 interface Paragraph {
   index: number;
@@ -276,7 +253,6 @@ const MingLightApp: React.FC = () => {
     activeCharacterId,
     characters,
     closeApp,
-    openApp,
     addToast,
     apiConfig,
     memoryPalaceConfig,
@@ -391,7 +367,6 @@ const MingLightApp: React.FC = () => {
       };
       setActiveBook(book);
       setProgress(next);
-      saveMingLightResume(book.id, activeCharacterId);
       lastAutoCheckRef.current = next.taCheckedOffset || 0;
       restoringRef.current = true;
       setShowChapters(false);
@@ -400,16 +375,6 @@ const MingLightApp: React.FC = () => {
     },
     [activeCharacterId],
   );
-
-  // 从悬浮球恢复：最小化后再次打开眠光，直接回到刚才那本书。
-  useEffect(() => {
-    if (!activeCharacterId || !books.length || activeBook) return;
-    const resume = readMingLightResume();
-    if (!resume || resume.charId !== activeCharacterId) return;
-    const book = books.find(b => b.id === resume.bookId);
-    if (!book) return;
-    void openBook(book);
-  }, [activeCharacterId, books, activeBook, openBook]);
 
   // ---------------- 文件导入 ----------------
 
@@ -1099,7 +1064,6 @@ const MingLightApp: React.FC = () => {
               setProgress(null);
               setSelectedAnnotation(null);
               setShowChapters(false);
-              clearMingLightResume();
             }}
             className="p-1"
           >
@@ -1110,34 +1074,9 @@ const MingLightApp: React.FC = () => {
             {activeBook.title}
           </div>
 
-          <div className="flex items-center gap-1">
-            <button
-              onClick={() => {
-                if (activeBook && activeCharacterId) {
-                  saveMingLightResume(activeBook.id, activeCharacterId);
-                }
-                window.dispatchEvent(new CustomEvent('minglight-minimized'));
-                openApp(AppID.Chat);
-              }}
-              className="p-1"
-              aria-label="最小化眠光"
-              title="最小化"
-            >
-              <Minus size={20} />
-            </button>
-            <button
-              onClick={() => {
-                clearMingLightResume();
-                window.dispatchEvent(new CustomEvent('minglight-closed'));
-                closeApp();
-              }}
-              className="p-1"
-              aria-label="关闭眠光"
-              title="关闭"
-            >
-              <X size={20} />
-            </button>
-          </div>
+          <button onClick={closeApp} className="p-1">
+            <X size={20} />
+          </button>
         </div>
 
         {/* 工具栏 */}
