@@ -6,6 +6,7 @@
  * - EPUB 自动获取书名、作者、封面、章节
  * - 目录跳转
  * - 滚动阅读 / 分页阅读
+ * - 手机单页 / 平板双页自适应
  * - 页码显示
  * - 四种主题
  * - 字号调整
@@ -32,6 +33,8 @@ import {
   Trash,
   List,
   ArrowsLeftRight,
+  CaretLeft as PrevIcon,
+  CaretRight as NextIcon,
 } from '@phosphor-icons/react';
 
 import { useOS } from '../context/OSContext';
@@ -86,7 +89,44 @@ const THEME_STYLES: Record<
 };
 
 function genId() {
-  return `ml_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  return `ml_${Date.now()}_${Math.random()
+    .toString(36)
+    .slice(2, 8)}`;
+}
+
+/**
+ * 判断当前设备是否适合双页：
+ * - 手机：始终单页
+ * - 平板：双页
+ * - 桌面：宽度足够则双页
+ *
+ * 通过“屏幕最短边”判断触屏设备，
+ * 避免手机横屏时误判为平板。
+ */
+function detectTwoPageMode(
+  readerWidth: number
+): boolean {
+  if (!readerWidth) return false;
+
+  const coarse =
+    window.matchMedia?.(
+      '(pointer: coarse)'
+    ).matches ?? false;
+
+  if (coarse) {
+    const shortestScreenSide =
+      Math.min(
+        window.screen.width,
+        window.screen.height
+      );
+
+    return (
+      shortestScreenSide >= 600 &&
+      readerWidth >= 650
+    );
+  }
+
+  return readerWidth >= 850;
 }
 
 const MingLightApp: React.FC = () => {
@@ -119,7 +159,16 @@ const MingLightApp: React.FC = () => {
   const [showChapters, setShowChapters] =
     useState(false);
 
-  const [showSettings, setShowSettings] =
+  const [pageCount, setPageCount] =
+    useState(1);
+
+  const [totalPages, setTotalPages] =
+    useState(1);
+
+  const [currentPage, setCurrentPage] =
+    useState(1);
+
+  const [isTwoPage, setIsTwoPage] =
     useState(false);
 
   const fileInputRef =
@@ -128,14 +177,17 @@ const MingLightApp: React.FC = () => {
   const readerRef =
     useRef<HTMLDivElement>(null);
 
+  const textRef =
+    useRef<HTMLDivElement>(null);
+
   const saveTimer =
     useRef<number | null>(null);
 
-  const [pageCount, setPageCount] =
-    useState(1);
+  const restoringRef =
+    useRef(false);
 
-  const [currentPage, setCurrentPage] =
-    useState(1);
+  const [readerReady, setReaderReady] =
+    useState(false);
 
   // --------------------------------------------------
   // 书架
@@ -176,7 +228,7 @@ const MingLightApp: React.FC = () => {
   }, [refreshBooks]);
 
   // --------------------------------------------------
-  // 进度保存
+  // 保存进度
   // --------------------------------------------------
 
   const scheduleSaveProgress =
@@ -199,14 +251,11 @@ const MingLightApp: React.FC = () => {
     );
 
   // --------------------------------------------------
-  // 打开书籍
+  // 打开书
   // --------------------------------------------------
 
   const openBook = useCallback(
-    async (
-      book: MingLightBook,
-      chapterIndex?: number
-    ) => {
+    async (book: MingLightBook) => {
       if (!activeCharacterId) return;
 
       const existing =
@@ -215,109 +264,34 @@ const MingLightApp: React.FC = () => {
           activeCharacterId
         );
 
-      const nextProgress =
+      const nextProgress: MingLightProgress =
         existing || {
           id: `${book.id}__${activeCharacterId}`,
           bookId: book.id,
           charId: activeCharacterId,
           charOffset: 0,
-          theme: 'day' as MingLightTheme,
+          theme: 'day',
           fontSize: 18,
-          readingMode:
-            'scroll' as MingLightReadingMode,
+          readingMode: 'scroll',
           page: 1,
           updatedAt: Date.now(),
         };
 
       setActiveBook(book);
       setProgress(nextProgress);
-
       setCurrentPage(
         nextProgress.page || 1
       );
 
+      setReaderReady(false);
+      restoringRef.current = true;
       setShowChapters(false);
-
-      // 等阅读区渲染后跳转
-      requestAnimationFrame(() => {
-        const el = readerRef.current;
-
-        if (!el) return;
-
-        if (
-          typeof chapterIndex === 'number' &&
-          book.chapters[chapterIndex]
-        ) {
-          const chapter =
-            book.chapters[
-              chapterIndex
-            ];
-
-          if (
-            nextProgress.readingMode ===
-            'paged'
-          ) {
-            const ratio =
-              chapter.startOffset /
-              Math.max(
-                1,
-                book.rawText.length
-              );
-
-            const targetPage =
-              Math.max(
-                1,
-                Math.ceil(
-                  ratio *
-                    pageCount
-                )
-              );
-
-            setCurrentPage(
-              targetPage
-            );
-          } else {
-            const ratio =
-              chapter.startOffset /
-              Math.max(
-                1,
-                book.rawText.length
-              );
-
-            el.scrollTop =
-              ratio *
-              Math.max(
-                0,
-                el.scrollHeight -
-                  el.clientHeight
-              );
-          }
-
-          return;
-        }
-
-        // 恢复上次阅读位置
-        const ratio =
-          nextProgress.charOffset /
-          Math.max(
-            1,
-            book.rawText.length
-          );
-
-        el.scrollTop =
-          ratio *
-          Math.max(
-            0,
-            el.scrollHeight -
-              el.clientHeight
-          );
-      });
     },
-    [activeCharacterId, pageCount]
+    [activeCharacterId]
   );
 
   // --------------------------------------------------
-  // 导入
+  // 导入 TXT / EPUB
   // --------------------------------------------------
 
   const handleFileChosen =
@@ -329,7 +303,8 @@ const MingLightApp: React.FC = () => {
           const fileName =
             file.name.toLowerCase();
 
-          // TXT
+          // ---------------- TXT ----------------
+
           if (
             fileName.endsWith('.txt')
           ) {
@@ -341,8 +316,7 @@ const MingLightApp: React.FC = () => {
                 try {
                   const text =
                     String(
-                      reader.result ||
-                        ''
+                      reader.result || ''
                     );
 
                   if (!text.trim()) {
@@ -411,7 +385,8 @@ const MingLightApp: React.FC = () => {
             return;
           }
 
-          // EPUB
+          // ---------------- EPUB ----------------
+
           if (
             fileName.endsWith('.epub')
           ) {
@@ -443,7 +418,7 @@ const MingLightApp: React.FC = () => {
                 rawText:
                   imported.rawText,
                 chapters:
-                  imported.chapters.length
+                  imported.chapters?.length
                     ? imported.chapters
                     : splitIntoChapters(
                         imported.rawText
@@ -476,13 +451,10 @@ const MingLightApp: React.FC = () => {
             error
           );
 
-          const message =
+          addToast?.(
             error instanceof Error
               ? error.message
-              : '文件导入失败';
-
-          addToast?.(
-            message,
+              : '文件导入失败',
             'error'
           );
         }
@@ -495,7 +467,7 @@ const MingLightApp: React.FC = () => {
     );
 
   // --------------------------------------------------
-  // 删除
+  // 删除书籍
   // --------------------------------------------------
 
   const handleDeleteBook =
@@ -516,44 +488,110 @@ const MingLightApp: React.FC = () => {
     );
 
   // --------------------------------------------------
-  // 重新计算分页
+  // 判断单双页
   // --------------------------------------------------
 
-  const updatePageCount =
+  const updateDeviceLayout =
     useCallback(() => {
       const el =
         readerRef.current;
 
       if (!el) return;
 
+      setIsTwoPage(
+        detectTwoPageMode(
+          el.clientWidth
+        )
+      );
+    }, []);
+
+  useEffect(() => {
+    if (!activeBook) return;
+
+    const timer =
+      window.setTimeout(
+        updateDeviceLayout,
+        80
+      );
+
+    window.addEventListener(
+      'resize',
+      updateDeviceLayout
+    );
+
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener(
+        'resize',
+        updateDeviceLayout
+      );
+    };
+  }, [
+    activeBook,
+    updateDeviceLayout,
+  ]);
+
+  // --------------------------------------------------
+  // 重新计算分页
+  // --------------------------------------------------
+
+  const updatePagination =
+    useCallback(() => {
+      const el =
+        readerRef.current;
+
       if (
-        progress?.readingMode !==
-        'paged'
+        !el ||
+        !progress ||
+        progress.readingMode !==
+          'paged'
       ) {
-        setPageCount(1);
         return;
       }
 
-      const count = Math.max(
+      const pagesPerSpread =
+        isTwoPage ? 2 : 1;
+
+      const columnWidth =
+        Math.max(
+          1,
+          el.clientWidth /
+            pagesPerSpread
+        );
+
+      const pages = Math.max(
         1,
-        Math.ceil(
+        Math.round(
           el.scrollWidth /
-            Math.max(
-              1,
-              el.clientWidth
-            )
+            columnWidth
         )
       );
 
-      setPageCount(count);
+      const spreads =
+        Math.max(
+          1,
+          Math.ceil(
+            pages /
+              pagesPerSpread
+          )
+        );
+
+      setTotalPages(pages);
+      setPageCount(spreads);
 
       setCurrentPage(p => {
         return Math.min(
           Math.max(1, p),
-          count
+          spreads
         );
       });
-    }, [progress?.readingMode]);
+
+      setReaderReady(true);
+    },
+    [
+      progress,
+      isTwoPage,
+    ]);
 
   useEffect(() => {
     if (
@@ -565,28 +603,310 @@ const MingLightApp: React.FC = () => {
 
     const timer =
       window.setTimeout(
-        updatePageCount,
-        100
+        updatePagination,
+        150
       );
 
     window.addEventListener(
       'resize',
-      updatePageCount
+      updatePagination
     );
 
     return () => {
       window.clearTimeout(timer);
       window.removeEventListener(
         'resize',
-        updatePageCount
+        updatePagination
       );
     };
   }, [
     activeBook,
     progress?.fontSize,
     progress?.readingMode,
-    updatePageCount,
+    isTwoPage,
+    updatePagination,
   ]);
+
+  // --------------------------------------------------
+  // 根据字符位置寻找真实页面
+  // --------------------------------------------------
+
+  const getTextOffsetPosition =
+    useCallback(
+      (offset: number) => {
+        const container =
+          textRef.current;
+
+        if (!container) {
+          return null;
+        }
+
+        const node =
+          container.firstChild;
+
+        if (
+          !node ||
+          node.nodeType !==
+            Node.TEXT_NODE
+        ) {
+          return null;
+        }
+
+        const text =
+          node.textContent || '';
+
+        const safeOffset =
+          Math.min(
+            Math.max(
+              0,
+              offset
+            ),
+            text.length
+          );
+
+        try {
+          const range =
+            document.createRange();
+
+          range.setStart(
+            node,
+            safeOffset
+          );
+
+          range.setEnd(
+            node,
+            safeOffset
+          );
+
+          const rect =
+            range.getBoundingClientRect();
+
+          const readerRect =
+            readerRef.current?.getBoundingClientRect();
+
+          if (!readerRect) {
+            return null;
+          }
+
+          return {
+            left:
+              rect.left -
+              readerRect.left,
+            top:
+              rect.top -
+              readerRect.top,
+          };
+        } catch {
+          return null;
+        }
+      },
+      []
+    );
+
+  // --------------------------------------------------
+  // 恢复上次阅读位置
+  // --------------------------------------------------
+
+  useEffect(() => {
+    if (
+      !activeBook ||
+      !progress ||
+      !readerReady ||
+      !restoringRef.current
+    ) {
+      return;
+    }
+
+    const timer =
+      window.setTimeout(() => {
+        const el =
+          readerRef.current;
+
+        if (!el) return;
+
+        const position =
+          getTextOffsetPosition(
+            progress.charOffset
+          );
+
+        if (
+          progress.readingMode ===
+          'paged'
+        ) {
+          if (
+            position &&
+            el.clientWidth
+          ) {
+            const spread =
+              Math.max(
+                0,
+                Math.floor(
+                  position.left /
+                    el.clientWidth
+                )
+              );
+
+            const page =
+              Math.min(
+                pageCount,
+                spread + 1
+              );
+
+            setCurrentPage(page);
+
+            el.scrollLeft =
+              spread *
+              el.clientWidth;
+          } else {
+            const ratio =
+              progress.charOffset /
+              Math.max(
+                1,
+                activeBook.rawText
+                  .length
+              );
+
+            el.scrollLeft =
+              ratio *
+              Math.max(
+                0,
+                el.scrollWidth -
+                  el.clientWidth
+              );
+          }
+        } else {
+          if (position) {
+            el.scrollTop =
+              Math.max(
+                0,
+                position.top
+              );
+          } else {
+            const ratio =
+              progress.charOffset /
+              Math.max(
+                1,
+                activeBook.rawText
+                  .length
+              );
+
+            el.scrollTop =
+              ratio *
+              Math.max(
+                0,
+                el.scrollHeight -
+                  el.clientHeight
+              );
+          }
+        }
+
+        restoringRef.current = false;
+      }, 120);
+
+    return () =>
+      window.clearTimeout(timer);
+  }, [
+    activeBook,
+    progress,
+    readerReady,
+    pageCount,
+    getTextOffsetPosition,
+  ]);
+
+  // --------------------------------------------------
+  // 跳转到指定章节
+  // --------------------------------------------------
+
+  const jumpToOffset =
+    useCallback(
+      (
+        offset: number
+      ) => {
+        const el =
+          readerRef.current;
+
+        if (!el) return;
+
+        const mode =
+          progress?.readingMode ||
+          'scroll';
+
+        const position =
+          getTextOffsetPosition(
+            offset
+          );
+
+        if (
+          mode === 'paged'
+        ) {
+          if (
+            position &&
+            el.clientWidth
+          ) {
+            const spread =
+              Math.max(
+                0,
+                Math.floor(
+                  position.left /
+                    el.clientWidth
+                )
+              );
+
+            const page =
+              Math.min(
+                pageCount,
+                spread + 1
+              );
+
+            setCurrentPage(page);
+
+            el.scrollTo({
+              left:
+                spread *
+                el.clientWidth,
+              behavior: 'smooth',
+            });
+
+            if (progress) {
+              scheduleSaveProgress({
+                ...progress,
+                page,
+                charOffset: offset,
+                updatedAt:
+                  Date.now(),
+              });
+            }
+          }
+
+          return;
+        }
+
+        if (position) {
+          el.scrollTo({
+            top: Math.max(
+              0,
+              position.top
+            ),
+            behavior: 'smooth',
+          });
+        }
+
+        if (progress) {
+          scheduleSaveProgress({
+            ...progress,
+            charOffset: offset,
+            updatedAt:
+              Date.now(),
+          });
+        }
+      },
+      [
+        progress,
+        pageCount,
+        getTextOffsetPosition,
+        scheduleSaveProgress,
+      ]
+    );
 
   // --------------------------------------------------
   // 翻页
@@ -600,7 +920,7 @@ const MingLightApp: React.FC = () => {
 
         if (!el) return;
 
-        const nextPage =
+        const next =
           Math.min(
             Math.max(1, page),
             pageCount
@@ -608,31 +928,37 @@ const MingLightApp: React.FC = () => {
 
         el.scrollTo({
           left:
-            (nextPage - 1) *
+            (next - 1) *
             el.clientWidth,
           behavior: 'smooth',
         });
 
-        setCurrentPage(nextPage);
+        setCurrentPage(next);
 
-        if (activeBook && progress) {
+        if (
+          activeBook &&
+          progress
+        ) {
           const ratio =
-            (nextPage - 1) /
+            (next - 1) /
             Math.max(
               1,
               pageCount
             );
 
-          const offset = Math.round(
-            ratio *
-              activeBook.rawText.length
-          );
+          const offset =
+            Math.round(
+              ratio *
+                activeBook.rawText
+                  .length
+            );
 
           scheduleSaveProgress({
             ...progress,
-            page: nextPage,
+            page: next,
             charOffset: offset,
-            updatedAt: Date.now(),
+            updatedAt:
+              Date.now(),
           });
         }
       },
@@ -656,7 +982,10 @@ const MingLightApp: React.FC = () => {
         const el =
           e.currentTarget;
 
-        if (!activeBook || !progress) {
+        if (
+          !activeBook ||
+          !progress
+        ) {
           return;
         }
 
@@ -664,22 +993,51 @@ const MingLightApp: React.FC = () => {
           progress.readingMode ===
           'paged'
         ) {
-          const page = Math.max(
-            1,
-            Math.round(
-              el.scrollLeft /
-                Math.max(
-                  1,
-                  el.clientWidth
-                )
-            ) + 1
-          );
+          const spread =
+            Math.max(
+              0,
+              Math.round(
+                el.scrollLeft /
+                  Math.max(
+                    1,
+                    el.clientWidth
+                  )
+              )
+            );
+
+          const page =
+            Math.min(
+              pageCount,
+              spread + 1
+            );
 
           if (
             page !== currentPage
           ) {
             setCurrentPage(page);
           }
+
+          const ratio =
+            spread /
+            Math.max(
+              1,
+              pageCount
+            );
+
+          const offset =
+            Math.round(
+              ratio *
+                activeBook.rawText
+                  .length
+            );
+
+          scheduleSaveProgress({
+            ...progress,
+            page,
+            charOffset: offset,
+            updatedAt:
+              Date.now(),
+          });
 
           return;
         }
@@ -702,12 +1060,14 @@ const MingLightApp: React.FC = () => {
         scheduleSaveProgress({
           ...progress,
           charOffset: offset,
-          updatedAt: Date.now(),
+          updatedAt:
+            Date.now(),
         });
       },
       [
         activeBook,
         progress,
+        pageCount,
         currentPage,
         scheduleSaveProgress,
       ]
@@ -722,51 +1082,47 @@ const MingLightApp: React.FC = () => {
       (
         mode: MingLightReadingMode
       ) => {
-        if (
-          !progress
-        ) return;
+        if (!progress) return;
+
+        restoringRef.current = false;
 
         scheduleSaveProgress({
           ...progress,
           readingMode: mode,
-          page:
-            mode === 'paged'
-              ? 1
-              : progress.page,
-          updatedAt:
-            Date.now(),
+          page: 1,
+          updatedAt: Date.now(),
         });
 
         setCurrentPage(1);
 
-        requestAnimationFrame(
-          () => {
-            const el =
-              readerRef.current;
+        requestAnimationFrame(() => {
+          const el =
+            readerRef.current;
 
-            if (!el) return;
+          if (!el) return;
 
-            if (
-              mode === 'paged'
-            ) {
-              el.scrollTop = 0;
-              el.scrollLeft = 0;
+          el.scrollTop = 0;
+          el.scrollLeft = 0;
 
-              requestAnimationFrame(
-                updatePageCount
-              );
-            } else {
-              el.scrollLeft = 0;
-            }
-          }
-        );
+          setReaderReady(false);
+
+          window.setTimeout(() => {
+            updateDeviceLayout();
+            updatePagination();
+          }, 120);
+        });
       },
       [
         progress,
         scheduleSaveProgress,
-        updatePageCount,
+        updateDeviceLayout,
+        updatePagination,
       ]
     );
+
+  // --------------------------------------------------
+  // 无角色
+  // --------------------------------------------------
 
   if (
     !activeCharacterId ||
@@ -796,9 +1152,25 @@ const MingLightApp: React.FC = () => {
       progress.readingMode ||
       'scroll';
 
+    const pagesPerSpread =
+      isTwoPage ? 2 : 1;
+
+    const firstVisiblePage =
+      isTwoPage
+        ? currentPage * 2 - 1
+        : currentPage;
+
+    const lastVisiblePage =
+      Math.min(
+        totalPages,
+        firstVisiblePage +
+          pagesPerSpread -
+          1
+      );
+
     return (
       <div
-        className="h-full flex flex-col"
+        className="h-full flex flex-col relative"
         style={{
           background:
             theme.bg,
@@ -806,6 +1178,43 @@ const MingLightApp: React.FC = () => {
             theme.text,
         }}
       >
+        {/* 自定义滚动条 */}
+        <style>
+          {`
+            .minglight-reader::-webkit-scrollbar {
+              width: 16px;
+              height: 16px;
+            }
+
+            .minglight-reader::-webkit-scrollbar-track {
+              background: transparent;
+            }
+
+            .minglight-reader::-webkit-scrollbar-thumb {
+              background: rgba(100,100,100,.42);
+              border-radius: 10px;
+              border: 3px solid transparent;
+              background-clip: padding-box;
+              min-height: 48px;
+            }
+
+            .minglight-reader::-webkit-scrollbar-thumb:hover,
+            .minglight-reader::-webkit-scrollbar-thumb:active {
+              background: rgba(100,100,100,.62);
+              border: 2px solid transparent;
+              background-clip: padding-box;
+            }
+
+            .minglight-reader {
+              scrollbar-width: auto;
+              scrollbar-color:
+                rgba(100,100,100,.42)
+                transparent;
+              -webkit-overflow-scrolling: touch;
+            }
+          `}
+        </style>
+
         {/* 顶部栏 */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-black/10 shrink-0">
           <button
@@ -821,7 +1230,7 @@ const MingLightApp: React.FC = () => {
             />
           </button>
 
-          <div className="text-sm font-medium truncate max-w-[55%] text-center">
+          <div className="text-sm font-medium truncate max-w-[60%] text-center">
             {activeBook.title}
           </div>
 
@@ -833,7 +1242,7 @@ const MingLightApp: React.FC = () => {
           </button>
         </div>
 
-        {/* 工具条 */}
+        {/* 工具栏 */}
         <div className="flex items-center justify-center gap-2 py-2 border-b border-black/10 flex-wrap shrink-0">
           {(
             Object.keys(
@@ -867,6 +1276,7 @@ const MingLightApp: React.FC = () => {
             </button>
           ))}
 
+          {/* 字号 */}
           <div className="flex items-center gap-1 ml-2">
             <TextAa size={14} />
 
@@ -882,8 +1292,7 @@ const MingLightApp: React.FC = () => {
                   ...progress,
                   fontSize:
                     Number(
-                      e.target
-                        .value
+                      e.target.value
                     ),
                   updatedAt:
                     Date.now(),
@@ -928,139 +1337,72 @@ const MingLightApp: React.FC = () => {
           </button>
         </div>
 
-        {/* 正文 */}
+        {/* 正文阅读区 */}
         <div
           ref={readerRef}
-          onScroll={
-            handleReaderScroll
-          }
-          className={`flex-1 ${
+          className={`minglight-reader flex-1 ${
             readingMode ===
             'paged'
               ? 'overflow-x-auto overflow-y-hidden'
               : 'overflow-y-auto overflow-x-hidden'
           }`}
+          onScroll={
+            handleReaderScroll
+          }
           style={{
-            scrollbarWidth:
-              'auto',
-            scrollbarColor:
-              'rgba(100,100,100,.45) transparent',
-          }}
-        >
-          <style>
-            {`
-              .minglight-reader::-webkit-scrollbar {
-                width: 14px;
-                height: 14px;
-              }
-
-              .minglight-reader::-webkit-scrollbar-track {
-                background: transparent;
-              }
-
-              .minglight-reader::-webkit-scrollbar-thumb {
-                background: rgba(100,100,100,.45);
-                border-radius: 8px;
-                border: 3px solid transparent;
-                background-clip: padding-box;
-              }
-
-              .minglight-reader::-webkit-scrollbar-thumb:hover {
-                background: rgba(100,100,100,.65);
-                background-clip: padding-box;
-              }
-            `}
-          </style>
-
-          <div
-            className={
+            scrollSnapType:
               readingMode ===
               'paged'
-                ? 'flex h-full'
-                : ''
-            }
-            style={{
-              width:
-                readingMode ===
-                'paged'
-                  ? `${pageCount * 100}%`
+                ? 'x mandatory'
+                : undefined,
+            overscrollBehavior:
+              'contain',
+          }}
+        >
+          {readingMode ===
+          'paged' ? (
+            <div
+              ref={textRef}
+              className="h-full"
+              style={{
+                columnWidth: isTwoPage
+                  ? '50%'
                   : '100%',
-            }}
-          >
-            {readingMode ===
-            'paged' ? (
-              Array.from({
-                length:
-                  pageCount,
-              }).map(
-                (_, pageIndex) => {
-                  const pageSize =
-                    Math.ceil(
-                      activeBook
-                        .rawText
-                        .length /
-                        pageCount
-                    );
-
-                  const start =
-                    pageIndex *
-                    pageSize;
-
-                  const end =
-                    Math.min(
-                      activeBook
-                        .rawText
-                        .length,
-                      start +
-                        pageSize
-                    );
-
-                  return (
-                    <div
-                      key={
-                        pageIndex
-                      }
-                      className="h-full px-7 py-6 overflow-hidden whitespace-pre-wrap leading-relaxed"
-                      style={{
-                        width: `${100 / pageCount}%`,
-                        fontSize:
-                          progress.fontSize,
-                      }}
-                    >
-                      {
-                        activeBook
-                          .rawText
-                          .slice(
-                            start,
-                            end
-                          )
-                      }
-                    </div>
-                  );
-                }
-              )
-            ) : (
-              <div
-                className="px-5 py-6 whitespace-pre-wrap leading-relaxed"
-                style={{
-                  fontSize:
-                    progress.fontSize,
-                  minHeight:
-                    '100%',
-                }}
-              >
-                {
-                  activeBook.rawText
-                }
-              </div>
-            )}
-          </div>
+                columnGap: 0,
+                columnFill: 'auto',
+                height: '100%',
+                width: '100%',
+                padding:
+                  '24px 28px',
+                fontSize:
+                  progress.fontSize,
+                lineHeight: 1.9,
+                whiteSpace:
+                  'pre-wrap',
+              }}
+            >
+              {activeBook.rawText}
+            </div>
+          ) : (
+            <div
+              ref={textRef}
+              className="px-5 py-6 whitespace-pre-wrap leading-relaxed"
+              style={{
+                fontSize:
+                  progress.fontSize,
+                minHeight:
+                  '100%',
+              }}
+            >
+              {activeBook.rawText}
+            </div>
+          )}
         </div>
 
-        {/* 翻页底栏 */}
+        {/* 分页底栏 */}
         {readingMode ===
           'paged' && (
-          <div className="flex items-center justify-center gap-6 py-3 border-t border-black/10 shrink-0">
+          <div className="flex items-center justify-center gap-4 py-3 border-t border-black/10 shrink-0">
             <button
               onClick={() =>
                 goToPage(
@@ -1070,14 +1412,21 @@ const MingLightApp: React.FC = () => {
               disabled={
                 currentPage <= 1
               }
-              className="px-3 py-1 rounded-full text-sm border border-black/10 disabled:opacity-30"
+              className="w-9 h-9 rounded-full border border-black/10 flex items-center justify-center disabled:opacity-25"
             >
-              上一页
+              <PrevIcon
+                size={18}
+              />
             </button>
 
-            <div className="text-xs opacity-60">
-              {currentPage} /{' '}
-              {pageCount}
+            <div className="text-xs opacity-60 min-w-[70px] text-center">
+              {isTwoPage &&
+              firstVisiblePage <
+                totalPages
+                ? `${firstVisiblePage}–${lastVisiblePage}`
+                : `${firstVisiblePage}`}
+              {' / '}
+              {totalPages}
             </div>
 
             <button
@@ -1090,22 +1439,24 @@ const MingLightApp: React.FC = () => {
                 currentPage >=
                 pageCount
               }
-              className="px-3 py-1 rounded-full text-sm border border-black/10 disabled:opacity-30"
+              className="w-9 h-9 rounded-full border border-black/10 flex items-center justify-center disabled:opacity-25"
             >
-              下一页
+              <NextIcon
+                size={18}
+              />
             </button>
           </div>
         )}
 
-        {/* 左下角目录按钮 */}
+        {/* 左下角目录 */}
         <button
           onClick={() =>
             setShowChapters(
               v => !v
             )
           }
-          className="fixed bottom-4 left-4 z-20 w-11 h-11 rounded-full bg-black/10 backdrop-blur flex items-center justify-center shadow"
-          aria-label="打开目录"
+          className="fixed bottom-16 left-4 z-20 w-11 h-11 rounded-full bg-black/10 backdrop-blur flex items-center justify-center shadow"
+          aria-label="目录"
         >
           <List size={20} />
         </button>
@@ -1121,7 +1472,7 @@ const MingLightApp: React.FC = () => {
             }
           >
             <div
-              className="absolute left-0 top-0 bottom-0 w-[82%] max-w-[360px] bg-white text-gray-800 shadow-xl flex flex-col"
+              className="absolute left-0 top-0 bottom-0 w-[82%] max-w-[380px] bg-white text-gray-800 shadow-xl flex flex-col"
               onClick={e =>
                 e.stopPropagation()
               }
@@ -1151,92 +1502,35 @@ const MingLightApp: React.FC = () => {
               </div>
 
               <div className="flex-1 overflow-y-auto">
-                {activeBook.chapters
-                  .map(
-                    (
-                      chapter,
-                      index
-                    ) => (
-                      <button
-                        key={`${chapter.index}_${index}`}
-                        onClick={() => {
-                          setShowChapters(
-                            false
-                          );
+                {activeBook.chapters.map(
+                  (
+                    chapter,
+                    index
+                  ) => (
+                    <button
+                      key={`${chapter.index}_${index}`}
+                      onClick={() => {
+                        setShowChapters(
+                          false
+                        );
 
-                          if (
-                            readingMode ===
-                            'paged'
-                          ) {
-                            const ratio =
-                              chapter.startOffset /
-                              Math.max(
-                                1,
-                                activeBook
-                                  .rawText
-                                  .length
-                              );
-
-                            const page =
-                              Math.max(
-                                1,
-                                Math.min(
-                                  pageCount,
-                                  Math.ceil(
-                                    ratio *
-                                      pageCount
-                                  )
-                                )
-                              );
-
-                            goToPage(
-                              page
+                        requestAnimationFrame(
+                          () => {
+                            jumpToOffset(
+                              chapter.startOffset
                             );
-                          } else {
-                            const el =
-                              readerRef.current;
-
-                            if (el) {
-                              const ratio =
-                                chapter.startOffset /
-                                Math.max(
-                                  1,
-                                  activeBook
-                                    .rawText
-                                    .length
-                                );
-
-                              el.scrollTo(
-                                {
-                                  top:
-                                    ratio *
-                                    Math.max(
-                                      0,
-                                      el.scrollHeight -
-                                        el.clientHeight
-                                    ),
-                                  behavior:
-                                    'smooth',
-                                }
-                              );
-                            }
-
-                            scheduleSaveProgress({
-                              ...progress,
-                              charOffset:
-                                chapter.startOffset,
-                              updatedAt:
-                                Date.now(),
-                            });
                           }
-                        }}
-                        className="w-full text-left px-4 py-3 border-b border-gray-100 text-sm hover:bg-gray-50"
-                      >
-                        {chapter.title ||
-                          `第 ${index + 1} 章`}
-                      </button>
-                    )
-                  )}
+                        );
+                      }}
+                      className="w-full text-left px-4 py-3 border-b border-gray-100 text-sm hover:bg-gray-50 active:bg-gray-100"
+                    >
+                      {chapter.title ||
+                        `第 ${
+                          index + 1
+                        } 章`}
+                    </button>
+                  )
+                )}
 
                 {activeBook.chapters
                   .length === 0 && (
@@ -1263,7 +1557,9 @@ const MingLightApp: React.FC = () => {
           onClick={closeApp}
           className="p-1"
         >
-          <CaretLeft size={22} />
+          <CaretLeft
+            size={22}
+          />
         </button>
 
         <div className="text-base font-semibold">
