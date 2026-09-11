@@ -1055,19 +1055,33 @@ const MingLightApp: React.FC = () => {
       const el = readerRef.current;
       if (!el) return;
 
-      const ratio =
-        startOffset /
-        Math.max(1, activeBook.rawText.length);
+      // 找到这一章的第一段，直接滚到它真实的 DOM 位置。
+      // 以前是用「起始字符数 ÷ 全书字数 × 可滚动高度」估的，段落长短不一、
+      // 字号一调行高就变，估出来的位置必然和章节开头对不上。
+      const target =
+        paragraphs.find(p => p.endOffset > startOffset) || paragraphs[0];
 
-      el.scrollTo({
-        top:
-          ratio *
-          Math.max(
-            0,
-            el.scrollHeight - el.clientHeight,
-          ),
-        behavior: 'smooth',
-      });
+      const node = target
+        ? (el.querySelector(
+            `[data-ml-paragraph="${target.index}"]`,
+          ) as HTMLElement | null)
+        : null;
+
+      if (node) {
+        const top =
+          node.getBoundingClientRect().top -
+          el.getBoundingClientRect().top +
+          el.scrollTop;
+
+        el.scrollTo({ top: Math.max(0, top - 8), behavior: 'smooth' });
+      } else {
+        // 段落还没渲染出来时的兜底，仍按比例滚一次
+        const ratio = startOffset / Math.max(1, activeBook.rawText.length);
+        el.scrollTo({
+          top: ratio * Math.max(0, el.scrollHeight - el.clientHeight),
+          behavior: 'smooth',
+        });
+      }
 
       scheduleSaveProgress({
         ...progress,
@@ -1077,7 +1091,7 @@ const MingLightApp: React.FC = () => {
 
       setShowChapters(false);
     },
-    [activeBook, progress, scheduleSaveProgress],
+    [activeBook, progress, paragraphs, scheduleSaveProgress],
   );
 
   // ---------------- 选中操作定位 ----------------
@@ -1446,8 +1460,12 @@ const MingLightApp: React.FC = () => {
                   return (
                     <div
                       key={`${chapter.index}_${index}`}
-                      className="w-full flex items-center justify-between px-4 py-3 text-sm active:opacity-60"
-                      style={{ borderBottom: `1px solid ${theme.text}12` }}
+                      className="w-full flex items-center justify-between pr-4 py-3 text-sm active:opacity-60"
+                      style={{
+                        borderBottom: `1px solid ${theme.text}12`,
+                        paddingLeft: 16 + (chapter.level || 0) * 16,
+                        opacity: (chapter.level || 0) > 0 ? 0.75 : 1,
+                      }}
                     >
                       <button
                         onClick={() => jumpToChapter(chapter.startOffset)}
