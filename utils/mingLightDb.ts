@@ -16,10 +16,11 @@
 import JSZip from 'jszip';
 
 const DB_NAME = 'SullyOS_MingLight';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 const STORE_BOOKS = 'books';
 const STORE_PROGRESS = 'progress';
+const STORE_CHAPTER_SUMMARIES = 'chapterSummaries';
 
 export type MingLightTheme = 'day' | 'sepia' | 'green' | 'night';
 export type MingLightReadingMode = 'scroll' | 'paged';
@@ -32,6 +33,7 @@ export interface MingLightBook {
   coverUrl?: string;
   rawText: string;
   chapters: MingLightChapter[];
+  annotations: MingLightAnnotation[];
   createdAt: number;
 }
 
@@ -86,6 +88,16 @@ export interface MingLightProgress {
   /** 已主动检查到的正文位置，用于控制 TA 每约 750 字只检查一次。 */
   taCheckedOffset?: number;
   updatedAt: number;
+}
+
+export interface MingLightChapterSummary {
+  id: string; // `${bookId}__${chapterIndex}__${charId}`
+  bookId: string;
+  charId: string;
+  chapterIndex: number;
+  subjective: string; // TA带人设的主观读后感
+  objective: string;  // 不带人设的客观内容总结
+  createdAt: number;
 }
 
 export interface MingLightImportedBook {
@@ -439,6 +451,13 @@ function openDb(): Promise<IDBDatabase> {
           unique: false,
         });
       }
+
+      if (!db.objectStoreNames.contains(STORE_CHAPTER_SUMMARIES)) {
+        const store = db.createObjectStore(STORE_CHAPTER_SUMMARIES, {
+          keyPath: 'id',
+        });
+        store.createIndex('bookId', 'bookId', { unique: false });
+      }
     };
 
     req.onsuccess = () => resolve(req.result);
@@ -605,6 +624,41 @@ export async function saveProgress(
 
     tx.objectStore(STORE_PROGRESS).put(progress);
 
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+// ---------- 章节总结 ----------
+
+export async function getChapterSummary(
+  bookId: string, chapterIndex: number, charId: string
+): Promise<MingLightChapterSummary | null> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_CHAPTER_SUMMARIES, 'readonly');
+    const req = tx.objectStore(STORE_CHAPTER_SUMMARIES).get(`${bookId}__${chapterIndex}__${charId}`);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function getChapterSummariesForBook(bookId: string): Promise<MingLightChapterSummary[]> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_CHAPTER_SUMMARIES, 'readonly');
+    const idx = tx.objectStore(STORE_CHAPTER_SUMMARIES).index('bookId');
+    const req = idx.getAll(bookId);
+    req.onsuccess = () => resolve((req.result || []).sort((a, b) => a.chapterIndex - b.chapterIndex));
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function saveChapterSummary(s: MingLightChapterSummary): Promise<void> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_CHAPTER_SUMMARIES, 'readwrite');
+    tx.objectStore(STORE_CHAPTER_SUMMARIES).put(s);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
