@@ -61,6 +61,12 @@ import {
   askTaToReply,
   archiveAnnotationThread,
 } from '../utils/mingLightAnnotations';
+import {
+  notifyMingLightMinimized,
+  notifyMingLightOpened,
+  notifyMingLightClosed,
+  getMingLightLastBook,
+} from '../utils/mingLightBridge';
 
 const THEME_STYLES: Record<
   MingLightTheme,
@@ -258,6 +264,9 @@ const MingLightApp: React.FC = () => {
     memoryPalaceConfig,
   } = useOS();
 
+  // 缩小成悬浮球 / 重新展开时，跟悬浮球互相通知
+  const resumeTriedRef = useRef(false);
+
   const char = characters.find(
     c => c.id === activeCharacterId,
   );
@@ -372,9 +381,22 @@ const MingLightApp: React.FC = () => {
       setShowChapters(false);
       setSelectedAnnotation(null);
       setShowSelectionMenu(false);
+      notifyMingLightOpened(book.id);
     },
     [activeCharacterId],
   );
+
+  // 从悬浮球点回来的：书架加载完之后，如果之前缩小时留了「最近这本书」，
+  // 自动帮用户跳回去，不用再从书架重新点一次。
+  useEffect(() => {
+    if (loading || resumeTriedRef.current || activeBook) return;
+    resumeTriedRef.current = true;
+    const lastId = getMingLightLastBook();
+    if (lastId) {
+      const found = books.find(b => b.id === lastId);
+      if (found) openBook(found);
+    }
+  }, [loading, books, activeBook, openBook]);
 
   // ---------------- 文件导入 ----------------
 
@@ -1074,9 +1096,28 @@ const MingLightApp: React.FC = () => {
             {activeBook.title}
           </div>
 
-          <button onClick={closeApp} className="p-1">
-            <X size={20} />
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => {
+                notifyMingLightMinimized(activeBook.id);
+                closeApp();
+              }}
+              className="p-1 text-xs border rounded-full px-2"
+              style={{ borderColor: `${theme.text}40` }}
+              aria-label="缩小成悬浮球"
+            >
+              缩小
+            </button>
+            <button
+              onClick={() => {
+                notifyMingLightClosed();
+                closeApp();
+              }}
+              className="p-1"
+            >
+              <X size={20} />
+            </button>
+          </div>
         </div>
 
         {/* 工具栏 */}
@@ -1513,7 +1554,13 @@ const MingLightApp: React.FC = () => {
   return (
     <div className="h-full flex flex-col bg-[#F7F2EA]">
       <div className="flex items-center justify-between px-4 py-3">
-        <button onClick={closeApp} className="p-1">
+        <button
+          onClick={() => {
+            notifyMingLightClosed();
+            closeApp();
+          }}
+          className="p-1"
+        >
           <CaretLeft size={22} />
         </button>
 
