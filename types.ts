@@ -1,5 +1,6 @@
 
 export enum AppID {
+  Reading = 'reading',
   Launcher = 'launcher',
   Settings = 'settings',
   Character = 'character',
