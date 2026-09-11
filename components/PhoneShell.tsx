@@ -3,6 +3,7 @@
 
 import React, { useState, useEffect, useMemo, useRef, Suspense } from 'react';
 import { IMPORT_IN_PROGRESS_KEY, useOS } from '../context/OSContext';
+import MingLightApp from '../apps/MingLightApp';
 import StatusBar from './os/StatusBar';
 import Launcher from '../apps/Launcher';
 import CompanionLockChrome from './os/CompanionLockChrome';
@@ -18,7 +19,6 @@ import { createPreloadableLazy, type PreloadableLazy } from './os/preloadableLaz
 // 绝不能在冷启动阶段并发扫完整个列表：低端设备会同时下载、解压和解析几十个 chunk，
 // 反而拖死用户此刻真正要打开的那个 App。
 const lazyApp = createPreloadableLazy;
-
 const Settings = lazyApp(() => import('../apps/Settings'));
 const Character = lazyApp(() => import('../apps/Character'));
 const Chat = lazyApp(() => import('../apps/Chat'));
