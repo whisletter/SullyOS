@@ -1652,4 +1652,181 @@ const MingLightApp: React.FC = () => {
               >
                 <div className="flex items-center gap-2 mb-3">
                   <button
-               
+                    onClick={archiveSelectedAnnotation}
+                    disabled={savingMemory || !!selectedAnnotation.archivedAt}
+                    className="text-[11px] px-3 py-1.5 rounded-full border flex items-center gap-1 disabled:opacity-40"
+                    style={{ borderColor: `${theme.text}20` }}
+                  >
+                    <BookmarkSimple size={13} />
+                    {selectedAnnotation.archivedAt
+                      ? '已收藏进记忆宫殿'
+                      : savingMemory
+                        ? '收藏中…'
+                        : '收藏进记忆宫殿'}
+                  </button>
+                </div>
+
+                <div className="flex items-end gap-2">
+                  <textarea
+                    value={replyText}
+                    onChange={e => setReplyText(e.target.value)}
+                    placeholder="回复这句话……"
+                    className="flex-1 min-h-[44px] max-h-[100px] rounded-xl border border-black/10 bg-transparent p-2.5 text-sm outline-none resize-none"
+                  />
+                  <button
+                    onClick={sendReply}
+                    disabled={!replyText.trim() || sendingReply}
+                    className="w-10 h-10 rounded-full flex items-center justify-center bg-black/10 disabled:opacity-30"
+                    aria-label="发送"
+                  >
+                    <PaperPlaneTilt size={17} />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ==================================================
+  // 书架
+  // ==================================================
+
+  return (
+    <div className="h-full flex flex-col bg-[#F7F2EA]">
+      <div className="flex items-center justify-between px-4 py-3">
+        <button
+          onClick={() => {
+            notifyMingLightClosed();
+            closeApp();
+          }}
+          className="p-1"
+        >
+          <CaretLeft size={22} />
+        </button>
+
+        <div className="text-base font-semibold">
+          眠光 · 和{char.name}的书架
+        </div>
+
+        <button
+          onClick={() => setShowImportModal(true)}
+          className="p-1"
+        >
+          <Plus size={22} />
+        </button>
+      </div>
+
+      {loading ? (
+        <div className="flex-1 flex items-center justify-center text-gray-400 text-sm">
+          加载中…
+        </div>
+      ) : books.length === 0 ? (
+        <div className="flex-1 flex flex-col items-center justify-center text-gray-400 gap-3 px-8 text-center">
+          <BookOpen size={40} />
+          <div className="text-sm">
+            书架还是空的，导入一本 TXT 或 EPUB 开始共读吧
+          </div>
+          <button
+            onClick={() => setShowImportModal(true)}
+            className="px-4 py-2 bg-amber-700 text-white rounded-full text-sm"
+          >
+            导入第一本书
+          </button>
+        </div>
+      ) : (
+        <div className="flex-1 overflow-y-auto grid grid-cols-3 gap-4 p-4">
+          {books.map(book => (
+            <div
+              key={book.id}
+              className="flex flex-col items-center gap-1"
+              onClick={() => openBook(book)}
+            >
+              <div className="w-full aspect-[3/4] rounded-md bg-amber-100 border border-amber-300 flex items-center justify-center overflow-hidden relative group">
+                {book.coverUrl ? (
+                  <img
+                    src={book.coverUrl}
+                    alt={book.title}
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <BookOpen
+                    size={28}
+                    className="text-amber-700"
+                  />
+                )}
+
+                <button
+                  onClick={e => {
+                    e.stopPropagation();
+                    handleDeleteBook(book.id);
+                  }}
+                  className="absolute top-1 right-1 bg-black/40 text-white rounded-full p-0.5 opacity-0 group-active:opacity-100"
+                >
+                  <Trash size={12} />
+                </button>
+              </div>
+
+              <div className="text-xs text-center truncate w-full">
+                {book.title}
+              </div>
+
+              {book.author && (
+                <div className="text-[10px] text-gray-400 text-center truncate w-full">
+                  {book.author}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* 导入弹窗 */}
+      {showImportModal && (
+        <div
+          className="absolute inset-0 bg-black/40 flex items-center justify-center z-10"
+          onClick={() => setShowImportModal(false)}
+        >
+          <div
+            className="bg-white rounded-xl p-5 w-[80%] flex flex-col items-center gap-3"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="text-sm text-gray-600 text-center">
+              支持导入 TXT 和 EPUB
+            </div>
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".txt,text/plain,.epub,application/epub+zip"
+              className="hidden"
+              onChange={e => {
+                const f = e.target.files?.[0];
+                if (f) handleFileChosen(f);
+                e.currentTarget.value = '';
+              }}
+            />
+
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="px-4 py-2 bg-amber-700 text-white rounded-full text-sm w-full"
+            >
+              选择文件
+            </button>
+
+            <button
+              onClick={() => setShowImportModal(false)}
+              className="text-xs text-gray-400"
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default MingLightApp;
