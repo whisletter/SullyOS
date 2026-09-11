@@ -4,7 +4,6 @@
 import React, { useState, useEffect, useMemo, useRef, Suspense } from 'react';
 import { IMPORT_IN_PROGRESS_KEY, useOS } from '../context/OSContext';
 import MingLightApp from '../apps/MingLightApp';
-import MingLightMiniBall from './os/MingLightMiniBall';
 import StatusBar from './os/StatusBar';
 import Launcher from '../apps/Launcher';
 import CompanionLockChrome from './os/CompanionLockChrome';
@@ -113,6 +112,7 @@ import { Capacitor } from '@capacitor/core';
 import { isIOSStandaloneWebApp, resolveStatusBarMode } from '../utils/iosStandalone';
 import AppErrorBoundary from './os/AppErrorBoundary';
 import GlobalMiniPlayer from './os/GlobalMiniPlayer';
+import MingLightMiniBall from './os/MingLightMiniBall';
 import PersonaSimIndicator from './os/PersonaSimIndicator';
 import DreamSimIndicator from './os/DreamSimIndicator';
 import ErrorDialog from './os/ErrorDialog';
@@ -1066,6 +1066,7 @@ const PhoneShell: React.FC = () => {
 
           {/* Overlays: Global Mini Player (when music is playing in background) */}
           <GlobalMiniPlayer />
+          <MingLightMiniBall />
 
           {/* Overlays: 人格模拟生成全局指示条 */}
           <PersonaSimIndicator />
