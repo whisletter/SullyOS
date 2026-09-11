@@ -73,6 +73,12 @@ import {
   getMingLightLastBook,
 } from '../utils/mingLightBridge';
 
+/**
+ * 一次滚动前进超过这么多字，就认为是目录跳转 / 恢复进度之类的跳跃，
+ * 而不是真的读过去了，不触发章末总结。正常一屏也就几百字，留足余量。
+ */
+const CHAPTER_CROSS_LIMIT = 5000;
+
 const THEME_STYLES: Record<
   MingLightTheme,
   {
@@ -195,6 +201,84 @@ function parseParagraphs(rawText: string): Paragraph[] {
       }];
 }
 
+/**
+ * 用真实的 DOM 位置换算「读到第几个字了」。
+ *
+ * 以前这里是 scrollTop ÷ 可滚动高度 × 全书字数。那个值虽然随滚动单调递增，
+ * 但和真实位置的误差能到几百上千字：段落长短不均、字号可调、批注高亮还会撑高
+ * 行盒。像「判断有没有读完这一章」这种要求精确的地方，估算值一律不能用。
+ *
+ * edge 取 'top' 是视口顶端（回来时接着读的位置），取 'bottom' 是视口底端
+ * （已经读完的位置）。段落在文档流里自上而下排列，位置单调，所以可以二分，
+ * 不用每次滚动都遍历几千个段落。
+ */
+function offsetAtViewportEdge(
+  container: HTMLElement,
+  nodes: HTMLElement[],
+  paragraphs: Paragraph[],
+  edge: 'top' | 'bottom',
+): number {
+  if (!nodes.length || !paragraphs.length) return 0;
+
+  const box = container.getBoundingClientRect();
+  const line = edge === 'top' ? box.top : box.bottom;
+
+  let lo = 0;
+  let hi = nodes.length - 1;
+  let hit = edge === 'top' ? 0 : nodes.length - 1;
+
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (nodes[mid].getBoundingClientRect().bottom < line) {
+      lo = mid + 1;
+    } else {
+      hit = mid;
+      hi = mid - 1;
+    }
+  }
+
+  const paragraph = paragraphs[Number(nodes[hit].dataset.mlParagraph)];
+  if (!paragraph) return 0;
+
+  return edge === 'top' ? paragraph.startOffset : paragraph.endOffset;
+}
+
+/** 滚到某个字符位置所在的那一段。目录跳转和恢复进度共用这一个实现。 */
+function scrollToOffset(
+  container: HTMLElement,
+  paragraphs: Paragraph[],
+  offset: number,
+  totalLength: number,
+  behavior: ScrollBehavior,
+) {
+  const target =
+    paragraphs.find(p => p.endOffset > offset) ||
+    paragraphs[paragraphs.length - 1];
+
+  const node = target
+    ? (container.querySelector(
+        `[data-ml-paragraph="${target.index}"]`,
+      ) as HTMLElement | null)
+    : null;
+
+  if (node) {
+    const top =
+      node.getBoundingClientRect().top -
+      container.getBoundingClientRect().top +
+      container.scrollTop;
+
+    container.scrollTo({ top: Math.max(0, top - 8), behavior });
+    return;
+  }
+
+  // 段落还没渲染出来时的兜底
+  const ratio = offset / Math.max(1, totalLength);
+  container.scrollTo({
+    top: ratio * Math.max(0, container.scrollHeight - container.clientHeight),
+    behavior,
+  });
+}
+
 function getParagraphAnnotationRange(
   annotation: MingLightAnnotation,
   paragraph: Paragraph,
@@ -308,6 +392,10 @@ const MingLightApp: React.FC = () => {
   const lastAutoCheckRef = useRef(0);
   const autoBusyRef = useRef(false);
   const summaryBusyRef = useRef(false);
+  /** 已经读过的最远位置。章末总结靠「这一轮滚动有没有跨过章尾」来判定。 */
+  const readHighWaterRef = useRef(0);
+  /** 段落 DOM 节点缓存，供滚动时二分查找当前阅读位置。 */
+  const paragraphNodesRef = useRef<HTMLElement[]>([]);
 
   const paragraphs = useMemo(
     () => (activeBook ? parseParagraphs(activeBook.rawText) : []),
@@ -386,6 +474,8 @@ const MingLightApp: React.FC = () => {
       setActiveBook(book);
       setProgress(next);
       lastAutoCheckRef.current = next.taCheckedOffset || 0;
+      readHighWaterRef.current = next.charOffset || 0;
+      paragraphNodesRef.current = [];
       restoringRef.current = true;
       setShowChapters(false);
       setSelectedAnnotation(null);
@@ -513,16 +603,17 @@ const MingLightApp: React.FC = () => {
     const timer = window.setTimeout(() => {
       const el = readerRef.current;
       if (!el) return;
-      const ratio =
-        progress.charOffset /
-        Math.max(1, activeBook.rawText.length);
-      el.scrollTop =
-        ratio *
-        Math.max(0, el.scrollHeight - el.clientHeight);
+      scrollToOffset(
+        el,
+        paragraphs,
+        progress.charOffset,
+        activeBook.rawText.length,
+        'auto',
+      );
       restoringRef.current = false;
     }, 150);
     return () => window.clearTimeout(timer);
-  }, [activeBook, progress]);
+  }, [activeBook, progress, paragraphs]);
 
   // ---------------- TA 自动共读 ----------------
 
@@ -648,25 +739,54 @@ const MingLightApp: React.FC = () => {
 
   const maybeGenerateChapterSummary = useCallback(
     async (offset: number) => {
+      if (!activeBook || !activeCharacterId) return;
+
+      const prev = readHighWaterRef.current;
+      if (offset <= prev) return; // 往回翻不算读完
+
+      // 目录跳转、恢复进度这类大跨度移动不能算「读完」，否则会把中间跳过的
+      // 章节一次性全部补生成一遍。直接把水位挪过去。
+      if (offset - prev > CHAPTER_CROSS_LIMIT) {
+        readHighWaterRef.current = offset;
+        return;
+      }
+
+      // 真正的判定：这一轮滚动有没有跨过某一章的结尾。
+      // 以前是 `offset >= ch.endOffset && offset < 下一章.startOffset + 1`，
+      // 也就是要求估算出来的 offset 正好落在章节交界那两三个字符里。而 offset
+      // 是按滚动比例换算的，每次滚动事件往前跳好几十甚至上百字，这个窗口基本
+      // 撞不上——除了最后一章（下一章起点是 Infinity，条件退化成「滚到底」），
+      // 所以之前只有读完整本书时才偶尔弹一次。
+      const finishedChapter = [...activeBook.chapters]
+        .reverse()
+        .find(
+          ch =>
+            ch.endOffset > ch.startOffset &&
+            ch.endOffset > prev &&
+            ch.endOffset <= offset,
+        );
+
+      if (!finishedChapter) {
+        readHighWaterRef.current = offset;
+        return;
+      }
+
+      // 跨过章尾了但这会儿生成不了（正在生成 / 没配好接口）：先不推进水位，
+      // 等条件具备时下一次滚动还能补上，不至于永久错过这一章。
       if (
-        !activeBook ||
         summaryBusyRef.current ||
         !apiConfig?.baseUrl ||
-        !apiConfig?.model ||
-        !activeCharacterId
+        !apiConfig?.model
       ) {
         return;
       }
 
-      // 找到「刚好读完」的那一章：offset 已经越过它的结尾，且下一章还没开始
-      // （或者这已经是最后一章）。
-      const finishedChapter = activeBook.chapters.find((ch, i) => {
-        const nextStart = activeBook.chapters[i + 1]?.startOffset ?? Infinity;
-        return offset >= ch.endOffset && offset < nextStart + 1 && ch.endOffset > ch.startOffset;
-      });
-      if (!finishedChapter) return;
-      if (chapterSummaries[finishedChapter.index]) return; // 已经生成过
+      if (chapterSummaries[finishedChapter.index]) {
+        readHighWaterRef.current = offset; // 已经生成过
+        return;
+      }
 
+      readHighWaterRef.current = offset;
       summaryBusyRef.current = true;
       setGeneratingSummaryFor(finishedChapter.index);
 
@@ -1017,30 +1137,36 @@ const MingLightApp: React.FC = () => {
       if (!activeBook || !progress) return;
 
       const el = e.currentTarget;
-      const ratio =
-        el.scrollTop /
-        Math.max(
-          1,
-          el.scrollHeight - el.clientHeight,
-        );
 
-      const offset = Math.round(
-        ratio * activeBook.rawText.length,
-      );
+      // 段落节点列表只在数量变化时重建一次。React 的 key 稳定，DOM 节点会被
+      // 复用，所以缓存下来的引用一直有效；否则每个滚动事件都要 querySelectorAll
+      // 一遍几千个节点，二分查找省下来的开销就白费了。
+      if (paragraphNodesRef.current.length !== paragraphs.length) {
+        paragraphNodesRef.current = Array.from(
+          el.querySelectorAll<HTMLElement>('[data-ml-paragraph]'),
+        );
+      }
+      const nodes = paragraphNodesRef.current;
+
+      // 视口顶端 = 下次回来接着读的地方；视口底端 = 已经读完的地方。
+      // 章末判定要用底端，否则得等章尾滚到屏幕最上面才算读完，会偏晚一整屏。
+      const topOffset = offsetAtViewportEdge(el, nodes, paragraphs, 'top');
+      const readOffset = offsetAtViewportEdge(el, nodes, paragraphs, 'bottom');
 
       scheduleSaveProgress({
         ...progress,
-        charOffset: offset,
+        charOffset: topOffset,
         updatedAt: Date.now(),
       });
 
       // 不提前读后文：只在当前阅读位置已经跨过约 750 字时检查。
-      void maybeAskTa(offset);
-      void maybeGenerateChapterSummary(offset);
+      void maybeAskTa(readOffset);
+      void maybeGenerateChapterSummary(readOffset);
     },
     [
       activeBook,
       progress,
+      paragraphs,
       scheduleSaveProgress,
       maybeAskTa,
       maybeGenerateChapterSummary,
@@ -1058,30 +1184,19 @@ const MingLightApp: React.FC = () => {
       // 找到这一章的第一段，直接滚到它真实的 DOM 位置。
       // 以前是用「起始字符数 ÷ 全书字数 × 可滚动高度」估的，段落长短不一、
       // 字号一调行高就变，估出来的位置必然和章节开头对不上。
-      const target =
-        paragraphs.find(p => p.endOffset > startOffset) || paragraphs[0];
+      scrollToOffset(
+        el,
+        paragraphs,
+        startOffset,
+        activeBook.rawText.length,
+        'smooth',
+      );
 
-      const node = target
-        ? (el.querySelector(
-            `[data-ml-paragraph="${target.index}"]`,
-          ) as HTMLElement | null)
-        : null;
-
-      if (node) {
-        const top =
-          node.getBoundingClientRect().top -
-          el.getBoundingClientRect().top +
-          el.scrollTop;
-
-        el.scrollTo({ top: Math.max(0, top - 8), behavior: 'smooth' });
-      } else {
-        // 段落还没渲染出来时的兜底，仍按比例滚一次
-        const ratio = startOffset / Math.max(1, activeBook.rawText.length);
-        el.scrollTo({
-          top: ratio * Math.max(0, el.scrollHeight - el.clientHeight),
-          behavior: 'smooth',
-        });
-      }
+      // 跳章之后把已读水位挪到这一章开头，否则会被当成「一口气读完了中间所有章」
+      readHighWaterRef.current = Math.max(
+        readHighWaterRef.current,
+        startOffset,
+      );
 
       scheduleSaveProgress({
         ...progress,
