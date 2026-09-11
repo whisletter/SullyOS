@@ -16,12 +16,13 @@
 import JSZip from 'jszip';
 
 const DB_NAME = 'SullyOS_MingLight';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 const STORE_BOOKS = 'books';
 const STORE_PROGRESS = 'progress';
 
 export type MingLightTheme = 'day' | 'sepia' | 'green' | 'night';
+export type MingLightReadingMode = 'scroll' | 'paged';
 
 export interface MingLightBook {
   id: string;
@@ -48,6 +49,8 @@ export interface MingLightProgress {
   charOffset: number;
   theme: MingLightTheme;
   fontSize: number;
+  readingMode?: MingLightReadingMode;
+  page?: number;
   updatedAt: number;
 }
 
@@ -56,6 +59,7 @@ export interface MingLightImportedBook {
   author: string;
   coverUrl: string;
   rawText: string;
+  chapters: MingLightChapter[];
 }
 
 function normalizeZipPath(base: string, target: string): string {
@@ -78,6 +82,7 @@ function textFromXhtml(xhtml: string): string {
   doc.querySelectorAll('script,style,head').forEach(el => el.remove());
 
   const body = doc.body || doc.documentElement;
+
   const blockTags = new Set([
     'P', 'DIV', 'SECTION', 'ARTICLE', 'BR',
     'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'TR'
@@ -129,10 +134,6 @@ function getMetaText(doc: Document, name: string): string {
   return plain?.textContent?.trim() || '';
 }
 
-/**
- * 导入 EPUB：
- * 自动读取书名、作者、封面，并按照 spine 顺序提取正文。
- */
 export async function importEpub(file: File): Promise<MingLightImportedBook> {
   const zip = await JSZip.loadAsync(file);
 
@@ -206,9 +207,13 @@ export async function importEpub(file: File): Promise<MingLightImportedBook> {
     .map(el => el.getAttribute('idref') || '')
     .filter(Boolean);
 
-  const chapterTexts: string[] = [];
+  const chapterTexts: {
+    title: string;
+    text: string;
+  }[] = [];
 
-  for (const id of spineIds) {
+  for (let i = 0; i < spineIds.length; i++) {
+    const id = spineIds[i];
     const item = manifest.get(id);
 
     if (!item) continue;
@@ -227,18 +232,47 @@ export async function importEpub(file: File): Promise<MingLightImportedBook> {
 
     if (!entry) continue;
 
-    const text = textFromXhtml(await entry.async('text'));
+    const html = await entry.async('text');
+    const text = textFromXhtml(html);
 
-    if (text) {
-      chapterTexts.push(text);
-    }
+    if (!text) continue;
+
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+
+    const heading =
+      doc.querySelector('h1,h2,h3,h4,h5,h6')?.textContent?.trim();
+
+    chapterTexts.push({
+      title: heading || `第 ${chapterTexts.length + 1} 章`,
+      text,
+    });
   }
 
-  const rawText = chapterTexts.join('\n\n').trim();
-
-  if (!rawText) {
+  if (!chapterTexts.length) {
     throw new Error('EPUB 中没有读取到正文内容');
   }
+
+  let rawText = '';
+  const chapters: MingLightChapter[] = [];
+
+  chapterTexts.forEach((chapter, index) => {
+    const startOffset = rawText.length;
+
+    if (rawText) {
+      rawText += '\n\n';
+    }
+
+    rawText += chapter.text;
+
+    const endOffset = rawText.length;
+
+    chapters.push({
+      index,
+      title: chapter.title.slice(0, 80),
+      startOffset,
+      endOffset,
+    });
+  });
 
   // 尝试寻找封面
   let coverHref = '';
@@ -296,6 +330,7 @@ export async function importEpub(file: File): Promise<MingLightImportedBook> {
     author,
     coverUrl,
     rawText,
+    chapters,
   };
 }
 
@@ -363,7 +398,7 @@ export function splitIntoChapters(
 
     chapters.push({
       index: i,
-      title: m[1].trim().slice(0, 40),
+      title: m[1].trim().slice(0, 80),
       startOffset: start,
       endOffset: end,
     });
@@ -387,7 +422,9 @@ export async function getBooksForChar(
   });
 }
 
-export async function saveBook(book: MingLightBook): Promise<void> {
+export async function saveBook(
+  book: MingLightBook
+): Promise<void> {
   const db = await openDb();
 
   return new Promise((resolve, reject) => {
@@ -400,7 +437,9 @@ export async function saveBook(book: MingLightBook): Promise<void> {
   });
 }
 
-export async function deleteBook(bookId: string): Promise<void> {
+export async function deleteBook(
+  bookId: string
+): Promise<void> {
   const db = await openDb();
 
   return new Promise((resolve, reject) => {
@@ -411,16 +450,20 @@ export async function deleteBook(bookId: string): Promise<void> {
 
     tx.objectStore(STORE_BOOKS).delete(bookId);
 
-    const progressStore = tx.objectStore(STORE_PROGRESS);
+    const progressStore =
+      tx.objectStore(STORE_PROGRESS);
+
     const idx = progressStore.index('charId');
 
     idx.openCursor().onsuccess = e => {
       const cursor =
-        (e.target as IDBRequest<IDBCursorWithValue>).result;
+        (e.target as IDBRequest<IDBCursorWithValue>)
+          .result;
 
       if (cursor) {
         if (
-          (cursor.value as MingLightProgress).bookId === bookId
+          (cursor.value as MingLightProgress).bookId ===
+          bookId
         ) {
           cursor.delete();
         }
@@ -441,13 +484,18 @@ export async function getProgress(
   const db = await openDb();
 
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_PROGRESS, 'readonly');
+    const tx = db.transaction(
+      STORE_PROGRESS,
+      'readonly'
+    );
 
     const req = tx
       .objectStore(STORE_PROGRESS)
       .get(`${bookId}__${charId}`);
 
-    req.onsuccess = () => resolve(req.result || null);
+    req.onsuccess = () =>
+      resolve(req.result || null);
+
     req.onerror = () => reject(req.error);
   });
 }
@@ -458,7 +506,10 @@ export async function saveProgress(
   const db = await openDb();
 
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_PROGRESS, 'readwrite');
+    const tx = db.transaction(
+      STORE_PROGRESS,
+      'readwrite'
+    );
 
     tx.objectStore(STORE_PROGRESS).put(progress);
 
