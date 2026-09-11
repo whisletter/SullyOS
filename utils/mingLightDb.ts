@@ -13,6 +13,8 @@
  * 对接。
  */
 
+import JSZip from 'jszip';
+
 const DB_NAME = 'SullyOS_MingLight';
 const DB_VERSION = 1;
 
@@ -23,65 +25,342 @@ export type MingLightTheme = 'day' | 'sepia' | 'green' | 'night';
 
 export interface MingLightBook {
   id: string;
-  charId: string;        // 这本书属于哪一个角色（每个角色书架独立）
+  charId: string;
   title: string;
   author?: string;
   coverUrl?: string;
-  rawText: string;       // 导入的原始纯文本全文
+  rawText: string;
   chapters: MingLightChapter[];
   createdAt: number;
 }
 
 export interface MingLightChapter {
-  index: number;         // 第几章，从 0 开始
-  title: string;         // 章节标题（自动识别到的，或「第N部分」兜底）
-  startOffset: number;   // 在 rawText 里的起始字符位置
-  endOffset: number;     // 结束字符位置（不含）
+  index: number;
+  title: string;
+  startOffset: number;
+  endOffset: number;
 }
 
 export interface MingLightProgress {
-  id: string;            // `${bookId}__${charId}`
+  id: string;
   bookId: string;
   charId: string;
-  charOffset: number;    // 读到 rawText 的第几个字符
+  charOffset: number;
   theme: MingLightTheme;
-  fontSize: number;      // px
+  fontSize: number;
   updatedAt: number;
+}
+
+export interface MingLightImportedBook {
+  title: string;
+  author: string;
+  coverUrl: string;
+  rawText: string;
+}
+
+function normalizeZipPath(base: string, target: string): string {
+  const cleanTarget = target.replace(/^\/+/, '');
+  const parts = `${base}/${cleanTarget}`.split('/');
+  const out: string[] = [];
+
+  for (const part of parts) {
+    if (!part || part === '.') continue;
+    if (part === '..') out.pop();
+    else out.push(part);
+  }
+
+  return out.join('/');
+}
+
+function textFromXhtml(xhtml: string): string {
+  const doc = new DOMParser().parseFromString(xhtml, 'text/html');
+
+  doc.querySelectorAll('script,style,head').forEach(el => el.remove());
+
+  const body = doc.body || doc.documentElement;
+  const blockTags = new Set([
+    'P', 'DIV', 'SECTION', 'ARTICLE', 'BR',
+    'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'TR'
+  ]);
+
+  const parts: string[] = [];
+
+  const walk = (node: Node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      parts.push((node.nodeValue || '').replace(/\s+/g, ' '));
+      return;
+    }
+
+    if (node.nodeType !== Node.ELEMENT_NODE) {
+      node.childNodes.forEach(walk);
+      return;
+    }
+
+    const el = node as Element;
+
+    if (blockTags.has(el.tagName)) parts.push('\n');
+
+    el.childNodes.forEach(walk);
+
+    if (blockTags.has(el.tagName)) parts.push('\n');
+  };
+
+  walk(body);
+
+  return parts
+    .join('')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function getMetaText(doc: Document, name: string): string {
+  const direct = doc.querySelector(`metadata > ${name}`);
+  if (direct?.textContent?.trim()) {
+    return direct.textContent.trim();
+  }
+
+  const prefixed = doc.querySelector(`dc\\:${name}`);
+  if (prefixed?.textContent?.trim()) {
+    return prefixed.textContent.trim();
+  }
+
+  const plain = doc.querySelector(name);
+  return plain?.textContent?.trim() || '';
+}
+
+/**
+ * 导入 EPUB：
+ * 自动读取书名、作者、封面，并按照 spine 顺序提取正文。
+ */
+export async function importEpub(file: File): Promise<MingLightImportedBook> {
+  const zip = await JSZip.loadAsync(file);
+
+  const containerEntry = zip.file('META-INF/container.xml');
+
+  if (!containerEntry) {
+    throw new Error('不是有效的 EPUB：找不到 container.xml');
+  }
+
+  const containerXml = await containerEntry.async('text');
+
+  const containerDoc = new DOMParser().parseFromString(
+    containerXml,
+    'application/xml'
+  );
+
+  const rootfile = containerDoc
+    .querySelector('rootfile[full-path]')
+    ?.getAttribute('full-path');
+
+  if (!rootfile) {
+    throw new Error('EPUB 格式错误：找不到 OPF 文件');
+  }
+
+  const opfEntry = zip.file(rootfile);
+
+  if (!opfEntry) {
+    throw new Error('EPUB 格式错误：无法读取 OPF 文件');
+  }
+
+  const opfText = await opfEntry.async('text');
+
+  const opfDoc = new DOMParser().parseFromString(
+    opfText,
+    'application/xml'
+  );
+
+  const opfDir = rootfile.includes('/')
+    ? rootfile.slice(0, rootfile.lastIndexOf('/'))
+    : '';
+
+  const title =
+    getMetaText(opfDoc, 'title') ||
+    file.name.replace(/\.epub$/i, '');
+
+  const author = getMetaText(opfDoc, 'creator');
+
+  const manifest = new Map<
+    string,
+    {
+      href: string;
+      mediaType: string;
+      properties: string;
+    }
+  >();
+
+  opfDoc.querySelectorAll('manifest > item, item').forEach(item => {
+    const id = item.getAttribute('id') || '';
+    const href = item.getAttribute('href') || '';
+
+    if (id && href) {
+      manifest.set(id, {
+        href,
+        mediaType: item.getAttribute('media-type') || '',
+        properties: item.getAttribute('properties') || '',
+      });
+    }
+  });
+
+  const spineIds = [...opfDoc.querySelectorAll('spine > itemref, itemref')]
+    .map(el => el.getAttribute('idref') || '')
+    .filter(Boolean);
+
+  const chapterTexts: string[] = [];
+
+  for (const id of spineIds) {
+    const item = manifest.get(id);
+
+    if (!item) continue;
+
+    const isHtml =
+      /xhtml|html/i.test(item.mediaType) ||
+      /\.(xhtml?|html?)$/i.test(item.href);
+
+    if (!isHtml) continue;
+
+    const href = item.href.split('#')[0];
+
+    const entry = zip.file(
+      normalizeZipPath(opfDir, decodeURIComponent(href))
+    );
+
+    if (!entry) continue;
+
+    const text = textFromXhtml(await entry.async('text'));
+
+    if (text) {
+      chapterTexts.push(text);
+    }
+  }
+
+  const rawText = chapterTexts.join('\n\n').trim();
+
+  if (!rawText) {
+    throw new Error('EPUB 中没有读取到正文内容');
+  }
+
+  // 尝试寻找封面
+  let coverHref = '';
+
+  const coverId = opfDoc
+    .querySelector('metadata meta[name="cover"]')
+    ?.getAttribute('content');
+
+  if (coverId && manifest.has(coverId)) {
+    coverHref = manifest.get(coverId)!.href;
+  }
+
+  if (!coverHref) {
+    for (const item of manifest.values()) {
+      if (
+        /^image\//i.test(item.mediaType) &&
+        /cover/i.test(item.properties)
+      ) {
+        coverHref = item.href;
+        break;
+      }
+    }
+  }
+
+  if (!coverHref) {
+    for (const item of manifest.values()) {
+      if (
+        /^image\//i.test(item.mediaType) &&
+        /cover/i.test(item.href)
+      ) {
+        coverHref = item.href;
+        break;
+      }
+    }
+  }
+
+  let coverUrl = '';
+
+  if (coverHref) {
+    const coverEntry = zip.file(
+      normalizeZipPath(
+        opfDir,
+        decodeURIComponent(coverHref.split('#')[0])
+      )
+    );
+
+    if (coverEntry) {
+      const blob = await coverEntry.async('blob');
+      coverUrl = URL.createObjectURL(blob);
+    }
+  }
+
+  return {
+    title,
+    author,
+    coverUrl,
+    rawText,
+  };
 }
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
+
     req.onupgradeneeded = () => {
       const db = req.result;
+
       if (!db.objectStoreNames.contains(STORE_BOOKS)) {
-        const store = db.createObjectStore(STORE_BOOKS, { keyPath: 'id' });
-        store.createIndex('charId', 'charId', { unique: false });
+        const store = db.createObjectStore(STORE_BOOKS, {
+          keyPath: 'id',
+        });
+
+        store.createIndex('charId', 'charId', {
+          unique: false,
+        });
       }
+
       if (!db.objectStoreNames.contains(STORE_PROGRESS)) {
-        const store = db.createObjectStore(STORE_PROGRESS, { keyPath: 'id' });
-        store.createIndex('charId', 'charId', { unique: false });
+        const store = db.createObjectStore(STORE_PROGRESS, {
+          keyPath: 'id',
+        });
+
+        store.createIndex('charId', 'charId', {
+          unique: false,
+        });
       }
     };
+
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
 }
 
-/** 把导入的纯文本自动切成章节。识别常见的中文章节标题写法，
- *  识别不到任何章节标题时，整本书当作「第一章」处理，不报错、不阻断导入。 */
-export function splitIntoChapters(rawText: string): MingLightChapter[] {
-  const chapterHeadingRe = /^(第[0-9一二三四五六七八九十百千万零]+[章节回卷部].{0,30})$/gm;
+export function splitIntoChapters(
+  rawText: string
+): MingLightChapter[] {
+  const chapterHeadingRe =
+    /^(第[0-9一二三四五六七八九十百千万零]+[章节回卷部].{0,30})$/gm;
+
   const matches = [...rawText.matchAll(chapterHeadingRe)];
 
   if (matches.length === 0) {
-    return [{ index: 0, title: '正文', startOffset: 0, endOffset: rawText.length }];
+    return [
+      {
+        index: 0,
+        title: '正文',
+        startOffset: 0,
+        endOffset: rawText.length,
+      },
+    ];
   }
 
   const chapters: MingLightChapter[] = [];
+
   matches.forEach((m, i) => {
     const start = m.index ?? 0;
-    const end = i + 1 < matches.length ? (matches[i + 1].index ?? rawText.length) : rawText.length;
+
+    const end =
+      i + 1 < matches.length
+        ? matches[i + 1].index ?? rawText.length
+        : rawText.length;
+
     chapters.push({
       index: i,
       title: m[1].trim().slice(0, 40),
@@ -89,15 +368,20 @@ export function splitIntoChapters(rawText: string): MingLightChapter[] {
       endOffset: end,
     });
   });
+
   return chapters;
 }
 
-export async function getBooksForChar(charId: string): Promise<MingLightBook[]> {
+export async function getBooksForChar(
+  charId: string
+): Promise<MingLightBook[]> {
   const db = await openDb();
+
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_BOOKS, 'readonly');
     const idx = tx.objectStore(STORE_BOOKS).index('charId');
     const req = idx.getAll(charId);
+
     req.onsuccess = () => resolve(req.result || []);
     req.onerror = () => reject(req.error);
   });
@@ -105,9 +389,12 @@ export async function getBooksForChar(charId: string): Promise<MingLightBook[]> 
 
 export async function saveBook(book: MingLightBook): Promise<void> {
   const db = await openDb();
+
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_BOOKS, 'readwrite');
+
     tx.objectStore(STORE_BOOKS).put(book);
+
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
@@ -115,39 +402,66 @@ export async function saveBook(book: MingLightBook): Promise<void> {
 
 export async function deleteBook(bookId: string): Promise<void> {
   const db = await openDb();
+
   return new Promise((resolve, reject) => {
-    const tx = db.transaction([STORE_BOOKS, STORE_PROGRESS], 'readwrite');
+    const tx = db.transaction(
+      [STORE_BOOKS, STORE_PROGRESS],
+      'readwrite'
+    );
+
     tx.objectStore(STORE_BOOKS).delete(bookId);
-    // 顺手把这本书的阅读进度也清掉，避免留孤儿数据
+
     const progressStore = tx.objectStore(STORE_PROGRESS);
     const idx = progressStore.index('charId');
-    idx.openCursor().onsuccess = (e) => {
-      const cursor = (e.target as IDBRequest<IDBCursorWithValue>).result;
+
+    idx.openCursor().onsuccess = e => {
+      const cursor =
+        (e.target as IDBRequest<IDBCursorWithValue>).result;
+
       if (cursor) {
-        if ((cursor.value as MingLightProgress).bookId === bookId) cursor.delete();
+        if (
+          (cursor.value as MingLightProgress).bookId === bookId
+        ) {
+          cursor.delete();
+        }
+
         cursor.continue();
       }
     };
+
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
 }
 
-export async function getProgress(bookId: string, charId: string): Promise<MingLightProgress | null> {
+export async function getProgress(
+  bookId: string,
+  charId: string
+): Promise<MingLightProgress | null> {
   const db = await openDb();
+
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_PROGRESS, 'readonly');
-    const req = tx.objectStore(STORE_PROGRESS).get(`${bookId}__${charId}`);
+
+    const req = tx
+      .objectStore(STORE_PROGRESS)
+      .get(`${bookId}__${charId}`);
+
     req.onsuccess = () => resolve(req.result || null);
     req.onerror = () => reject(req.error);
   });
 }
 
-export async function saveProgress(progress: MingLightProgress): Promise<void> {
+export async function saveProgress(
+  progress: MingLightProgress
+): Promise<void> {
   const db = await openDb();
+
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_PROGRESS, 'readwrite');
+
     tx.objectStore(STORE_PROGRESS).put(progress);
+
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
