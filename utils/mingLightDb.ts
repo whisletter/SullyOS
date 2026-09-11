@@ -58,11 +58,20 @@ export interface MingLightThreadMessage {
   annotations?: MingLightAnnotation[];
 }
 
+export interface MingLightParagraph {
+  id: string;          // 稳定ID，格式 `p{全局序号}`，批注以后就锚定在这个ID上
+  chapterIndex: number;
+  text: string;
+  startOffset: number;  // 仍保留字符偏移，兼容旧的 charOffset 进度字段
+  endOffset: number;
+}
+
 export interface MingLightChapter {
   index: number;
   title: string;
   startOffset: number;
   endOffset: number;
+  paragraphs: MingLightParagraph[];
 }
 
 export interface MingLightProgress {
@@ -85,6 +94,49 @@ export interface MingLightImportedBook {
   coverUrl: string;
   rawText: string;
   chapters: MingLightChapter[];
+}
+
+// 把一段章节文本切成带稳定ID的段落。txt 和 epub 两条导入路径共用这一个函数，
+// 保证段落切分规则、ID 生成方式一致。
+function paragraphsFromChapterText(
+  chapterText: string,
+  chapterIndex: number,
+  chapterStartOffset: number,
+  seqRef: { n: number },
+): MingLightParagraph[] {
+  const rawParas = chapterText.split(/\n\s*\n/);
+  let cursor = 0;
+  const paragraphs: MingLightParagraph[] = [];
+
+  rawParas.forEach(p => {
+    const trimmed = p.trim();
+    const localIdx = chapterText.indexOf(p, cursor);
+    const start = localIdx === -1 ? cursor : localIdx;
+    const end = start + p.length;
+    cursor = end;
+
+    if (!trimmed) return;
+
+    paragraphs.push({
+      id: `p${seqRef.n++}`,
+      chapterIndex,
+      text: trimmed,
+      startOffset: chapterStartOffset + start,
+      endOffset: chapterStartOffset + end,
+    });
+  });
+
+  if (paragraphs.length === 0 && chapterText.trim()) {
+    paragraphs.push({
+      id: `p${seqRef.n++}`,
+      chapterIndex,
+      text: chapterText.trim(),
+      startOffset: chapterStartOffset,
+      endOffset: chapterStartOffset + chapterText.length,
+    });
+  }
+
+  return paragraphs;
 }
 
 function normalizeZipPath(base: string, target: string): string {
@@ -279,6 +331,7 @@ export async function importEpub(file: File): Promise<MingLightImportedBook> {
 
   let rawText = '';
   const chapters: MingLightChapter[] = [];
+  const seqRef = { n: 0 };
 
   chapterTexts.forEach((chapter, index) => {
     const startOffset = rawText.length;
@@ -296,6 +349,7 @@ export async function importEpub(file: File): Promise<MingLightImportedBook> {
       title: chapter.title.slice(0, 80),
       startOffset,
       endOffset,
+      paragraphs: paragraphsFromChapterText(chapter.text, index, startOffset, seqRef),
     });
   });
 
@@ -400,8 +454,10 @@ export function splitIntoChapters(
 
   const matches = [...rawText.matchAll(chapterHeadingRe)];
 
+  let chapters: Omit<MingLightChapter, 'paragraphs'>[];
+
   if (matches.length === 0) {
-    return [
+    chapters = [
       {
         index: 0,
         title: '正文',
@@ -409,27 +465,38 @@ export function splitIntoChapters(
         endOffset: rawText.length,
       },
     ];
+  } else {
+    chapters = [];
+
+    matches.forEach((m, i) => {
+      const start = m.index ?? 0;
+
+      const end =
+        i + 1 < matches.length
+          ? matches[i + 1].index ?? rawText.length
+          : rawText.length;
+
+      chapters.push({
+        index: i,
+        title: m[1].trim().slice(0, 80),
+        startOffset: start,
+        endOffset: end,
+      });
+    });
   }
 
-  const chapters: MingLightChapter[] = [];
-
-  matches.forEach((m, i) => {
-    const start = m.index ?? 0;
-
-    const end =
-      i + 1 < matches.length
-        ? matches[i + 1].index ?? rawText.length
-        : rawText.length;
-
-    chapters.push({
-      index: i,
-      title: m[1].trim().slice(0, 80),
-      startOffset: start,
-      endOffset: end,
-    });
-  });
-
-  return chapters;
+  // 每章内部再按空行切段落，段落带全局唯一稳定 ID（p0, p1, p2...），
+  // 以后批注、章末总结都锚定在段落 ID 上，不再依赖字符偏移量去猜位置。
+  const seqRef = { n: 0 };
+  return chapters.map(ch => ({
+    ...ch,
+    paragraphs: paragraphsFromChapterText(
+      rawText.slice(ch.startOffset, ch.endOffset),
+      ch.index,
+      ch.startOffset,
+      seqRef,
+    ),
+  }));
 }
 
 export async function getBooksForChar(
