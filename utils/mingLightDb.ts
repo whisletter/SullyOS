@@ -24,6 +24,28 @@ const STORE_PROGRESS = 'progress';
 export type MingLightTheme = 'day' | 'sepia' | 'green' | 'night';
 export type MingLightReadingMode = 'scroll' | 'paged';
 
+
+export type MingLightAnnotationSource = 'user' | 'ta';
+
+export interface MingLightThreadMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+  createdAt: number;
+}
+
+export interface MingLightAnnotation {
+  id: string;
+  startOffset: number;
+  endOffset: number;
+  quotedText: string;
+  source: MingLightAnnotationSource;
+  comment: string;
+  thread: MingLightThreadMessage[];
+  createdAt: number;
+  archivedToMemory?: boolean;
+}
+
 export interface MingLightBook {
   id: string;
   charId: string;
@@ -32,6 +54,7 @@ export interface MingLightBook {
   coverUrl?: string;
   rawText: string;
   chapters: MingLightChapter[];
+  annotations?: MingLightAnnotation[];
   createdAt: number;
 }
 
@@ -51,6 +74,8 @@ export interface MingLightProgress {
   fontSize: number;
   readingMode?: MingLightReadingMode;
   page?: number;
+  /** TA 已经检查到的用户阅读位置；仅用于控制主动批注请求频率。 */
+  taCheckedOffset?: number;
   updatedAt: number;
 }
 
