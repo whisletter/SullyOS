@@ -44,6 +44,7 @@ export const Icons: Record<string, React.FC<{ className?: string }>> = {
   Character: ({ className }) => <UserCircle className={className} weight="regular" />,
   User: ({ className }) => <IdentificationCard className={className} weight="regular" />,
   Chat: ({ className }) => <ChatTeardrop className={className} weight="regular" />,
+  Reading: ({ className }) => <BookOpen className={className} weight="regular" />,
   GroupChat: ({ className }) => <UsersThree className={className} weight="regular" />,
   Settings: ({ className }) => <GearSix className={className} weight="regular" />,
   Gallery: ({ className }) => <Images className={className} weight="regular" />,
