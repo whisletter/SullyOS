@@ -40,6 +40,7 @@ import {
   ArrowClockwise,
   Gear,
   Flask,
+  Lightning,
 } from '@phosphor-icons/react';
 
 import { useOS } from '../context/OSContext';
@@ -1383,163 +1384,79 @@ const MingLightApp: React.FC = () => {
     userNote,
   ]);
 
-  /** 保存批注，同时让 TA 立即回应。 */
-  const saveUserAnnotationAndAskTa = useCallback(async () => {
-    if (
-      !activeBook ||
-      !activeCharacterId ||
-      !selectionQuote ||
-      selectionParagraphIndex < 0
-    ) {
-      return;
-    }
-
-    const comment = userNote.trim();
-    if (!comment) return;
-
-    const annotation: MingLightAnnotation = {
-      id: genId('ann'),
-      bookId: activeBook.id,
-      charId: activeCharacterId,
-      paragraphIndex: selectionParagraphIndex,
-      startOffset: selectionStart,
-      endOffset: selectionEnd,
-      quotedText: selectionQuote,
-      source: 'user',
-      comment,
-      thread: [],
-      createdAt: Date.now(),
-    };
-
-    let updated: MingLightBook = {
-      ...activeBook,
-      annotations: [
-        ...(activeBook.annotations || []),
-        annotation,
-      ],
-    };
-
-    await saveBook(updated);
-    setActiveBook(updated);
-    setSelectedAnnotation(annotation);
-    setShowUserNoteComposer(false);
-    setShowSelectionMenu(false);
-    setUserNote('');
-    window.getSelection()?.removeAllRanges();
-
-    // 让 TA 回应
-    try {
-      if (apiConfig?.baseUrl && apiConfig.model && char) {
-        const paragraph = paragraphs[selectionParagraphIndex];
-        const reply = await askTaToReply({
-          api: apiConfig,
-          char,
-          quotedText: annotation.quotedText,
-          paragraphText: paragraph?.text || annotation.quotedText,
-          thread: [],
-        });
-
-        if (reply) {
-          const taMessage = {
-            id: genId('msg'),
-            author: 'ta' as const,
-            content: reply,
-            createdAt: Date.now(),
-          };
-
-          updated = {
-            ...updated,
-            annotations: (updated.annotations || []).map(a =>
-              a.id === annotation.id
-                ? { ...a, thread: [taMessage] }
-                : a,
-            ),
-          };
-
-          await saveBook(updated);
-          setActiveBook(updated);
-          setSelectedAnnotation(
-            updated.annotations!.find(a => a.id === annotation.id) || annotation,
-          );
-        }
-      }
-    } catch (error) {
-      addToast?.(
-        error instanceof Error ? error.message : 'TA 暂时没有回应',
-        'error',
-      );
-    }
-  }, [
-    activeBook,
-    activeCharacterId,
-    selectionQuote,
-    selectionParagraphIndex,
-    selectionStart,
-    selectionEnd,
-    userNote,
-    apiConfig,
-    char,
-    paragraphs,
-    addToast,
-  ]);
-
   // ---------------- 回复讨论 ----------------
 
+  /** 发送用户的讨论消息，不自动触发 TA 回应。 */
   const sendReply = useCallback(async () => {
     if (
       !activeBook ||
       !selectedAnnotation ||
-      !replyText.trim() ||
-      !apiConfig?.baseUrl ||
-      !apiConfig.model ||
-      !char
+      !replyText.trim()
     ) {
       return;
     }
 
     const text = replyText.trim();
     setReplyText('');
+
+    const userMessage = {
+      id: genId('msg'),
+      author: 'user' as const,
+      content: text,
+      createdAt: Date.now(),
+    };
+
+    const updatedAnnotation: MingLightAnnotation = {
+      ...selectedAnnotation,
+      thread: [
+        ...(selectedAnnotation.thread || []),
+        userMessage,
+      ],
+    };
+
+    const updatedBook: MingLightBook = {
+      ...activeBook,
+      annotations: (activeBook.annotations || []).map(a =>
+        a.id === selectedAnnotation.id
+          ? updatedAnnotation
+          : a,
+      ),
+    };
+
+    await saveBook(updatedBook);
+    setActiveBook(updatedBook);
+    setSelectedAnnotation(updatedAnnotation);
+  }, [
+    activeBook,
+    selectedAnnotation,
+    replyText,
+  ]);
+
+  /** ⚡ 手动触发 TA 回应当前批注讨论。 */
+  const triggerTaReply = useCallback(async () => {
+    if (
+      !activeBook ||
+      !selectedAnnotation ||
+      !apiConfig?.baseUrl ||
+      !apiConfig.model ||
+      !char
+    ) {
+      addToast?.('请先配置 API', 'error');
+      return;
+    }
+
     setSendingReply(true);
 
     try {
       const baseThread = normalizeThread(selectedAnnotation);
       const paragraph = paragraphs[selectedAnnotation.paragraphIndex];
 
-      const userMessage = {
-        id: genId('msg'),
-        author: 'user' as const,
-        content: text,
-        createdAt: Date.now(),
-      };
-
-      let updatedAnnotation: MingLightAnnotation = {
-        ...selectedAnnotation,
-        thread: [
-          ...(selectedAnnotation.thread || []),
-          userMessage,
-        ],
-      };
-
-      let updatedBook: MingLightBook = {
-        ...activeBook,
-        annotations: (activeBook.annotations || []).map(a =>
-          a.id === selectedAnnotation.id
-            ? updatedAnnotation
-            : a,
-        ),
-      };
-
-      await saveBook(updatedBook);
-      setActiveBook(updatedBook);
-      setSelectedAnnotation(updatedAnnotation);
-
       const reply = await askTaToReply({
         api: apiConfig,
         char,
         quotedText: selectedAnnotation.quotedText,
         paragraphText: paragraph?.text || selectedAnnotation.quotedText,
-        thread: baseThread.concat(userMessage),
-        userMessage: text,
+        thread: baseThread,
       });
 
       if (reply) {
@@ -1550,17 +1467,17 @@ const MingLightApp: React.FC = () => {
           createdAt: Date.now(),
         };
 
-        updatedAnnotation = {
-          ...updatedAnnotation,
+        const updatedAnnotation: MingLightAnnotation = {
+          ...selectedAnnotation,
           thread: [
-            ...(updatedAnnotation.thread || []),
+            ...(selectedAnnotation.thread || []),
             taMessage,
           ],
         };
 
-        updatedBook = {
-          ...updatedBook,
-          annotations: (updatedBook.annotations || []).map(a =>
+        const updatedBook: MingLightBook = {
+          ...activeBook,
+          annotations: (activeBook.annotations || []).map(a =>
             a.id === selectedAnnotation.id
               ? updatedAnnotation
               : a,
@@ -1573,11 +1490,20 @@ const MingLightApp: React.FC = () => {
       }
     } catch (error) {
       addToast?.(
-        error instanceof Error ? error.message : '讨论失败',
+        error instanceof Error ? error.message : 'TA 暂时没有回应',
         'error',
       );
     } finally {
       setSendingReply(false);
+    }
+  }, [
+    activeBook,
+    selectedAnnotation,
+    apiConfig,
+    char,
+    paragraphs,
+    addToast,
+  ]);
     }
   }, [
     activeBook,
@@ -2338,18 +2264,9 @@ const MingLightApp: React.FC = () => {
                 <button
                   onClick={saveUserAnnotationOnly}
                   disabled={!userNote.trim()}
-                  className="px-4 py-2 rounded-full text-sm disabled:opacity-30"
-                  style={{ background: `${USER_MARK}18`, color: theme.text }}
+                  className="px-4 py-2 rounded-full bg-black/10 text-sm disabled:opacity-30"
                 >
-                  仅保存
-                </button>
-                <button
-                  onClick={saveUserAnnotationAndAskTa}
-                  disabled={!userNote.trim()}
-                  className="px-4 py-2 rounded-full text-sm disabled:opacity-30"
-                  style={{ background: `${TA_MARK}30`, color: theme.text }}
-                >
-                  保存并让 TA 回应
+                  保存
                 </button>
               </div>
             </div>
@@ -2385,12 +2302,22 @@ const MingLightApp: React.FC = () => {
                     : '我的批注'}
                 </div>
 
-                <button
-                  onClick={() => setSelectedAnnotation(null)}
-                  className="p-1"
-                >
-                  <X size={18} />
-                </button>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={triggerTaReply}
+                    disabled={sendingReply}
+                    className="p-1 rounded-full disabled:opacity-30"
+                    title="让 TA 回应"
+                  >
+                    <Lightning size={18} weight="bold" />
+                  </button>
+                  <button
+                    onClick={() => setSelectedAnnotation(null)}
+                    className="p-1"
+                  >
+                    <X size={18} />
+                  </button>
+                </div>
               </div>
 
               <div className="flex-1 overflow-y-auto px-4 py-4">
