@@ -109,6 +109,7 @@ const MomentsApp: React.FC = () => {
   // ---- 编辑状态 ----
   const [editingField, setEditingField] = useState<{ postId: string; commentId?: string } | null>(null);
   const [editText, setEditText] = useState('');
+  const [coverPickerTarget, setCoverPickerTarget] = useState<'user' | 'ta' | null>(null);
 
   const commentInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -207,10 +208,16 @@ const MomentsApp: React.FC = () => {
 
   // ==================== 封面上传 ====================
 
-  const handleCoverUpload = useCallback((target: 'user' | 'ta') => {
+  /** 从底部弹出菜单选择后，实际执行文件选择 */
+  const executeCoverUpload = useCallback((accept: string, capture?: string) => {
+    const target = coverPickerTarget;
+    if (!target) return;
+    setCoverPickerTarget(null);
+
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = 'image/*';
+    input.accept = accept;
+    if (capture) input.setAttribute('capture', capture);
     input.onchange = async () => {
       const file = input.files?.[0];
       if (!file || !settings) return;
@@ -228,7 +235,7 @@ const MomentsApp: React.FC = () => {
       addToast('封面已更新', 'success');
     };
     input.click();
-  }, [settings, addToast]);
+  }, [coverPickerTarget, settings, addToast]);
 
   // ==================== 互动逻辑 ====================
 
@@ -390,7 +397,7 @@ const MomentsApp: React.FC = () => {
         {/* 背景图 */}
         <div
           className="absolute inset-0 bg-gradient-to-b from-slate-700 to-slate-900 cursor-pointer"
-          onClick={() => handleCoverUpload(mode)}
+          onClick={() => setCoverPickerTarget(mode)}
           style={coverImage ? {
             backgroundImage: `url(${coverImage})`,
             backgroundSize: 'cover',
@@ -1079,6 +1086,62 @@ const MomentsApp: React.FC = () => {
 
       {/* 发布菜单 */}
       {showComposeMenu && renderComposeMenu()}
+
+      {/* 封面选择菜单 */}
+      {coverPickerTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center"
+          onClick={() => setCoverPickerTarget(null)}
+        >
+          <div className="absolute inset-0 bg-black/50" />
+          <div
+            className="relative w-full max-w-md rounded-t-2xl p-6 pb-8 animate-slide-up"
+            style={{ background: '#1a1a2e' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="w-10 h-1 rounded-full bg-white/20 mx-auto mb-5" />
+            <div className="text-sm text-white/60 text-center mb-4">更换封面</div>
+            <div className="space-y-1">
+              <button
+                onClick={() => executeCoverUpload('image/*')}
+                className="w-full flex items-center gap-4 px-4 py-3.5 rounded-xl active:bg-white/5 transition text-left"
+              >
+                <ImageIcon size={20} className="text-blue-400" />
+                <div>
+                  <div className="text-sm text-white/90">从图库选择</div>
+                  <div className="text-xs text-white/40">选择已有的图片</div>
+                </div>
+              </button>
+              <button
+                onClick={() => executeCoverUpload('image/*', 'environment')}
+                className="w-full flex items-center gap-4 px-4 py-3.5 rounded-xl active:bg-white/5 transition text-left"
+              >
+                <Camera size={20} className="text-green-400" />
+                <div>
+                  <div className="text-sm text-white/90">拍照</div>
+                  <div className="text-xs text-white/40">使用相机拍一张</div>
+                </div>
+              </button>
+              <button
+                onClick={() => executeCoverUpload('*/*')}
+                className="w-full flex items-center gap-4 px-4 py-3.5 rounded-xl active:bg-white/5 transition text-left"
+              >
+                <Article size={20} className="text-amber-400" />
+                <div>
+                  <div className="text-sm text-white/90">从文件选择</div>
+                  <div className="text-xs text-white/40">浏览所有文件</div>
+                </div>
+              </button>
+            </div>
+            <button
+              onClick={() => setCoverPickerTarget(null)}
+              className="w-full mt-4 py-3 text-center text-sm text-white/50 border-t border-white/10"
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
