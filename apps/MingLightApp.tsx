@@ -38,6 +38,8 @@ import {
   PaperPlaneTilt,
   Sparkle,
   ArrowClockwise,
+  Gear,
+  Flask,
 } from '@phosphor-icons/react';
 
 import { useOS } from '../context/OSContext';
@@ -48,6 +50,7 @@ import type {
   MingLightTheme,
   MingLightChapterSummary,
   MingLightChapter,
+  MingLightSettings,
 } from '../utils/mingLightDb';
 import {
   getBooksForChar,
@@ -60,6 +63,9 @@ import {
   getChapterSummary,
   getChapterSummariesForBook,
   saveChapterSummary,
+  getMingLightSettings,
+  saveMingLightSettings,
+  DEFAULT_MINGLIGHT_SETTINGS,
 } from '../utils/mingLightDb';
 import {
   TA_CHECK_INTERVAL,
@@ -496,6 +502,10 @@ const MingLightApp: React.FC = () => {
   const swipeRef = useRef<{ x: number; y: number } | null>(null);
 
   const [viewport, setViewport] = useState({ w: 0, h: 0 });
+  const [settings, setSettings] = useState<MingLightSettings>(
+    DEFAULT_MINGLIGHT_SETTINGS,
+  );
+  const [showSettings, setShowSettings] = useState(false);
   const [pageInfo, setPageInfo] = useState({
     total: 1,
     chapterPage: 1,
@@ -522,6 +532,24 @@ const MingLightApp: React.FC = () => {
   }, [annotations]);
 
   const isPaged = progress?.readingMode === 'paged';
+
+  /**
+   * 后台任务用的 API：填了副 API 就走副的，没填就回退主 API。
+   * TA 主动划线、章末总结、记忆归档这些是自动跑的、量大且不吃质量，
+   * 适合挂在便宜账户上；你点开批注跟 TA 对话仍然走主 API。
+   */
+  const bgApi = useMemo(() => {
+    const sub = settings.subApi;
+    if (sub.baseUrl.trim() && sub.model.trim()) {
+      return {
+        ...apiConfig,
+        baseUrl: sub.baseUrl.trim(),
+        apiKey: sub.apiKey.trim(),
+        model: sub.model.trim(),
+      };
+    }
+    return apiConfig;
+  }, [settings.subApi, apiConfig]);
   const pageWidth = Math.max(0, viewport.w - PAGE_PAD_X * 2);
   const pageHeight = Math.max(0, viewport.h - PAGE_PAD_Y * 2);
   /** 内部一律用 0 起的页号，存进 progress.page 时再转成 1 起的。 */
@@ -541,6 +569,20 @@ const MingLightApp: React.FC = () => {
   );
 
   // ---------------- 书架 ----------------
+
+  useEffect(() => {
+    let alive = true;
+    getMingLightSettings()
+      .then(s => {
+        if (alive) setSettings(s);
+      })
+      .catch(() => {
+        /* 读不到就用默认值，不打断使用 */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const refreshBooks = useCallback(async () => {
     if (!activeCharacterId) return;
@@ -819,18 +861,22 @@ const MingLightApp: React.FC = () => {
         return;
       }
 
+      // 间隔可以在设置里调。默认 750 字太密了——20 万字的书一趟读下来
+      // 光这一项就是两百多次调用。
+      const interval = Math.max(TA_CHECK_INTERVAL, settings.taInterval);
+
       const checked = lastAutoCheckRef.current;
-      if (offset - checked < TA_CHECK_INTERVAL) return;
+      if (offset - checked < interval) return;
 
       autoBusyRef.current = true;
 
       try {
         // 只看最近一小段，并且终点就是用户当前已经读到的位置。
-        const from = Math.max(0, offset - TA_CHECK_INTERVAL);
+        const from = Math.max(0, offset - interval);
         const visibleText = activeBook.rawText.slice(from, offset);
 
         const result = await askTaForInsight({
-          api: apiConfig,
+          api: bgApi,
           char: char!,
           visibleText,
         });
@@ -861,6 +907,8 @@ const MingLightApp: React.FC = () => {
       activeBook,
       progress,
       apiConfig,
+      bgApi,
+      settings.taInterval,
       char,
       createTaAnnotation,
       scheduleSaveProgress,
@@ -897,7 +945,7 @@ const MingLightApp: React.FC = () => {
           .slice(0, 3000);
 
         const result = await generateChapterSummary({
-          api: apiConfig,
+          api: bgApi,
           char,
           chapterText,
           discussionExcerpt,
@@ -924,7 +972,7 @@ const MingLightApp: React.FC = () => {
         setGeneratingSummaryFor(null);
       }
     },
-    [activeBook, activeCharacterId, apiConfig, char, addToast],
+    [activeBook, activeCharacterId, apiConfig, bgApi, char, addToast],
   );
 
   /** 手动重写：丢掉旧的那份，拿现在的讨论重新生成一次。 */
@@ -987,10 +1035,24 @@ const MingLightApp: React.FC = () => {
         return;
       }
 
+      // 关掉自动生成后，读完只是记下位置，等你在目录里点「生成读后感」再跑。
+      // 一本书里真正想看读后感的章节往往没几个，这一项能省掉大部分调用。
+      if (!settings.autoSummary) {
+        readHighWaterRef.current = offset;
+        return;
+      }
+
       readHighWaterRef.current = offset;
       await runChapterSummary(finishedChapter);
     },
-    [activeBook, activeCharacterId, apiConfig, chapterSummaries, runChapterSummary],
+    [
+      activeBook,
+      activeCharacterId,
+      apiConfig,
+      chapterSummaries,
+      settings.autoSummary,
+      runChapterSummary,
+    ],
   );
 
   // ---------------- 横版翻页 ----------------
@@ -2112,6 +2174,16 @@ const MingLightApp: React.FC = () => {
                         >
                           读后感
                         </button>
+                      ) : progress.charOffset >= chapter.endOffset ? (
+                        // 已经读过但还没生成：关掉自动生成时靠这个按钮按需补
+                        <button
+                          onClick={() => runChapterSummary(chapter)}
+                          disabled={generatingSummaryFor !== null}
+                          className="text-xs shrink-0 ml-2 px-2 py-1 rounded-full border opacity-50 disabled:opacity-25"
+                          style={{ borderColor: `${theme.text}25` }}
+                        >
+                          生成
+                        </button>
                       ) : null}
                     </div>
                   );
@@ -2360,7 +2432,7 @@ const MingLightApp: React.FC = () => {
   // ==================================================
 
   return (
-    <div className="h-full flex flex-col bg-[#F7F2EA]">
+    <div className="h-full flex flex-col bg-[#F7F2EA] relative overflow-hidden">
       <div className="flex items-center justify-between px-4 py-3">
         <button
           onClick={() => {
@@ -2376,12 +2448,18 @@ const MingLightApp: React.FC = () => {
           眠光 · 和{char.name}的书架
         </div>
 
-        <button
-          onClick={() => setShowImportModal(true)}
-          className="p-1"
-        >
-          <Plus size={22} />
-        </button>
+        <div className="flex items-center gap-1">
+          <button onClick={() => setShowSettings(true)} className="p-1">
+            <Gear size={20} />
+          </button>
+
+          <button
+            onClick={() => setShowImportModal(true)}
+            className="p-1"
+          >
+            <Plus size={22} />
+          </button>
+        </div>
       </div>
 
       {loading ? (
@@ -2449,6 +2527,21 @@ const MingLightApp: React.FC = () => {
       )}
 
       {/* 导入弹窗 */}
+      {showSettings && (
+        <MingLightSettingsPanel
+          settings={settings}
+          onClose={() => setShowSettings(false)}
+          onSave={async next => {
+            setSettings(next);
+            try {
+              await saveMingLightSettings(next);
+            } catch {
+              addToast?.('设置保存失败', 'error');
+            }
+          }}
+        />
+      )}
+
       {showImportModal && (
         <div
           className="absolute inset-0 bg-black/40 flex items-center justify-center z-10"
@@ -2495,3 +2588,253 @@ const MingLightApp: React.FC = () => {
 };
 
 export default MingLightApp;
+
+// ==================================================
+// 设置面板：副 API + 省调用开关
+// ==================================================
+
+const MingLightSettingsPanel: React.FC<{
+  settings: MingLightSettings;
+  onSave: (next: MingLightSettings) => void;
+  onClose: () => void;
+}> = ({ settings, onSave, onClose }) => {
+  const [baseUrl, setBaseUrl] = useState(settings.subApi.baseUrl);
+  const [apiKey, setApiKey] = useState(settings.subApi.apiKey);
+  const [model, setModel] = useState(settings.subApi.model);
+  const [taInterval, setTaInterval] = useState(settings.taInterval);
+  const [autoSummary, setAutoSummary] = useState(settings.autoSummary);
+
+  const [saved, setSaved] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{
+    ok: boolean;
+    text: string;
+  } | null>(null);
+
+  const filled = !!(baseUrl.trim() && apiKey.trim() && model.trim());
+
+  const inputClass =
+    'w-full px-3 py-2 rounded-lg border border-gray-200 text-sm bg-white outline-none focus:border-amber-400';
+  const labelClass =
+    'block text-[11px] font-semibold text-gray-500 mb-1 pl-1 tracking-wide';
+
+  const handleSave = () => {
+    onSave({
+      ...settings,
+      subApi: {
+        baseUrl: baseUrl.trim(),
+        apiKey: apiKey.trim(),
+        model: model.trim(),
+      },
+      taInterval,
+      autoSummary,
+    });
+    setSaved(true);
+    window.setTimeout(() => setSaved(false), 2000);
+  };
+
+  const handleTest = async () => {
+    if (!filled) return;
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const res = await fetch(
+        `${baseUrl.trim().replace(/\/+$/, '')}/chat/completions`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey.trim()}`,
+          },
+          body: JSON.stringify({
+            model: model.trim(),
+            messages: [{ role: 'user', content: 'Hi' }],
+            max_tokens: 5,
+          }),
+        },
+      );
+
+      if (res.ok) {
+        const data = await res.json();
+        const reply = String(data?.choices?.[0]?.message?.content || '');
+        setTestResult({
+          ok: true,
+          text: `连接成功 — 模型回复：“${reply.slice(0, 30)}”`,
+        });
+      } else {
+        const text = await res.text().catch(() => '');
+        setTestResult({
+          ok: false,
+          text: `HTTP ${res.status}：${text.slice(0, 120)}`,
+        });
+      }
+    } catch (err) {
+      setTestResult({
+        ok: false,
+        text: `连接失败：${err instanceof Error ? err.message : String(err)}`,
+      });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  return (
+    <div
+      className="absolute inset-0 z-50 flex items-end justify-center bg-black/30"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-h-[88%] overflow-y-auto rounded-t-2xl bg-[#FBF8F3] p-5"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-4">
+          <div className="text-sm font-semibold">眠光设置</div>
+          <button onClick={onClose}>
+            <X size={18} />
+          </button>
+        </div>
+
+        {/* 副 API */}
+        <div className="rounded-2xl bg-white border border-amber-100 p-4 mb-4">
+          <div className="text-xs font-bold text-amber-700 mb-2">
+            副 API（OpenAI 兼容格式）
+          </div>
+
+          <div className="text-[11px] leading-relaxed text-gray-500 mb-3">
+            只作用于后台自动任务：TA 主动划线、章末读后感。你点开批注跟 TA 对话仍然走主
+            API，那是要看质量的。
+            <br />
+            <b>留空则自动回退用主 API</b>。想省主号额度就填一个便宜的对话模型，后台任务不需要多强的推理。
+          </div>
+
+          <div className="flex flex-col gap-3">
+            <div>
+              <label className={labelClass}>BASE URL</label>
+              <input
+                type="text"
+                value={baseUrl}
+                onChange={e => setBaseUrl(e.target.value)}
+                placeholder="https://..."
+                className={inputClass}
+              />
+            </div>
+            <div>
+              <label className={labelClass}>API KEY</label>
+              <input
+                type="password"
+                value={apiKey}
+                onChange={e => setApiKey(e.target.value)}
+                placeholder="sk-..."
+                className={inputClass}
+              />
+            </div>
+            <div>
+              <label className={labelClass}>MODEL</label>
+              <input
+                type="text"
+                value={model}
+                onChange={e => setModel(e.target.value)}
+                placeholder="一个便宜的对话模型名"
+                className={inputClass}
+              />
+              <div className="text-[10px] text-gray-400 mt-1 pl-1">
+                要的是<b>对话</b>模型，不是 embedding 向量模型。
+              </div>
+            </div>
+          </div>
+
+          <button
+            onClick={handleTest}
+            disabled={testing || !filled}
+            className="w-full mt-3 py-2 rounded-xl text-sm font-semibold border border-amber-300 text-amber-700 bg-white disabled:opacity-40"
+          >
+            {testing ? (
+              '测试中…'
+            ) : (
+              <span className="inline-flex items-center gap-1.5">
+                <Flask size={14} />
+                测试 API 连接
+              </span>
+            )}
+          </button>
+
+          {testResult && (
+            <div
+              className="mt-2 text-xs px-3 py-2 rounded-lg"
+              style={{
+                background: testResult.ok ? '#f0fdf4' : '#fef2f2',
+                color: testResult.ok ? '#16a34a' : '#dc2626',
+              }}
+            >
+              {testResult.text}
+            </div>
+          )}
+
+          {!filled && (
+            <div className="mt-2 text-[11px] text-amber-700 font-medium">
+              副 API 未配置 — 后台任务会回退使用主 API（功能正常，但会占主号额度）
+            </div>
+          )}
+        </div>
+
+        {/* 省调用 */}
+        <div className="rounded-2xl bg-white border border-gray-100 p-4 mb-4">
+          <div className="text-xs font-bold text-gray-600 mb-3">调用频率</div>
+
+          <div className="mb-4">
+            <div className="flex items-center justify-between text-xs mb-1">
+              <span>TA 主动开口的间隔</span>
+              <span className="font-semibold text-amber-700">
+                每 {taInterval} 字
+              </span>
+            </div>
+            <input
+              type="range"
+              min={750}
+              max={8000}
+              step={250}
+              value={taInterval}
+              onChange={e => setTaInterval(Number(e.target.value))}
+              className="w-full"
+            />
+            <div className="text-[10px] text-gray-400 mt-1">
+              20 万字的书读一遍，750 字约 267 次调用，2500 字约 80 次，5000 字约 40 次。
+            </div>
+          </div>
+
+          <button
+            onClick={() => setAutoSummary(v => !v)}
+            className="w-full flex items-center justify-between text-xs"
+          >
+            <div className="text-left">
+              <div>读完一章自动生成读后感</div>
+              <div className="text-[10px] text-gray-400 mt-0.5">
+                关掉之后改成在目录里手动点，只给你真正想看的章节生成
+              </div>
+            </div>
+            <div
+              className="w-10 h-6 rounded-full p-0.5 shrink-0 ml-3 transition-colors"
+              style={{ background: autoSummary ? '#b45309' : '#d1d5db' }}
+            >
+              <div
+                className="w-5 h-5 rounded-full bg-white transition-transform"
+                style={{
+                  transform: autoSummary
+                    ? 'translateX(16px)'
+                    : 'translateX(0)',
+                }}
+              />
+            </div>
+          </button>
+        </div>
+
+        <button
+          onClick={handleSave}
+          className="w-full py-2.5 rounded-xl text-sm font-bold text-white bg-amber-700"
+        >
+          {saved ? '✓ 已保存' : '保存副 API 配置'}
+        </button>
+      </div>
+    </div>
+  );
+};
