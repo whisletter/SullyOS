@@ -1036,12 +1036,38 @@ export async function exportMingLightAll(): Promise<MingLightBackupData> {
 /**
  * 用备份数据覆盖眠光独立库的全部内容。
  * 策略：先清空再写入（和主库 importFullData 对 IDB store 的处理一致）。
+ *
+ * 书籍含完整原文（rawText），单条可达数 MB，放在同一事务里写入
+ * 容易触发浏览器配额 / 超时保护导致 abort。
+ * 所以 books 逐条开独立事务；progress / chapterSummaries / settings
+ * 数据量小，用整批事务即可。
  */
 export async function importMingLightAll(
   backup: MingLightBackupData,
 ): Promise<void> {
   const db = await openDb();
 
+  /** 清空一个 store。 */
+  const clearStore = (storeName: string): Promise<void> =>
+    new Promise((resolve, reject) => {
+      const tx = db.transaction(storeName, 'readwrite');
+      tx.objectStore(storeName).clear();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error(`clear ${storeName} aborted`));
+    });
+
+  /** 往 store 里写一条记录（独立事务，大数据也不会撑爆单个事务）。 */
+  const putOne = <T,>(storeName: string, item: T): Promise<void> =>
+    new Promise((resolve, reject) => {
+      const tx = db.transaction(storeName, 'readwrite');
+      tx.objectStore(storeName).put(item);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error(`put ${storeName} aborted`));
+    });
+
+  /** 清空后批量写入（小数据 store 用）。 */
   const clearAndPut = <T,>(storeName: string, items: T[]): Promise<void> =>
     new Promise((resolve, reject) => {
       const tx = db.transaction(storeName, 'readwrite');
@@ -1052,21 +1078,21 @@ export async function importMingLightAll(
       }
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error(`clearAndPut ${storeName} aborted`));
     });
 
-  await clearAndPut(STORE_BOOKS, backup.books || []);
+  // ---- books：逐条写入（rawText 可能很大） ----
+  await clearStore(STORE_BOOKS);
+  for (const book of (backup.books || [])) {
+    await putOne(STORE_BOOKS, book);
+  }
+
+  // ---- 小数据 store：整批写入 ----
   await clearAndPut(STORE_PROGRESS, backup.progress || []);
   await clearAndPut(STORE_CHAPTER_SUMMARIES, backup.chapterSummaries || []);
 
-  // settings 是单例，单独写
+  // ---- settings：单例 ----
   if (backup.settings) {
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE_SETTINGS, 'readwrite');
-      const store = tx.objectStore(STORE_SETTINGS);
-      store.clear();
-      store.put(backup.settings);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
+    await clearAndPut(STORE_SETTINGS, [backup.settings]);
   }
 }
