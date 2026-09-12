@@ -81,6 +81,93 @@ import {
  */
 const CHAPTER_CROSS_LIMIT = 5000;
 
+/**
+ * 翻页模式下相邻两栏之间的间距。必须大于正文容器的左右内边距（px-5 = 20px），
+ * 否则下一页的第一列会从 padding 区域里露出来——overflow:hidden 是按 padding box
+ * 裁剪的，content box 之外那一圈依然可见。
+ */
+const PAGE_GAP = 48;
+
+/** 横向滑动超过这个距离才算翻页，小于它当成误触或者选字。 */
+const SWIPE_THRESHOLD = 40;
+
+interface PageMetrics {
+  pageWidth: number;
+  stride: number; // 一页的位移量 = 栏宽 + 栏间距
+}
+
+/**
+ * 算出一个段落横跨哪几页。
+ *
+ * CSS 多栏里，同一栏内的内容左边缘都对齐在这一栏的起点，所以用「段落左边缘到
+ * 内容元素左边缘的距离 ÷ 每页位移」就能得到它从第几页开始。一段文字如果被断到
+ * 下一栏，getBoundingClientRect 返回的是所有分片的并集，right 边就落在最后一栏，
+ * 据此算出结束页。
+ *
+ * 两个 rect 都带着同一个 translateX，相减之后位移抵消，所以这个换算跟当前翻到
+ * 第几页无关，不用先还原 transform 再测量。
+ */
+function nodePageRange(
+  node: HTMLElement,
+  contentLeft: number,
+  metrics: PageMetrics,
+): { start: number; end: number } {
+  const rect = node.getBoundingClientRect();
+  const start = Math.max(
+    0,
+    Math.round((rect.left - contentLeft) / metrics.stride),
+  );
+  const end = Math.max(
+    start,
+    Math.round((rect.right - contentLeft - metrics.pageWidth) / metrics.stride),
+  );
+  return { start, end };
+}
+
+/** 这一页上最后一段：最后一个「起始页 ≤ page」的段落。 */
+function lastNodeOnPage(
+  nodes: HTMLElement[],
+  contentLeft: number,
+  metrics: PageMetrics,
+  page: number,
+): number {
+  let lo = 0;
+  let hi = nodes.length - 1;
+  let ans = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (nodePageRange(nodes[mid], contentLeft, metrics).start <= page) {
+      ans = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return ans;
+}
+
+/** 这一页上第一段：第一个「结束页 ≥ page」的段落，可能是上一页断下来的。 */
+function firstNodeOnPage(
+  nodes: HTMLElement[],
+  contentLeft: number,
+  metrics: PageMetrics,
+  page: number,
+): number {
+  let lo = 0;
+  let hi = nodes.length - 1;
+  let ans = Math.max(0, nodes.length - 1);
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (nodePageRange(nodes[mid], contentLeft, metrics).end >= page) {
+      ans = mid;
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
+    }
+  }
+  return ans;
+}
+
 const THEME_STYLES: Record<
   MingLightTheme,
   {
@@ -398,6 +485,20 @@ const MingLightApp: React.FC = () => {
   const readHighWaterRef = useRef(0);
   /** 段落 DOM 节点缓存，供滚动时二分查找当前阅读位置。 */
   const paragraphNodesRef = useRef<HTMLElement[]>([]);
+  /** 翻页模式下的正文容器（多栏那一层）。 */
+  const contentRef = useRef<HTMLDivElement>(null);
+  /** 字号、宽度、模式变化后需要按 charOffset 重新定位到对应页。 */
+  const relocateRef = useRef(false);
+  const swipeRef = useRef<{ x: number; y: number } | null>(null);
+
+  const [pageWidth, setPageWidth] = useState(0);
+  const [pageInfo, setPageInfo] = useState({
+    total: 1,
+    chapterPage: 1,
+    chapterTotal: 1,
+    percent: 0,
+    chapterTitle: '',
+  });
 
   const paragraphs = useMemo(
     () => (activeBook ? parseParagraphs(activeBook.rawText) : []),
@@ -415,6 +516,23 @@ const MingLightApp: React.FC = () => {
     }
     return map;
   }, [annotations]);
+
+  const isPaged = progress?.readingMode === 'paged';
+  /** 内部一律用 0 起的页号，存进 progress.page 时再转成 1 起的。 */
+  const pageIndex = Math.max(0, (progress?.page || 1) - 1);
+
+  const getParagraphNodes = useCallback(
+    (root: HTMLElement) => {
+      // React 的 key 稳定，DOM 节点会被复用，所以只在数量变化时重建一次。
+      if (paragraphNodesRef.current.length !== paragraphs.length) {
+        paragraphNodesRef.current = Array.from(
+          root.querySelectorAll<HTMLElement>('[data-ml-paragraph]'),
+        );
+      }
+      return paragraphNodesRef.current;
+    },
+    [paragraphs.length],
+  );
 
   // ---------------- 书架 ----------------
 
@@ -602,6 +720,12 @@ const MingLightApp: React.FC = () => {
 
   useEffect(() => {
     if (!activeBook || !progress || !restoringRef.current) return;
+    if (progress.readingMode === 'paged') {
+      // 翻页模式不靠滚动定位，交给分页那套按 charOffset 算页号
+      restoringRef.current = false;
+      relocateRef.current = true;
+      return;
+    }
     const timer = window.setTimeout(() => {
       const el = readerRef.current;
       if (!el) return;
@@ -863,6 +987,185 @@ const MingLightApp: React.FC = () => {
     [activeBook, activeCharacterId, apiConfig, chapterSummaries, runChapterSummary],
   );
 
+  // ---------------- 横版翻页 ----------------
+
+  // 栏宽跟着容器走。屏幕旋转、窗口缩放都会触发重排，所以用 ResizeObserver 盯着。
+  useEffect(() => {
+    if (!isPaged) return;
+    const el = contentRef.current;
+    if (!el) return;
+
+    const update = () => setPageWidth(el.clientWidth);
+    update();
+
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [isPaged, activeBook]);
+
+  // 字号、栏宽、模式一变，分页结果整个不一样，得按 charOffset 重新找回原来的位置
+  useEffect(() => {
+    relocateRef.current = true;
+  }, [pageWidth, progress?.fontSize, isPaged, activeBook?.id]);
+
+  useEffect(() => {
+    if (!isPaged || !activeBook || !progress || pageWidth <= 0) return;
+    const el = contentRef.current;
+    if (!el) return;
+
+    // 等浏览器把多栏排完再测量，否则拿到的是上一次布局的数值
+    const frame = window.requestAnimationFrame(() => {
+      const nodes = getParagraphNodes(el);
+      if (!nodes.length) return;
+
+      const metrics: PageMetrics = {
+        pageWidth,
+        stride: pageWidth + PAGE_GAP,
+      };
+      const contentLeft = el.getBoundingClientRect().left;
+
+      // 总页数用最后一段的结束页来算。不用 scrollWidth——多栏溢出时各浏览器
+      // 对 scrollWidth 的口径不完全一致，实测值反而更稳。
+      const total = Math.max(
+        1,
+        nodePageRange(nodes[nodes.length - 1], contentLeft, metrics).end + 1,
+      );
+
+      let page = Math.min(pageIndex, total - 1);
+
+      if (relocateRef.current) {
+        relocateRef.current = false;
+        const idx = paragraphs.findIndex(
+          p => p.endOffset > progress.charOffset,
+        );
+        const node = nodes[idx < 0 ? nodes.length - 1 : idx];
+        if (node) {
+          page = Math.min(
+            nodePageRange(node, contentLeft, metrics).start,
+            total - 1,
+          );
+        }
+        if (page !== pageIndex) {
+          scheduleSaveProgress({
+            ...progress,
+            page: page + 1,
+            updatedAt: Date.now(),
+          });
+        }
+      }
+
+      const firstIdx = firstNodeOnPage(nodes, contentLeft, metrics, page);
+      const lastIdx = lastNodeOnPage(nodes, contentLeft, metrics, page);
+      const headOffset = paragraphs[firstIdx]?.startOffset ?? 0;
+      const readOffset = paragraphs[lastIdx]?.endOffset ?? 0;
+
+      const chapter =
+        activeBook.chapters.find(
+          ch => headOffset >= ch.startOffset && headOffset < ch.endOffset,
+        ) || activeBook.chapters[0];
+
+      let chapterPage = page + 1;
+      let chapterTotal = total;
+
+      if (chapter) {
+        const startIdx = paragraphs.findIndex(
+          p => p.endOffset > chapter.startOffset,
+        );
+        const endIdx = paragraphs.findIndex(
+          p => p.endOffset >= chapter.endOffset,
+        );
+        const startPage =
+          startIdx >= 0 && nodes[startIdx]
+            ? nodePageRange(nodes[startIdx], contentLeft, metrics).start
+            : 0;
+        const endPage =
+          endIdx >= 0 && nodes[endIdx]
+            ? nodePageRange(nodes[endIdx], contentLeft, metrics).end
+            : total - 1;
+        chapterPage = Math.max(1, page - startPage + 1);
+        chapterTotal = Math.max(chapterPage, endPage - startPage + 1);
+      }
+
+      const percent = Math.min(
+        100,
+        Math.round((readOffset / Math.max(1, activeBook.rawText.length)) * 100),
+      );
+
+      setPageInfo(prev =>
+        prev.total === total &&
+        prev.chapterPage === chapterPage &&
+        prev.chapterTotal === chapterTotal &&
+        prev.percent === percent &&
+        prev.chapterTitle === (chapter?.title || '')
+          ? prev
+          : {
+              total,
+              chapterPage,
+              chapterTotal,
+              percent,
+              chapterTitle: chapter?.title || '',
+            },
+      );
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [
+    isPaged,
+    pageWidth,
+    pageIndex,
+    paragraphs,
+    activeBook,
+    progress,
+    getParagraphNodes,
+    scheduleSaveProgress,
+  ]);
+
+  const goToPage = useCallback(
+    (next: number) => {
+      if (!activeBook || !progress || !isPaged) return;
+      const el = contentRef.current;
+      if (!el || pageWidth <= 0) return;
+
+      const target = Math.min(Math.max(0, next), Math.max(0, pageInfo.total - 1));
+      if (target === pageIndex) return;
+
+      const nodes = getParagraphNodes(el);
+      if (!nodes.length) return;
+
+      const metrics: PageMetrics = { pageWidth, stride: pageWidth + PAGE_GAP };
+      const contentLeft = el.getBoundingClientRect().left;
+
+      const firstIdx = firstNodeOnPage(nodes, contentLeft, metrics, target);
+      const lastIdx = lastNodeOnPage(nodes, contentLeft, metrics, target);
+
+      scheduleSaveProgress({
+        ...progress,
+        page: target + 1,
+        charOffset: paragraphs[firstIdx]?.startOffset ?? progress.charOffset,
+        updatedAt: Date.now(),
+      });
+
+      // 翻页模式下没有 scroll 事件，TA 主动划线和章末总结改由这里驱动，
+      // 判定口径和滚动模式一致：都用「当前可见范围的末尾」当作已读位置。
+      const readOffset = paragraphs[lastIdx]?.endOffset ?? 0;
+      void maybeAskTa(readOffset);
+      void maybeGenerateChapterSummary(readOffset);
+    },
+    [
+      activeBook,
+      progress,
+      isPaged,
+      pageWidth,
+      pageIndex,
+      pageInfo.total,
+      paragraphs,
+      getParagraphNodes,
+      scheduleSaveProgress,
+      maybeAskTa,
+      maybeGenerateChapterSummary,
+    ],
+  );
+
   // ---------------- 选择文字 ----------------
 
   const captureSelection = useCallback(() => {
@@ -896,6 +1199,39 @@ const MingLightApp: React.FC = () => {
     setSelectionParagraphIndex(paragraphIndex);
     setShowSelectionMenu(true);
   }, [paragraphs]);
+
+  const handlePageTouchStart = useCallback(
+    (e: React.TouchEvent) => {
+      if (!isPaged) return;
+      const touch = e.touches[0];
+      swipeRef.current = { x: touch.clientX, y: touch.clientY };
+    },
+    [isPaged],
+  );
+
+  const handlePageTouchEnd = useCallback(
+    (e: React.TouchEvent) => {
+      window.setTimeout(captureSelection, 80);
+
+      const start = swipeRef.current;
+      swipeRef.current = null;
+      if (!isPaged || !start) return;
+
+      // 长按选字再拖动也会产生位移，这时候不能当成翻页
+      const selection = window.getSelection();
+      if (selection && !selection.isCollapsed) return;
+
+      const touch = e.changedTouches[0];
+      const dx = touch.clientX - start.x;
+      const dy = touch.clientY - start.y;
+
+      if (Math.abs(dx) < SWIPE_THRESHOLD) return;
+      if (Math.abs(dx) < Math.abs(dy) * 1.5) return; // 更像是上下划
+
+      goToPage(pageIndex + (dx < 0 ? 1 : -1));
+    },
+    [isPaged, captureSelection, goToPage, pageIndex],
+  );
 
   // ---------------- 用户创建批注 ----------------
 
@@ -1167,16 +1503,7 @@ const MingLightApp: React.FC = () => {
       if (!activeBook || !progress) return;
 
       const el = e.currentTarget;
-
-      // 段落节点列表只在数量变化时重建一次。React 的 key 稳定，DOM 节点会被
-      // 复用，所以缓存下来的引用一直有效；否则每个滚动事件都要 querySelectorAll
-      // 一遍几千个节点，二分查找省下来的开销就白费了。
-      if (paragraphNodesRef.current.length !== paragraphs.length) {
-        paragraphNodesRef.current = Array.from(
-          el.querySelectorAll<HTMLElement>('[data-ml-paragraph]'),
-        );
-      }
-      const nodes = paragraphNodesRef.current;
+      const nodes = getParagraphNodes(el);
 
       // 视口顶端 = 下次回来接着读的地方；视口底端 = 已经读完的地方。
       // 章末判定要用底端，否则得等章尾滚到屏幕最上面才算读完，会偏晚一整屏。
@@ -1197,6 +1524,7 @@ const MingLightApp: React.FC = () => {
       activeBook,
       progress,
       paragraphs,
+      getParagraphNodes,
       scheduleSaveProgress,
       maybeAskTa,
       maybeGenerateChapterSummary,
@@ -1208,35 +1536,74 @@ const MingLightApp: React.FC = () => {
   const jumpToChapter = useCallback(
     (startOffset: number) => {
       if (!activeBook || !progress) return;
-      const el = readerRef.current;
-      if (!el) return;
-
-      // 找到这一章的第一段，直接滚到它真实的 DOM 位置。
-      // 以前是用「起始字符数 ÷ 全书字数 × 可滚动高度」估的，段落长短不一、
-      // 字号一调行高就变，估出来的位置必然和章节开头对不上。
-      scrollToOffset(
-        el,
-        paragraphs,
-        startOffset,
-        activeBook.rawText.length,
-        'smooth',
-      );
 
       // 跳章之后把已读水位挪到这一章开头，否则会被当成「一口气读完了中间所有章」
       readHighWaterRef.current = Math.max(
         readHighWaterRef.current,
         startOffset,
       );
+      setShowChapters(false);
+
+      if (isPaged) {
+        // 翻页模式没有滚动，改成算出这一章落在第几页然后直接翻过去
+        const el = contentRef.current;
+        const nodes = el ? getParagraphNodes(el) : [];
+
+        if (el && nodes.length && pageWidth > 0) {
+          const metrics: PageMetrics = {
+            pageWidth,
+            stride: pageWidth + PAGE_GAP,
+          };
+          const contentLeft = el.getBoundingClientRect().left;
+          const idx = paragraphs.findIndex(p => p.endOffset > startOffset);
+          const node = nodes[idx < 0 ? 0 : idx];
+
+          if (node) {
+            const page = Math.min(
+              nodePageRange(node, contentLeft, metrics).start,
+              Math.max(0, pageInfo.total - 1),
+            );
+            scheduleSaveProgress({
+              ...progress,
+              page: page + 1,
+              charOffset: startOffset,
+              updatedAt: Date.now(),
+            });
+            return;
+          }
+        }
+      }
+
+      const el = readerRef.current;
+      if (el) {
+        // 找到这一章的第一段，直接滚到它真实的 DOM 位置。
+        // 以前是用「起始字符数 ÷ 全书字数 × 可滚动高度」估的，段落长短不一、
+        // 字号一调行高就变，估出来的位置必然和章节开头对不上。
+        scrollToOffset(
+          el,
+          paragraphs,
+          startOffset,
+          activeBook.rawText.length,
+          'smooth',
+        );
+      }
 
       scheduleSaveProgress({
         ...progress,
         charOffset: startOffset,
         updatedAt: Date.now(),
       });
-
-      setShowChapters(false);
     },
-    [activeBook, progress, paragraphs, scheduleSaveProgress],
+    [
+      activeBook,
+      progress,
+      paragraphs,
+      isPaged,
+      pageWidth,
+      pageInfo.total,
+      getParagraphNodes,
+      scheduleSaveProgress,
+    ],
   );
 
   // ---------------- 选中操作定位 ----------------
@@ -1412,6 +1779,25 @@ const MingLightApp: React.FC = () => {
           </div>
 
           <button
+            onClick={() => {
+              const nextMode = isPaged ? 'scroll' : 'paged';
+              // 切回滚动模式要让恢复逻辑跑一次，把 charOffset 还原成滚动位置
+              if (nextMode === 'scroll') restoringRef.current = true;
+              scheduleSaveProgress({
+                ...progress,
+                readingMode: nextMode,
+                page: 1,
+                updatedAt: Date.now(),
+              });
+            }}
+            className="flex items-center gap-1 px-2 py-1 rounded-full text-xs border"
+            style={{ borderColor: `${theme.text}25` }}
+          >
+            <BookOpen size={14} />
+            {isPaged ? '滚动' : '翻页'}
+          </button>
+
+          <button
             onClick={() => setShowChapters(v => !v)}
             className="flex items-center gap-1 px-2 py-1 rounded-full text-xs border"
             style={{ borderColor: `${theme.text}25` }}
@@ -1424,13 +1810,44 @@ const MingLightApp: React.FC = () => {
         {/* 正文：按段落渲染，批注默认不展开 */}
         <div
           ref={readerRef}
-          className="minglight-reader flex-1 overflow-y-auto overflow-x-hidden px-5 py-6"
+          className={`minglight-reader flex-1 px-5 py-6 ${
+            isPaged
+              ? 'relative overflow-hidden'
+              : 'overflow-y-auto overflow-x-hidden'
+          }`}
           style={{ fontSize: progress.fontSize }}
-          onScroll={handleReaderScroll}
+          onScroll={isPaged ? undefined : handleReaderScroll}
           onMouseUp={() => window.setTimeout(captureSelection, 0)}
-          onTouchEnd={() => window.setTimeout(captureSelection, 80)}
+          onTouchStart={handlePageTouchStart}
+          onTouchEnd={
+            isPaged
+              ? handlePageTouchEnd
+              : () => window.setTimeout(captureSelection, 80)
+          }
         >
-          <div className="max-w-3xl mx-auto">
+          <div
+            ref={contentRef}
+            className={isPaged ? '' : 'max-w-3xl mx-auto'}
+            style={
+              isPaged
+                ? {
+                    width: '100%',
+                    height: '100%',
+                    // 栏宽等于容器宽度 → 一屏正好一栏；内容超出就往右边继续排，
+                    // 再用 translateX 把要看的那一栏移到视口里。
+                    columnWidth: pageWidth > 0 ? `${pageWidth}px` : undefined,
+                    columnGap: `${PAGE_GAP}px`,
+                    columnFill: 'auto',
+                    transform:
+                      pageWidth > 0
+                        ? `translateX(-${pageIndex * (pageWidth + PAGE_GAP)}px)`
+                        : undefined,
+                    transition: 'transform 220ms ease',
+                    willChange: 'transform',
+                  }
+                : undefined
+            }
+          >
             {paragraphs.map(paragraph => {
               const anns = paragraphAnnotations.get(paragraph.index) || [];
               const hasTa = anns.some(a => a.source === 'ta');
@@ -1534,6 +1951,39 @@ const MingLightApp: React.FC = () => {
             })}
           </div>
         </div>
+
+        {/* 页码条：章内页码 + 全书百分比 */}
+        {isPaged && (
+          <div
+            className="flex items-center justify-between px-4 py-2 text-xs shrink-0"
+            style={{ borderTop: `1px solid ${theme.text}15` }}
+          >
+            <button
+              onClick={() => goToPage(pageIndex - 1)}
+              disabled={pageIndex <= 0}
+              className="px-2 py-1 rounded-full disabled:opacity-25"
+              aria-label="上一页"
+            >
+              <CaretLeft size={16} />
+            </button>
+
+            <div className="flex-1 text-center truncate opacity-70">
+              {pageInfo.chapterTitle ? `${pageInfo.chapterTitle} · ` : ''}
+              {pageInfo.chapterPage}/{pageInfo.chapterTotal}
+              <span className="mx-2 opacity-40">|</span>
+              全书 {pageInfo.percent}%
+            </div>
+
+            <button
+              onClick={() => goToPage(pageIndex + 1)}
+              disabled={pageIndex >= pageInfo.total - 1}
+              className="px-2 py-1 rounded-full disabled:opacity-25 rotate-180"
+              aria-label="下一页"
+            >
+              <CaretLeft size={16} />
+            </button>
+          </div>
+        )}
 
         {/* 文字选择菜单 */}
         {showSelectionMenu && selectionQuote && (
