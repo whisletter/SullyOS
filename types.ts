@@ -3992,6 +3992,9 @@ export interface FullBackupData {
     dreamCollection?: Record<string, { firstAt: number; count: number }>;  // 梦境盲盒收藏册（os_dream_collection，账号级 localStorage）
     gotchiAccentHue?: string;  // 桌面电子宠物主题主色调偏好（tama_accent_hue，账号级 localStorage）
 
+    // 眠光（独立 IndexedDB 库 SullyOS_MingLight 的全量快照）
+    mingLight?: import('./utils/mingLightDb').MingLightBackupData;
+
     // 独立协同工作数据库。二进制文件放在 ZIP 的 collaboration/assets/，JSON 只存索引。
     collaborationBackupVersion?: 1;
     collaborationBackupMode?: 'text_only' | 'media_only' | 'full';
