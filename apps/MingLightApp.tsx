@@ -1504,16 +1504,6 @@ const MingLightApp: React.FC = () => {
     paragraphs,
     addToast,
   ]);
-    }
-  }, [
-    activeBook,
-    selectedAnnotation,
-    replyText,
-    apiConfig,
-    char,
-    paragraphs,
-    addToast,
-  ]);
 
   // ---------------- 收藏进记忆宫殿 ----------------
 
