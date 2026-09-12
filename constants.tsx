@@ -37,6 +37,7 @@ import {
   Planet,
   Wrench,
   HouseLine,
+  ChatsCircle,
 } from '@phosphor-icons/react';
 
 // SVG 图标库 - Phosphor Icons
@@ -78,6 +79,7 @@ export const Icons: Record<string, React.FC<{ className?: string }>> = {
   VRWorld: ({ className }) => <Planet className={className} weight="regular" />,
   CharCreatorDev: ({ className }) => <Wrench className={className} weight="regular" />,
   WorldHome: ({ className }) => <HouseLine className={className} weight="regular" />,
+  Moments: ({ className }) => <ChatsCircle className={className} weight="regular" />,
 };
 
 export const INSTALLED_APPS: AppConfig[] = [
@@ -101,6 +103,7 @@ export const INSTALLED_APPS: AppConfig[] = [
   { id: AppID.Game, name: 'TRPG', icon: 'Game', color: 'orange' },
   { id: AppID.Novel, name: '笔友会', icon: 'Novel', color: 'amber' },
   { id: AppID.Reading, name: '眠光', icon: 'Reading', color: 'amber' },
+  { id: AppID.Moments, name: '朋友圈', icon: 'Moments', color: 'violet' },
   { id: AppID.Songwriting, name: '写歌', icon: 'Songwriting', color: 'fuchsia' },
   { id: AppID.VRWorld, name: '彼方', icon: 'VRWorld', color: 'indigo' },
   { id: AppID.Schedule, name: '时光契约', icon: 'Schedule', color: 'cyan' },
