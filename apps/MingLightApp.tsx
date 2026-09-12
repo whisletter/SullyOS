@@ -218,8 +218,8 @@ const THEME_STYLES: Record<
   },
 };
 
-const USER_MARK = '#5B8FF9';
-const TA_MARK = '#D6A84F';
+const USER_MARK = '#000daa';
+const TA_MARK = '#daa000';
 
 interface Paragraph {
   index: number;
@@ -1330,7 +1330,61 @@ const MingLightApp: React.FC = () => {
 
   // ---------------- 用户创建批注 ----------------
 
-  const createUserAnnotation = useCallback(async () => {
+  /** 只保存批注，不调用 API 让 TA 回应。 */
+  const saveUserAnnotationOnly = useCallback(async () => {
+    if (
+      !activeBook ||
+      !activeCharacterId ||
+      !selectionQuote ||
+      selectionParagraphIndex < 0
+    ) {
+      return;
+    }
+
+    const comment = userNote.trim();
+    if (!comment) return;
+
+    const annotation: MingLightAnnotation = {
+      id: genId('ann'),
+      bookId: activeBook.id,
+      charId: activeCharacterId,
+      paragraphIndex: selectionParagraphIndex,
+      startOffset: selectionStart,
+      endOffset: selectionEnd,
+      quotedText: selectionQuote,
+      source: 'user',
+      comment,
+      thread: [],
+      createdAt: Date.now(),
+    };
+
+    const updated: MingLightBook = {
+      ...activeBook,
+      annotations: [
+        ...(activeBook.annotations || []),
+        annotation,
+      ],
+    };
+
+    await saveBook(updated);
+    setActiveBook(updated);
+    setSelectedAnnotation(annotation);
+    setShowUserNoteComposer(false);
+    setShowSelectionMenu(false);
+    setUserNote('');
+    window.getSelection()?.removeAllRanges();
+  }, [
+    activeBook,
+    activeCharacterId,
+    selectionQuote,
+    selectionParagraphIndex,
+    selectionStart,
+    selectionEnd,
+    userNote,
+  ]);
+
+  /** 保存批注，同时让 TA 立即回应。 */
+  const saveUserAnnotationAndAskTa = useCallback(async () => {
     if (
       !activeBook ||
       !activeCharacterId ||
@@ -1373,7 +1427,7 @@ const MingLightApp: React.FC = () => {
     setUserNote('');
     window.getSelection()?.removeAllRanges();
 
-    // 用户先开口时，TA 立即回应；只使用当前句和当前段落。
+    // 让 TA 回应
     try {
       if (apiConfig?.baseUrl && apiConfig.model && char) {
         const paragraph = paragraphs[selectionParagraphIndex];
@@ -2282,9 +2336,18 @@ const MingLightApp: React.FC = () => {
                   取消
                 </button>
                 <button
-                  onClick={createUserAnnotation}
+                  onClick={saveUserAnnotationOnly}
                   disabled={!userNote.trim()}
-                  className="px-4 py-2 rounded-full bg-black/10 text-sm disabled:opacity-30"
+                  className="px-4 py-2 rounded-full text-sm disabled:opacity-30"
+                  style={{ background: `${USER_MARK}18`, color: theme.text }}
+                >
+                  仅保存
+                </button>
+                <button
+                  onClick={saveUserAnnotationAndAskTa}
+                  disabled={!userNote.trim()}
+                  className="px-4 py-2 rounded-full text-sm disabled:opacity-30"
+                  style={{ background: `${TA_MARK}30`, color: theme.text }}
                 >
                   保存并让 TA 回应
                 </button>
