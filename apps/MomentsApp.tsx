@@ -81,7 +81,14 @@ const MomentsApp: React.FC = () => {
   const charAvatar = char?.avatar || '';
 
   // ---- 视图状态 ----
-  const [view, setView] = useState<View>('main');
+  const [view, setView] = useState<View>(() => {
+    const openTa = localStorage.getItem('moments_open_ta');
+    if (openTa) {
+      localStorage.removeItem('moments_open_ta');
+      return 'taPage';
+    }
+    return 'main';
+  });
   const [composeType, setComposeType] = useState<ComposeType>(null);
   const [showComposeMenu, setShowComposeMenu] = useState(false);
 
@@ -404,7 +411,7 @@ const MomentsApp: React.FC = () => {
             backgroundPosition: 'center',
           } : {}}
         />
-        <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-black/20" />
+        <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-black/20 pointer-events-none" />
 
         {/* 头像和名字 */}
         <div className="absolute bottom-4 right-4 flex items-end gap-3">
