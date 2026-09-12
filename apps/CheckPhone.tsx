@@ -2485,7 +2485,11 @@ ${olderText}
                 <TermHeader title="Moments" sub="朋友圈" accent={accent} onBack={() => setActiveAppId('home')}
                     right={
                         <button
-                            onClick={() => { closeApp(); setTimeout(() => openApp(AppID.Moments), 100); }}
+                            onClick={() => {
+                                localStorage.setItem('moments_open_ta', '1');
+                                closeApp();
+                                setTimeout(() => openApp(AppID.Moments), 100);
+                            }}
                             className="flex items-center gap-1 text-[11px] font-medium active:scale-90 transition"
                             style={{ color: accent }}
                         >
