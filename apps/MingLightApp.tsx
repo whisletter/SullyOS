@@ -2296,7 +2296,7 @@ const MingLightApp: React.FC = () => {
                   <button
                     onClick={triggerTaReply}
                     disabled={sendingReply}
-                    className="p-1 rounded-full disabled:opacity-30"
+                    className="p-1 rounded-full disabled:opacity-30 mr-4"
                     title="让 TA 回应"
                   >
                     <Lightning size={18} weight="bold" />
