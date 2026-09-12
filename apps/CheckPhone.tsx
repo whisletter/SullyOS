@@ -2,7 +2,7 @@ import { loadCharacterContextMessages } from '../utils/chatContextRange';
 import React, { useState, useEffect, useRef } from 'react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
-import { CharacterProfile, PhoneEvidence, PhoneCustomApp, PhoneContact, PhoneSimLog, ConvTopic, AiSession, AiServiceKind, TavernCard, APIConfig } from '../types';
+import { CharacterProfile, PhoneEvidence, PhoneCustomApp, PhoneContact, PhoneSimLog, ConvTopic, AiSession, AiServiceKind, TavernCard, APIConfig, AppID } from '../types';
 import { ContextBuilder } from '../utils/context';
 import Modal from '../components/os/Modal';
 import TokenImg from '../components/os/TokenImg';
@@ -258,7 +258,7 @@ const HomeCard: React.FC<{
 );
 
 const CheckPhone: React.FC = () => {
-    const { closeApp, characters, activeCharacterId, updateCharacter, apiConfig, apiPresets, addToast, userProfile, characterGroups } = useOS();
+    const { closeApp, openApp, characters, activeCharacterId, updateCharacter, apiConfig, apiPresets, addToast, userProfile, characterGroups } = useOS();
     const [view, setView] = useState<'select' | 'phone'>('select');
     // activeAppId: 'home' | 'chat_detail' | 'app_id'
     const [activeAppId, setActiveAppId] = useState<string>('home');
@@ -2483,7 +2483,15 @@ ${olderText}
         return (
             <SubAppShell>
                 <TermHeader title="Moments" sub="朋友圈" accent={accent} onBack={() => setActiveAppId('home')}
-                    right={<ImagesSquare size={20} weight="fill" style={{ color: accent }} />} />
+                    right={
+                        <button
+                            onClick={() => { closeApp(); setTimeout(() => openApp(AppID.Moments), 100); }}
+                            className="flex items-center gap-1 text-[11px] font-medium active:scale-90 transition"
+                            style={{ color: accent }}
+                        >
+                            打开朋友圈 <CaretRight size={12} />
+                        </button>
+                    } />
                 <div className="flex-1 overflow-y-auto px-4 pt-2 no-scrollbar pb-28 overscroll-contain space-y-3">
                     {list.length === 0 && <EmptyState text="还没有动态" />}
                     {list.map(r => (
