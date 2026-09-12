@@ -1947,4 +1947,67 @@ const MingLightApp: React.FC = () => {
                   className="absolute top-1 right-1 bg-black/40 text-white rounded-full p-0.5 opacity-0 group-active:opacity-100"
                 >
                   <Trash size={12} />
-   
+                </button>
+              </div>
+
+              <div className="text-xs text-center truncate w-full">
+                {book.title}
+              </div>
+
+              {book.author && (
+                <div className="text-[10px] text-gray-400 text-center truncate w-full">
+                  {book.author}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* 导入弹窗 */}
+      {showImportModal && (
+        <div
+          className="absolute inset-0 bg-black/40 flex items-center justify-center z-10"
+          onClick={() => setShowImportModal(false)}
+        >
+          <div
+            className="bg-white rounded-xl p-5 w-[80%] flex flex-col items-center gap-3"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="text-sm text-gray-600 text-center">
+              支持导入 TXT 和 EPUB
+            </div>
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".txt,text/plain,.epub,application/epub+zip"
+              className="hidden"
+              onChange={e => {
+                const f = e.target.files?.[0];
+                if (f) handleFileChosen(f);
+                e.currentTarget.value = '';
+              }}
+            />
+
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="px-4 py-2 bg-amber-700 text-white rounded-full text-sm w-full"
+            >
+              选择文件
+            </button>
+
+            <button
+              onClick={() => setShowImportModal(false)}
+              className="text-xs text-gray-400"
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default MingLightApp;
