@@ -16,11 +16,12 @@
 import JSZip from 'jszip';
 
 const DB_NAME = 'SullyOS_MingLight';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 const STORE_BOOKS = 'books';
 const STORE_PROGRESS = 'progress';
 const STORE_CHAPTER_SUMMARIES = 'chapterSummaries';
+const STORE_SETTINGS = 'settings';
 
 export type MingLightTheme = 'day' | 'sepia' | 'green' | 'night';
 export type MingLightReadingMode = 'scroll' | 'paged';
@@ -734,6 +735,10 @@ function openDb(): Promise<IDBDatabase> {
         });
         store.createIndex('bookId', 'bookId', { unique: false });
       }
+
+      if (!db.objectStoreNames.contains(STORE_SETTINGS)) {
+        db.createObjectStore(STORE_SETTINGS, { keyPath: 'id' });
+      }
     };
 
     req.onsuccess = () => resolve(req.result);
@@ -935,6 +940,68 @@ export async function saveChapterSummary(s: MingLightChapterSummary): Promise<vo
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_CHAPTER_SUMMARIES, 'readwrite');
     tx.objectStore(STORE_CHAPTER_SUMMARIES).put(s);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+// ---------------- 眠光设置（副 API + 省调用开关）----------------
+
+export interface MingLightSubApi {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+}
+
+export interface MingLightSettings {
+  id: 'default';
+  /**
+   * 副 API。留空则回退用主 API。
+   * 只作用于后台自动任务（TA 主动划线、章末总结、记忆归档），
+   * 你点开批注跟 TA 对话仍然走主 API，那是要看质量的。
+   */
+  subApi: MingLightSubApi;
+  /** TA 主动划线的检查间隔（字）。越大，一本书里 TA 开口的次数越少。 */
+  taInterval: number;
+  /** 章末总结是读到就自动生成，还是等你点开再生成。 */
+  autoSummary: boolean;
+  updatedAt: number;
+}
+
+export const DEFAULT_MINGLIGHT_SETTINGS: MingLightSettings = {
+  id: 'default',
+  subApi: { baseUrl: '', apiKey: '', model: '' },
+  taInterval: 2500,
+  autoSummary: true,
+  updatedAt: 0,
+};
+
+export async function getMingLightSettings(): Promise<MingLightSettings> {
+  const db = await openDb();
+  return new Promise(resolve => {
+    const tx = db.transaction(STORE_SETTINGS, 'readonly');
+    const req = tx.objectStore(STORE_SETTINGS).get('default');
+    req.onsuccess = () =>
+      resolve({
+        ...DEFAULT_MINGLIGHT_SETTINGS,
+        ...(req.result || {}),
+        subApi: {
+          ...DEFAULT_MINGLIGHT_SETTINGS.subApi,
+          ...(req.result?.subApi || {}),
+        },
+      });
+    // 读设置失败不该把整个书架卡住，退回默认值就好
+    req.onerror = () => resolve(DEFAULT_MINGLIGHT_SETTINGS);
+  });
+}
+
+export async function saveMingLightSettings(
+  settings: MingLightSettings,
+): Promise<void> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_SETTINGS, 'readwrite');
+    tx.objectStore(STORE_SETTINGS).put({ ...settings, updatedAt: Date.now() });
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
