@@ -1006,3 +1006,81 @@ export async function saveMingLightSettings(
     tx.onerror = () => reject(tx.error);
   });
 }
+
+// ==================== 备份与恢复 ====================
+
+/** 眠光备份数据的结构。字段名须与 FullBackupData.mingLight 对齐。 */
+export interface MingLightBackupData {
+  books: MingLightBook[];
+  progress: MingLightProgress[];
+  chapterSummaries: MingLightChapterSummary[];
+  settings: MingLightSettings | null;
+}
+
+/** 把眠光独立库里的所有数据导出成一个纯 JSON 对象。 */
+export async function exportMingLightAll(): Promise<MingLightBackupData> {
+  const db = await openDb();
+
+  const getAll = <T,>(storeName: string): Promise<T[]> =>
+    new Promise((resolve, reject) => {
+      const tx = db.transaction(storeName, 'readonly');
+      const req = tx.objectStore(storeName).getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => reject(req.error);
+    });
+
+  const getSettings = (): Promise<MingLightSettings | null> =>
+    new Promise(resolve => {
+      const tx = db.transaction(STORE_SETTINGS, 'readonly');
+      const req = tx.objectStore(STORE_SETTINGS).get('default');
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => resolve(null);
+    });
+
+  const [books, progress, chapterSummaries, settings] = await Promise.all([
+    getAll<MingLightBook>(STORE_BOOKS),
+    getAll<MingLightProgress>(STORE_PROGRESS),
+    getAll<MingLightChapterSummary>(STORE_CHAPTER_SUMMARIES),
+    getSettings(),
+  ]);
+
+  return { books, progress, chapterSummaries, settings };
+}
+
+/**
+ * 用备份数据覆盖眠光独立库的全部内容。
+ * 策略：先清空再写入（和主库 importFullData 对 IDB store 的处理一致）。
+ */
+export async function importMingLightAll(
+  backup: MingLightBackupData,
+): Promise<void> {
+  const db = await openDb();
+
+  const clearAndPut = <T,>(storeName: string, items: T[]): Promise<void> =>
+    new Promise((resolve, reject) => {
+      const tx = db.transaction(storeName, 'readwrite');
+      const store = tx.objectStore(storeName);
+      store.clear();
+      for (const item of items) {
+        store.put(item);
+      }
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+
+  await clearAndPut(STORE_BOOKS, backup.books || []);
+  await clearAndPut(STORE_PROGRESS, backup.progress || []);
+  await clearAndPut(STORE_CHAPTER_SUMMARIES, backup.chapterSummaries || []);
+
+  // settings 是单例，单独写
+  if (backup.settings) {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE_SETTINGS, 'readwrite');
+      const store = tx.objectStore(STORE_SETTINGS);
+      store.clear();
+      store.put(backup.settings);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+}
