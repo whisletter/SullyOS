@@ -2100,4 +2100,398 @@ const MingLightApp: React.FC = () => {
                         onClick={() => jumpToChapter(chapter.startOffset)}
                         className="flex-1 text-left truncate"
                       >
-                        {chapter.title 
+                        {chapter.title || `第 ${index + 1} 章`}
+                      </button>
+                      {generating ? (
+                        <span className="text-xs opacity-50 shrink-0 ml-2">生成中…</span>
+                      ) : summary ? (
+                        <button
+                          onClick={() => setViewingSummaryFor(chapter.index)}
+                          className="text-xs shrink-0 ml-2 px-2 py-1 rounded-full border"
+                          style={{ borderColor: `${theme.text}30` }}
+                        >
+                          读后感
+                        </button>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 章末总结弹窗 */}
+        {viewingSummaryFor !== null && chapterSummaries[viewingSummaryFor] && (
+          <div
+            className="absolute inset-0 z-40 flex items-center justify-center px-6"
+            style={{ background: `${theme.text}30` }}
+            onClick={() => setViewingSummaryFor(null)}
+          >
+            <div
+              className="w-full max-w-sm max-h-[75%] overflow-y-auto rounded-2xl p-5 shadow-xl"
+              style={{ background: theme.panelBg, color: theme.text }}
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between mb-3">
+                <div className="font-semibold text-sm">
+                  {activeBook.chapters[viewingSummaryFor]?.title || `第 ${viewingSummaryFor + 1} 章`} · 读后感
+                </div>
+                <div className="flex items-center gap-2 shrink-0 ml-2">
+                  <button
+                    onClick={() => regenerateChapterSummary(viewingSummaryFor)}
+                    disabled={generatingSummaryFor !== null}
+                    className="flex items-center gap-1 text-xs px-2 py-1 rounded-full border disabled:opacity-40"
+                    style={{ borderColor: `${theme.text}30` }}
+                  >
+                    <ArrowClockwise
+                      size={13}
+                      className={
+                        generatingSummaryFor === viewingSummaryFor
+                          ? 'animate-spin'
+                          : ''
+                      }
+                    />
+                    {generatingSummaryFor === viewingSummaryFor ? '重写中' : '重写'}
+                  </button>
+                  <button onClick={() => setViewingSummaryFor(null)}><X size={18} /></button>
+                </div>
+              </div>
+
+              <div className="mb-4">
+                <div className="text-xs opacity-60 mb-1">{char?.name} 的感想</div>
+                <div className="text-sm leading-relaxed whitespace-pre-wrap">
+                  {chapterSummaries[viewingSummaryFor].subjective}
+                </div>
+              </div>
+
+              <div>
+                <div className="text-xs opacity-60 mb-1">客观内容总结</div>
+                <div className="text-sm leading-relaxed whitespace-pre-wrap opacity-80">
+                  {chapterSummaries[viewingSummaryFor].objective}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 用户批注输入框 */}
+        {showUserNoteComposer && (
+          <div
+            className="absolute inset-0 z-50 flex items-end justify-center bg-black/30 p-4"
+            onClick={() => setShowUserNoteComposer(false)}
+          >
+            <div
+              className="w-full max-w-xl rounded-2xl p-4 shadow-2xl"
+              style={{
+                background: theme.panelBg,
+                color: theme.text,
+              }}
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="text-xs opacity-50 mb-2">你划下来的句子</div>
+              <div className="text-sm leading-relaxed mb-3 opacity-80">
+                “{selectionQuote}”
+              </div>
+
+              <textarea
+                autoFocus
+                value={userNote}
+                onChange={e => setUserNote(e.target.value)}
+                placeholder="写下你的感想……"
+                className="w-full min-h-[100px] rounded-xl border border-black/10 bg-transparent p-3 text-sm outline-none resize-none"
+              />
+
+              <div className="flex justify-end gap-2 mt-3">
+                <button
+                  onClick={() => setShowUserNoteComposer(false)}
+                  className="px-4 py-2 text-sm opacity-60"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={createUserAnnotation}
+                  disabled={!userNote.trim()}
+                  className="px-4 py-2 rounded-full bg-black/10 text-sm disabled:opacity-30"
+                >
+                  保存并让 TA 回应
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 批注 / 讨论框：点击标识后才出现 */}
+        {selectedAnnotation && (
+          <div
+            className="absolute inset-0 z-50 flex items-end justify-center bg-black/30 p-4"
+            onClick={() => setSelectedAnnotation(null)}
+          >
+            <div
+              className="w-full max-w-xl max-h-[78%] rounded-2xl shadow-2xl flex flex-col overflow-hidden"
+              style={{
+                background: theme.panelBg,
+                color: theme.text,
+              }}
+              onClick={e => e.stopPropagation()}
+            >
+              <div
+                className="flex items-center justify-between px-4 py-3 shrink-0"
+                style={{ borderBottom: `1px solid ${theme.text}18` }}
+              >
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  {selectedAnnotation.source === 'ta' ? (
+                    <Sparkle size={16} />
+                  ) : (
+                    <ChatCircleText size={16} />
+                  )}
+                  {selectedAnnotation.source === 'ta'
+                    ? char.name
+                    : '我的批注'}
+                </div>
+
+                <button
+                  onClick={() => setSelectedAnnotation(null)}
+                  className="p-1"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto px-4 py-4">
+                <div className="text-xs opacity-50 mb-2">原句</div>
+                <div className="text-sm leading-relaxed mb-4 pl-3 border-l-2 opacity-80">
+                  “{selectedAnnotation.quotedText}”
+                </div>
+
+                {/* 首条批注 */}
+                <div
+                  className={`flex mb-3 ${
+                    selectedAnnotation.source === 'user'
+                      ? 'justify-end'
+                      : 'justify-start'
+                  }`}
+                >
+                  <div
+                    className="max-w-[88%] rounded-2xl px-3 py-2 text-sm leading-relaxed"
+                    style={{
+                      background:
+                        selectedAnnotation.source === 'ta'
+                          ? `${TA_MARK}20`
+                          : `${USER_MARK}20`,
+                    }}
+                  >
+                    {selectedAnnotation.comment}
+                  </div>
+                </div>
+
+                {/* 后续讨论 */}
+                {(selectedAnnotation.thread || []).map(message => (
+                  <div
+                    key={message.id}
+                    className={`flex mb-3 ${
+                      message.author === 'user'
+                        ? 'justify-end'
+                        : 'justify-start'
+                    }`}
+                  >
+                    <div
+                      className="max-w-[88%] rounded-2xl px-3 py-2 text-sm leading-relaxed"
+                      style={{
+                        background:
+                          message.author === 'ta'
+                            ? `${TA_MARK}20`
+                            : `${USER_MARK}20`,
+                      }}
+                    >
+                      {message.content}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* 底部操作：收藏明确由用户手动触发 */}
+              <div
+                className="px-4 py-3 shrink-0"
+                style={{ borderTop: `1px solid ${theme.text}18` }}
+              >
+                <div className="flex items-center gap-2 mb-3">
+                  <button
+                    onClick={archiveSelectedAnnotation}
+                    disabled={savingMemory || !!selectedAnnotation.archivedAt}
+                    className="text-[11px] px-3 py-1.5 rounded-full border flex items-center gap-1 disabled:opacity-40"
+                    style={{ borderColor: `${theme.text}20` }}
+                  >
+                    <BookmarkSimple size={13} />
+                    {selectedAnnotation.archivedAt
+                      ? '已收藏进记忆宫殿'
+                      : savingMemory
+                        ? '收藏中…'
+                        : '收藏进记忆宫殿'}
+                  </button>
+                </div>
+
+                <div className="flex items-end gap-2">
+                  <textarea
+                    value={replyText}
+                    onChange={e => setReplyText(e.target.value)}
+                    placeholder="回复这句话……"
+                    className="flex-1 min-h-[44px] max-h-[100px] rounded-xl border border-black/10 bg-transparent p-2.5 text-sm outline-none resize-none"
+                  />
+                  <button
+                    onClick={sendReply}
+                    disabled={!replyText.trim() || sendingReply}
+                    className="w-10 h-10 rounded-full flex items-center justify-center bg-black/10 disabled:opacity-30"
+                    aria-label="发送"
+                  >
+                    <PaperPlaneTilt size={17} />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ==================================================
+  // 书架
+  // ==================================================
+
+  return (
+    <div className="h-full flex flex-col bg-[#F7F2EA]">
+      <div className="flex items-center justify-between px-4 py-3">
+        <button
+          onClick={() => {
+            notifyMingLightClosed();
+            closeApp();
+          }}
+          className="p-1"
+        >
+          <CaretLeft size={22} />
+        </button>
+
+        <div className="text-base font-semibold">
+          眠光 · 和{char.name}的书架
+        </div>
+
+        <button
+          onClick={() => setShowImportModal(true)}
+          className="p-1"
+        >
+          <Plus size={22} />
+        </button>
+      </div>
+
+      {loading ? (
+        <div className="flex-1 flex items-center justify-center text-gray-400 text-sm">
+          加载中…
+        </div>
+      ) : books.length === 0 ? (
+        <div className="flex-1 flex flex-col items-center justify-center text-gray-400 gap-3 px-8 text-center">
+          <BookOpen size={40} />
+          <div className="text-sm">
+            书架还是空的，导入一本 TXT 或 EPUB 开始共读吧
+          </div>
+          <button
+            onClick={() => setShowImportModal(true)}
+            className="px-4 py-2 bg-amber-700 text-white rounded-full text-sm"
+          >
+            导入第一本书
+          </button>
+        </div>
+      ) : (
+        <div className="flex-1 overflow-y-auto grid grid-cols-3 gap-4 p-4">
+          {books.map(book => (
+            <div
+              key={book.id}
+              className="flex flex-col items-center gap-1"
+              onClick={() => openBook(book)}
+            >
+              <div className="w-full aspect-[3/4] rounded-md bg-amber-100 border border-amber-300 flex items-center justify-center overflow-hidden relative group">
+                {book.coverUrl ? (
+                  <img
+                    src={book.coverUrl}
+                    alt={book.title}
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <BookOpen
+                    size={28}
+                    className="text-amber-700"
+                  />
+                )}
+
+                <button
+                  onClick={e => {
+                    e.stopPropagation();
+                    handleDeleteBook(book.id);
+                  }}
+                  className="absolute top-1 right-1 bg-black/40 text-white rounded-full p-0.5 opacity-0 group-active:opacity-100"
+                >
+                  <Trash size={12} />
+                </button>
+              </div>
+
+              <div className="text-xs text-center truncate w-full">
+                {book.title}
+              </div>
+
+              {book.author && (
+                <div className="text-[10px] text-gray-400 text-center truncate w-full">
+                  {book.author}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* 导入弹窗 */}
+      {showImportModal && (
+        <div
+          className="absolute inset-0 bg-black/40 flex items-center justify-center z-10"
+          onClick={() => setShowImportModal(false)}
+        >
+          <div
+            className="bg-white rounded-xl p-5 w-[80%] flex flex-col items-center gap-3"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="text-sm text-gray-600 text-center">
+              支持导入 TXT 和 EPUB
+            </div>
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".txt,text/plain,.epub,application/epub+zip"
+              className="hidden"
+              onChange={e => {
+                const f = e.target.files?.[0];
+                if (f) handleFileChosen(f);
+                e.currentTarget.value = '';
+              }}
+            />
+
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="px-4 py-2 bg-amber-700 text-white rounded-full text-sm w-full"
+            >
+              选择文件
+            </button>
+
+            <button
+              onClick={() => setShowImportModal(false)}
+              className="text-xs text-gray-400"
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default MingLightApp;
