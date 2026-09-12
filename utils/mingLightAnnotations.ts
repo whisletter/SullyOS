@@ -173,21 +173,41 @@ export async function generateChapterSummary(args: {
   chapterText: string;
   discussionExcerpt: string;
 }): Promise<{ subjective: string; objective: string }> {
-  const subjectiveSystem = `你是角色「${args.char.name}」，刚和用户一起读完了这一章。\n你的角色设定：\n${compactPersona(args.char)}\n\n用你的人设语气，写一段简短的读后感：这一章你印象最深的句子是什么、你们讨论出了什么新想法。100-200字，自然说话的口吻，不要分点列举，不要写成书评报告。`;
+  // 主观读后感和客观总结合并成一次调用。
+  // 以前是两次独立请求，而且同一段 6000 字原文要发两遍——调用数和输入 token
+  // 都是双份。合成一次之后原文只发一遍，省掉一半。
+  const system = `你要一次完成两件独立的事，输出一个 JSON 对象。
 
-  const subjective = await callLlm(
+第一件：以角色「${args.char.name}」的身份，写刚读完这一章的读后感。
+你的角色设定：
+${compactPersona(args.char)}
+用你的人设语气，写这一章你印象最深的句子是什么、你们讨论出了什么新想法。
+100-200字，自然说话的口吻，不要分点列举，不要写成书评报告。
+
+第二件：完全脱离上面的角色，改用中立的文本摘要工具口吻，归纳本章核心内容：
+剧情推进、人物变化、关键信息。150字以内，可以分点，不带任何主观评价。
+
+只输出如下 JSON，不要有别的内容：
+{"subjective": "第一件的结果", "objective": "第二件的结果"}`;
+
+  const raw = await callLlm(
     args.api,
-    subjectiveSystem,
-    `本章原文：\n${args.chapterText.slice(0, 6000)}\n\n你们的讨论摘录：\n${args.discussionExcerpt || '（这一章你们暂时没有展开讨论）'}`,
+    system,
+    `本章原文：\n${args.chapterText.slice(0, 6000)}\n\n你们的讨论摘录：\n${
+      args.discussionExcerpt || '（这一章你们暂时没有展开讨论）'
+    }`,
   );
 
-  const objectiveSystem = `你是一个客观的文本摘要工具，不扮演任何角色、不带任何感情色彩。请归纳以下章节的核心内容：剧情推进、人物变化、关键信息。150字以内，可以分点列出，不要加入任何主观评价或感想。`;
+  const parsed = extractJson<{ subjective?: string; objective?: string }>(raw);
 
-  const objective = await callLlm(
-    args.api,
-    objectiveSystem,
-    args.chapterText.slice(0, 6000),
-  );
+  if (parsed?.subjective || parsed?.objective) {
+    return {
+      subjective: String(parsed.subjective || '').trim(),
+      objective: String(parsed.objective || '').trim(),
+    };
+  }
 
-  return { subjective: subjective.trim(), objective: objective.trim() };
+  // 模型没按 JSON 输出时不再补一次请求，直接把整段当读后感存下来，
+  // 你觉得不对可以点「重写」。多花一次调用去救一次格式错误不划算。
+  return { subjective: raw.trim(), objective: '' };
 }
