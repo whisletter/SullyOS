@@ -86,6 +86,7 @@ import { exportDesktopSkinLocal } from '../utils/desktopSkinBackup';
 import { assertSupportedSullyBackup } from '../utils/backupImportPolicy';
 import { createBuiltinSullyLive2DConfig, isBuiltinSullyLive2D, upgradeBuiltinSullyLive2DDefaults } from '../utils/builtinSullyLive2D';
 import { normalizeCharacterRoomAssetsInPlace } from '../utils/roomTemplateAssets';
+import { exportMingLightAll, importMingLightAll } from '../utils/mingLightDb';
 
 interface ProactiveQueueEntry {
   charId: string;
@@ -4093,6 +4094,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               backupData.amsg2GlobalConfig = await exportAmsg2GlobalConfig();
           }
 
+          // 眠光是独立的 IndexedDB 库（SullyOS_MingLight），不在主 DB store 清单里，
+          // 异步，单独取一次。含书籍原文/批注/讨论/副 API 设置，跟 apiConfig 一样，
+          // media_only（可分享档）不带，避免夹带阅读隐私和密钥。
+          if (mode === 'text_only' || mode === 'full') {
+              backupData.mingLight = await exportMingLightAll();
+          }
+
           // 桌面皮肤偏好（电子宠物/手游风的界面配色 + 看板 banner）——异步（看板图令牌需解析为
           // data URL 才能跨设备），所以在对象字面量外单独 await。text_only 只带配色偏好、跳过看板大图。
           backupData.desktopSkinLocal = await exportDesktopSkinLocal(mode !== 'text_only');
@@ -4953,6 +4961,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           if (data.apiPresets) savePresets(data.apiPresets);
           if (data.realtimeConfig) updateRealtimeConfig(data.realtimeConfig); // 恢复实时感知配置
           if (data.memoryPalaceConfig) updateMemoryPalaceConfig(data.memoryPalaceConfig); // 恢复记忆宫殿全局配置
+          // 眠光同样是独立 IndexedDB 库，不走上面通用的 store 清单，单独还原。
+          if (data.mingLight) {
+              try { await importMingLightAll(data.mingLight); }
+              catch (e) { console.warn('[Backup] 眠光数据还原失败:', e); }
+          }
 
           if (data.customIcons !== undefined || data.appearancePresets !== undefined) {
               await restoreAssetsInPlace(data.customIcons, '应用图标');
