@@ -53,8 +53,10 @@ import { getLocalDateKey } from './localDate';
 import { normalizeAssistantActionFormatting } from './assistantActionFormat';
 import { markAmsgStateDirty } from './amsgStateSync';
 import { announceScheduleChanges, applyAssistantScheduleChanges } from './scheduleChange';
-import { isBlobRef } from './blobRef';
+import { isBlobRef, migrateDataUrlToRef } from './blobRef';
 import { stripLeakedSourceTags } from './sanitize';
+import { generateImage, isImageGenApiReady } from './imageGenApi';
+import type { ImageGenApiConfig } from '../types';
 
 // ─── 模块内辅助 ──────────────────────────────────────────────────────────────
 
@@ -475,6 +477,12 @@ export interface PostProcessCtx {
     lastXhsNotesRef?: { current: XhsNote[] };
     /** API 调用配置 */
     api: PostProcessApiCall;
+    /**
+     * 全局「生图 API」配置（apiConfig.imageGenApi）。聊天框自动发图（IMG_GEN 指令）用它调
+     * generateImage()；未传或未 enabled 时，即使角色说了 `[[IMG_GEN:...]]` 也不会真的生图
+     * （system prompt 那边同样要求两个开关都开才注入指令，这里是执行侧兜底）。
+     */
+    imageGenApi?: ImageGenApiConfig;
     /** UI / 业务钩子 */
     hooks: PostProcessHooks;
     /**
@@ -544,6 +552,7 @@ export async function applyAssistantPostProcessing(
         directives,
         reasoningContent: pushReasoningContent,
         messageTimestamp,
+        imageGenApi,
     } = ctx;
     const { baseUrl, headers, effectiveApi } = api;
     // 拟人打字延迟：流式预览已实时展示过气泡时（instantRender）跳过，避免二次慢放
@@ -2167,7 +2176,11 @@ export async function applyAssistantPostProcessing(
         (d): d is Extract<PostProcessDirective, { type: 'music_action' }> =>
             d.type === 'music_action' && !!d.song,
     )?.song;
-    aiContent = await ChatParser.parseAndExecuteActions(aiContent, char.id, char.name, addToast, musicHooks, resolveCharTimeZone(char), messageTimestamp, mcdInheritMeta, frozenMusicSong);
+    // imgGenOut 是 out 参数：chatParser 只在这一步识别 + 剥离 `[[IMG_GEN:...]]`，把描述文字
+    // 写进这个对象，真正的 generateImage() 调用挪到本函数末尾、文字气泡落库完成之后再异步发起
+    // （见函数末尾「聊天框自动发图」那段），不阻塞这一步的文字气泡切分。
+    const imgGenOut: { prompt?: string } = {};
+    aiContent = await ChatParser.parseAndExecuteActions(aiContent, char.id, char.name, addToast, musicHooks, resolveCharTimeZone(char), messageTimestamp, mcdInheritMeta, frozenMusicSong, imgGenOut);
 
     // ─── Step 4: thinking chain 抽取 (本轮末尾展示用) ───
     // 跑过二轮 (data !== initialData) → 取二轮 data 的 reasoning; 没跑二轮 → 取一轮 (round1ThinkingChain,
@@ -2229,5 +2242,61 @@ export async function applyAssistantPostProcessing(
         } else {
             setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
         }
+    }
+
+    // ─── Step 14 (非阻塞): 聊天框自动发图 ───
+    // TA 这一轮判断要发图时，Step 3 已经把描述文字剥离进 imgGenOut，正文气泡也在上面 Step 6
+    // 落库、渲染完了。这里另起一个不 await 的后台分支去调 generateImage()，图片生成完之后
+    // 再单独落一条 image 消息、刷新一次界面——绝不能 await 在主流程里，否则用户发消息后要
+    // 等生图 API 返回（几秒到几十秒）才能看到文字气泡。
+    //
+    // 两个开关都要开才会真的发生：角色的 imageGenChatEnabled（system prompt 是否教它这个
+    // 指令）+ 全局 apiConfig.imageGenApi.enabled（这里执行侧的兜底判断，避免角色历史消息里
+    // 残留的标签在生图 API 关掉之后还被执行）。参考脸图 / 风格预设都在 imageGenApi 里，
+    // 原样透传给 generateImage() 即可，不需要额外逻辑。
+    if (imgGenOut.prompt && imageGenApi && isImageGenApiReady(imageGenApi)) {
+        const imgPrompt = imgGenOut.prompt;
+        const imageGenApiConfig = imageGenApi;
+        const charId = char.id;
+        const charName = char.name;
+        void (async () => {
+            try {
+                const results = await generateImage(imageGenApiConfig, imgPrompt, {
+                    meta: { appName: '消息', charId, charName, purpose: 'chat_auto_image' } as any,
+                });
+                const first = results[0];
+                if (!first?.src) throw new Error('生图 API 没有返回图片');
+                // 图片消息的落库规范跟用户发图对齐：不能把 base64 直接存进 Message.content，
+                // 短令牌 + blob_assets 分离存储（见 apps/Chat.tsx 用户发图那段）。
+                const storedContent = first.src.startsWith('data:')
+                    ? await migrateDataUrlToRef(first.src)
+                    : first.src;
+                const savedMsgId = await persistMessage({
+                    charId,
+                    role: 'assistant',
+                    type: 'image',
+                    content: storedContent,
+                } as any);
+                // 同步存进相册，方便「查手机→相册」里看到 TA 发过的这张图；写入失败不能
+                // 影响已经落库的聊天消息本身。
+                try {
+                    await DB.saveGalleryImage({
+                        id: `img-${Date.now()}-${Math.random()}`,
+                        charId,
+                        url: storedContent,
+                        timestamp: Date.now(),
+                        sourceMessageId: savedMsgId,
+                        savedDate: getLocalDateKey(),
+                    });
+                } catch (galleryErr) {
+                    console.warn('[ImageGen] 聊天框自动生图存相册失败，不影响消息本身:', galleryErr);
+                }
+                setMessages(await DB.getRecentMessagesByCharId(charId, 200));
+            } catch (e) {
+                // 生图失败就静默丢弃这张图——正文已经发出去了，不能因为一张图失败去动已经
+                // 落库的文字消息，也不应该抛出去打断（此刻主流程早已跑完）。
+                console.warn('[ImageGen] 聊天框自动生图失败:', e);
+            }
+        })();
     }
 }
