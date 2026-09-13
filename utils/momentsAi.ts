@@ -17,6 +17,8 @@ import { DB } from './db';
 import { safeFetchJson, extractJson } from './safeApi';
 import { formatMessageForPrompt } from './messageFormat';
 import { buildScheduleInjection, type RenderableSchedule } from './scheduleInjection';
+import { generateImage, isImageGenApiReady } from './imageGenApi';
+import { migrateDataUrlToRef } from './blobRef';
 
 // ==================== 类型定义 ====================
 
@@ -28,6 +30,13 @@ interface AiGeneratedPost {
   postTime?: string;
   /** 心情/场景标签，可选 */
   mood?: string;
+  /**
+   * 可选：这条动态想配一张图时，一句简短的英文图片描述；不想配图就不填。
+   * 是否配图完全由 AI 自己判断（人设/日程/近期聊天语境），前端只按这个字段是否
+   * 存在来决定最终落库的 type，不需要 AI 自己在 text/image/imageText 里三选一。
+   * 只有全局生图 API 已开启时，prompt 里才会教这个字段；否则 AI 不会写它。
+   */
+  imagePrompt?: string;
 }
 
 /** AI 返回的对用户某条动态的互动 */
@@ -167,6 +176,7 @@ function buildMomentsPrompt(
   userPostsText: string,
   taRecentText: string,
   maxPosts: number,
+  imageGenAvailable: boolean,
 ): string {
   // 角色核心人设
   const coreContext = ContextBuilder.buildCoreContext(char, userProfile, false, undefined, {
@@ -208,9 +218,10 @@ ${taRecentText}
    - 内容要符合你的人设、当前时间和日程
    - postTime 填你"发"这条的时间（必须是今天且早于 ${currentTime}），格式 "HH:MM"
    - 不要和你之前发过的动态内容重复
-   - type 只能是 "text"（纯文字）
    - 文字风格要像真人发朋友圈：简短、口语化、可以带 emoji、不要太正式
-   - 可以分享日常、感想、吐槽、自拍描述、转发感悟等
+   - 可以分享日常、感想、吐槽、自拍描述、转发感悟等${imageGenAvailable ? `
+   - 这条动态要不要配图，由你自己判断（结合人设/日程/最近聊天语境，不是每条都要配）：想配图就在这条里加一个
+     "imagePrompt" 字段，写一句简短的英文图片描述（场景/动作/穿着等细节）；不想配图就不要写这个字段` : ''}
 
 2. 看用户的朋友圈，决定是否点赞/评论
    - 对标了"(你已点赞)"或"(你已评论)"的动态不要重复互动
@@ -223,8 +234,8 @@ ${taRecentText}
   "newPosts": [
     {
       "text": "朋友圈文字内容",
-      "type": "text",
-      "postTime": "HH:MM"
+      "postTime": "HH:MM"${imageGenAvailable ? `,
+      "imagePrompt": "可选：想配图就写一句简短的英文图片描述；不配图就不要写这个字段"` : ''}
     }
   ],
   "interactions": [
@@ -258,10 +269,11 @@ export async function generateMoments(input: GenerateMomentsInput): Promise<Gene
   const taRecentText = formatTaRecentPosts(existingPosts, charId);
 
   // 2. 构建 prompt
+  const imageGenAvailable = isImageGenApiReady(apiConfig.imageGenApi);
   const systemPrompt = buildMomentsPrompt(
     char, userProfile, settings,
     scheduleText, chatSummary, userPostsText, taRecentText,
-    maxPosts,
+    maxPosts, imageGenAvailable,
   );
 
   // 3. 调用 API
@@ -316,13 +328,15 @@ export async function generateMoments(input: GenerateMomentsInput): Promise<Gene
         timestamp = d.getTime();
       }
 
+      const imagePrompt = imageGenAvailable ? p.imagePrompt?.trim() : undefined;
       const post: MomentPost = {
         id: createPostId(),
         charId,
         author: charId,
         authorName: charName,
         authorAvatar: char.avatar || '',
-        type: 'text',
+        // 前端根据 imagePrompt 是否存在决定 type，不需要 AI 自己在 text/image/imageText 里三选一。
+        type: imagePrompt ? 'imageText' : 'text',
         text: p.text.trim(),
         likes: [],
         likeNames: [],
@@ -330,8 +344,31 @@ export async function generateMoments(input: GenerateMomentsInput): Promise<Gene
         createdAt: timestamp,
         updatedAt: timestamp,
       };
-      return post;
+      return imagePrompt ? Object.assign(post, { __imagePrompt: imagePrompt }) : post;
     });
+
+  // 5.5 并发给需要配图的动态生图。单条失败只退化成纯文字发布（去掉 images 和刚设的 type），
+  // 不影响其他条、也不影响整批发布。
+  if (imageGenAvailable && apiConfig.imageGenApi) {
+    const imageGenApiConfig = apiConfig.imageGenApi;
+    await Promise.all(newPosts.map(async (post) => {
+      const imagePrompt = (post as any).__imagePrompt as string | undefined;
+      delete (post as any).__imagePrompt;
+      if (!imagePrompt) return;
+      try {
+        const results = await generateImage(imageGenApiConfig, imagePrompt, {
+          meta: { appId: 'moments', appName: '朋友圈', purpose: '朋友圈自动配图', charId, charName } as any,
+        });
+        const first = results[0];
+        if (!first?.src) throw new Error('生图 API 没有返回图片');
+        const storedContent = first.src.startsWith('data:') ? await migrateDataUrlToRef(first.src) : first.src;
+        post.images = [storedContent];
+      } catch (e) {
+        console.warn('[Moments] 这条动态配图失败，退化成纯文字:', e);
+        post.type = 'text';
+      }
+    }));
+  }
 
   // 6. 处理互动（更新用户的动态）
   const updatedUserPosts: MomentPost[] = [];
