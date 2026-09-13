@@ -1,4 +1,3 @@
-
 import { useState, useRef, useEffect, useSyncExternalStore, MutableRefObject } from 'react';
 import { CharacterProfile, UserProfile, Message, Emoji, EmojiCategory, GroupProfile, RealtimeConfig, CharacterBuff, Amsg2ExpiredNoticeRecord } from '../types';
 import { DB } from '../utils/db';
@@ -978,6 +977,7 @@ export const useChatAI = ({
                 luckinMiniSnap: luckinMiniOpen ? luckinMiniSnap : undefined,
                 luckinChat: luckinChatOn ? luckinChatRef?.current : undefined,
                 timelyByWorker: instantChatRoute,
+                imageGenApiEnabled: apiConfig.imageGenApi?.enabled === true,
                 recallEntryPoint: 'chat_app',
             }));
             const systemPrompt = payload.systemPrompt;
@@ -2079,6 +2079,9 @@ export const useChatAI = ({
                     headers,
                     effectiveApi,
                 },
+                // 聊天框自动发图（[[IMG_GEN:...]]）执行侧用的生图 API 配置，全局一份，
+                // 跟角色开关（char.imageGenChatEnabled）在 chatPrompts.ts 那边分别校验。
+                imageGenApi: apiConfig.imageGenApi,
                 hooks: {
                     setMessages: setMessagesWithPreviewHandover,
                     addToast,
