@@ -842,6 +842,27 @@ const MomentForwardCard: React.FC<{
                     ))}
                 </div>
             )}
+            {momentData.music && (
+                <div className="mx-3 mb-2 flex items-center gap-2 px-2.5 py-2 rounded-xl bg-slate-50">
+                    <div className="w-10 h-10 rounded-lg overflow-hidden shrink-0 bg-slate-200">
+                        {momentData.music.albumPic
+                            ? <TokenImg value={momentData.music.albumPic} className="w-full h-full object-cover" />
+                            : null}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                        <div className="text-[13px] font-medium text-slate-700 truncate">{momentData.music.songName}</div>
+                        <div className="text-[11px] text-slate-400 truncate">{momentData.music.artists}</div>
+                    </div>
+                </div>
+            )}
+            {momentData.article && (
+                <div className="mx-3 mb-2 px-2.5 py-2 rounded-xl bg-slate-50">
+                    <div className="text-[13px] font-medium text-slate-700 line-clamp-2">{momentData.article.title}</div>
+                    {momentData.article.body && (
+                        <div className="text-[11px] text-slate-400 mt-0.5 line-clamp-2">{momentData.article.body}</div>
+                    )}
+                </div>
+            )}
             <div className="px-3 py-1.5 border-t border-slate-50 text-[10px] text-slate-400">
                 {formatMomentTime(momentData.createdAt)}
             </div>
