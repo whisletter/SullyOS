@@ -1,0 +1,390 @@
+/**
+ * 朋友圈 AI 生成层
+ *
+ * 负责：
+ *   1. 组装 prompt（角色人设 + 今日日程 + 近期聊天摘要 + 用户最近发的朋友圈）
+ *   2. 调用 LLM API，返回结构化 JSON
+ *   3. 解析并规范化 AI 返回的数据（TA 的新动态 + 对用户动态的互动）
+ *
+ * 调用方：MomentsApp.tsx（打开时 + 手动刷新）
+ */
+
+import type { CharacterProfile, UserProfile, APIConfig } from '../types';
+import type { MomentPost, MomentComment, MomentSettings } from './momentsDb';
+import { createPostId, createCommentId } from './momentsDb';
+import { ContextBuilder } from './context';
+import { DB } from './db';
+import { safeFetchJson, extractJson } from './safeApi';
+import { formatMessageForPrompt } from './messageFormat';
+import { buildScheduleInjection, type RenderableSchedule } from './scheduleInjection';
+
+// ==================== 类型定义 ====================
+
+/** AI 返回的一条 TA 的新动态（原始格式） */
+interface AiGeneratedPost {
+  text: string;
+  type?: 'text' | 'image' | 'imageText';
+  /** AI 自选的发布时间，格式 "HH:MM" 或 ISO */
+  postTime?: string;
+  /** 心情/场景标签，可选 */
+  mood?: string;
+}
+
+/** AI 返回的对用户某条动态的互动 */
+interface AiInteraction {
+  /** 对应的用户动态 id */
+  postId: string;
+  /** 是否点赞 */
+  like?: boolean;
+  /** 评论内容（空字符串或 null 表示不评论） */
+  comment?: string;
+}
+
+/** AI 返回的完整结构 */
+interface AiMomentsResponse {
+  newPosts: AiGeneratedPost[];
+  interactions: AiInteraction[];
+}
+
+/** generateMoments 的入参 */
+export interface GenerateMomentsInput {
+  char: CharacterProfile;
+  userProfile: UserProfile;
+  apiConfig: APIConfig;
+  settings: MomentSettings;
+  /** 当前已有的全部动态（用于去重 + 提供用户动态给 AI 互动） */
+  existingPosts: MomentPost[];
+  /** 可选：外部传入的 AbortSignal */
+  signal?: AbortSignal;
+}
+
+/** generateMoments 的返回 */
+export interface GenerateMomentsResult {
+  /** TA 的新动态（已构造为 MomentPost，可直接 savePost） */
+  newPosts: MomentPost[];
+  /** 被 AI 互动过的用户动态（已更新 likes/comments，可直接 savePost） */
+  updatedUserPosts: MomentPost[];
+}
+
+// ==================== Prompt 构建 ====================
+
+/**
+ * 收集近期聊天摘要（最近 15 条有语义价值的消息）
+ */
+async function getRecentChatSummary(
+  charId: string,
+  charName: string,
+  userName: string,
+): Promise<string> {
+  try {
+    const messages = await DB.getRecentMessagesByCharId(charId, 40, true);
+    // 过滤出有内容的文本消息
+    const meaningful = messages.filter(m =>
+      m.type === 'text' && m.content?.trim() && !m.groupId
+    ).slice(-15);
+    if (meaningful.length === 0) return '(暂无近期聊天记录)';
+    return meaningful
+      .map(m => formatMessageForPrompt(m, charName, userName).slice(0, 300))
+      .join('\n');
+  } catch {
+    return '(聊天记录读取失败)';
+  }
+}
+
+/**
+ * 获取今日日程文本
+ */
+async function getTodayScheduleText(char: CharacterProfile): Promise<string> {
+  try {
+    const today = new Date();
+    const dateKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    const schedule = await DB.getDailySchedule(char.id, dateKey);
+    if (!schedule || !schedule.slots?.length) return '(今天没有生成日程)';
+    const injection = buildScheduleInjection(schedule as RenderableSchedule);
+    if (injection.trim()) return injection;
+    // fallback：直接列出 slots
+    return schedule.slots
+      .map(s => `${s.startTime} ${s.activity}${s.location ? `（${s.location}）` : ''}`)
+      .join('\n');
+  } catch {
+    return '(日程读取失败)';
+  }
+}
+
+/**
+ * 格式化用户最近的朋友圈动态（供 AI 参考和互动）
+ */
+function formatUserPosts(posts: MomentPost[]): string {
+  const userPosts = posts
+    .filter(p => p.author === 'user')
+    .slice(0, 5); // 最多 5 条
+
+  if (userPosts.length === 0) return '(用户还没有发过朋友圈)';
+
+  return userPosts.map(p => {
+    const time = new Date(p.createdAt);
+    const timeStr = `${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}`;
+    const alreadyLiked = p.likes.includes(p.charId);
+    const alreadyCommented = p.comments.some(c => c.author !== 'user');
+    let desc = `[id=${p.id}] ${timeStr} `;
+    switch (p.type) {
+      case 'text': desc += `文字: "${(p.text || '').slice(0, 100)}"`; break;
+      case 'image': desc += `图片${p.images?.length || 0}张`; break;
+      case 'imageText': desc += `图文: "${(p.text || '').slice(0, 80)}" + 图片${p.images?.length || 0}张`; break;
+      case 'music': desc += `分享音乐: ${p.music?.songName || '未知'} - ${p.music?.artists || ''}`; break;
+      case 'article': desc += `分享文章: ${p.article?.title || '未知'}`; break;
+    }
+    if (alreadyLiked) desc += ' (你已点赞)';
+    if (alreadyCommented) desc += ' (你已评论)';
+    return desc;
+  }).join('\n');
+}
+
+/**
+ * 格式化 TA 最近发过的动态（防止重复）
+ */
+function formatTaRecentPosts(posts: MomentPost[], charId: string): string {
+  const taPosts = posts
+    .filter(p => p.author === charId)
+    .slice(0, 5);
+  if (taPosts.length === 0) return '(还没发过朋友圈)';
+  return taPosts.map(p => {
+    const time = new Date(p.createdAt);
+    const timeStr = `${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}`;
+    return `${timeStr} "${(p.text || '').slice(0, 80)}"`;
+  }).join('\n');
+}
+
+/**
+ * 组装完整的 system prompt
+ */
+function buildMomentsPrompt(
+  char: CharacterProfile,
+  userProfile: UserProfile,
+  settings: MomentSettings,
+  scheduleText: string,
+  chatSummary: string,
+  userPostsText: string,
+  taRecentText: string,
+  maxPosts: number,
+): string {
+  // 角色核心人设
+  const coreContext = ContextBuilder.buildCoreContext(char, userProfile, false, undefined, {
+    skipUserProfile: true,
+    headerOverride: '[角色档案]',
+  });
+
+  const now = new Date();
+  const currentTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  const currentDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+  return `你是「${char.name}」，正在发朋友圈和浏览朋友圈。
+
+${coreContext}
+
+【你和用户的关系】
+用户名: ${userProfile.name || '用户'}
+${userProfile.bio ? `用户简介: ${userProfile.bio}` : ''}
+
+【当前时间】${currentDate} ${currentTime}
+
+【你今天的日程】
+${scheduleText}
+
+【你和用户的近期聊天片段】
+${chatSummary}
+
+【用户最近发的朋友圈】
+${userPostsText}
+
+【你最近发的朋友圈（不要重复类似内容）】
+${taRecentText}
+
+===
+
+现在你要做两件事：
+
+1. 发 1 到 ${maxPosts} 条朋友圈动态
+   - 内容要符合你的人设、当前时间和日程
+   - postTime 填你"发"这条的时间（必须是今天且早于 ${currentTime}），格式 "HH:MM"
+   - 不要和你之前发过的动态内容重复
+   - type 只能是 "text"（纯文字）
+   - 文字风格要像真人发朋友圈：简短、口语化、可以带 emoji、不要太正式
+   - 可以分享日常、感想、吐槽、自拍描述、转发感悟等
+
+2. 看用户的朋友圈，决定是否点赞/评论
+   - 对标了"(你已点赞)"或"(你已评论)"的动态不要重复互动
+   - 评论要简短自然、符合你和用户的关系
+   - 不是每条都要互动，根据内容和你的性格决定
+
+请严格按以下 JSON 格式返回，不要附加任何其他文字：
+
+{
+  "newPosts": [
+    {
+      "text": "朋友圈文字内容",
+      "type": "text",
+      "postTime": "HH:MM"
+    }
+  ],
+  "interactions": [
+    {
+      "postId": "用户动态的 id",
+      "like": true,
+      "comment": "评论内容或 null"
+    }
+  ]
+}`;
+}
+
+// ==================== API 调用 ====================
+
+/**
+ * 核心函数：生成 TA 的朋友圈动态 + 对用户动态的互动
+ */
+export async function generateMoments(input: GenerateMomentsInput): Promise<GenerateMomentsResult> {
+  const { char, userProfile, apiConfig, settings, existingPosts, signal } = input;
+  const charId = char.id;
+  const charName = char.name;
+  const userName = userProfile.name || '用户';
+  const maxPosts = settings.taPostFrequency || 3;
+
+  // 1. 收集上下文
+  const [chatSummary, scheduleText] = await Promise.all([
+    getRecentChatSummary(charId, charName, userName),
+    getTodayScheduleText(char),
+  ]);
+  const userPostsText = formatUserPosts(existingPosts);
+  const taRecentText = formatTaRecentPosts(existingPosts, charId);
+
+  // 2. 构建 prompt
+  const systemPrompt = buildMomentsPrompt(
+    char, userProfile, settings,
+    scheduleText, chatSummary, userPostsText, taRecentText,
+    maxPosts,
+  );
+
+  // 3. 调用 API
+  const url = `${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+  const body = {
+    model: apiConfig.model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: '请根据当前时间和日程，发你的朋友圈，并看看我发的朋友圈。只返回 JSON。' },
+    ],
+    temperature: 0.85,
+    max_tokens: 2000,
+  };
+
+  const data = await safeFetchJson(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiConfig.apiKey}`,
+    },
+    body: JSON.stringify(body),
+    signal,
+  } as RequestInit, 1, 30_000, {
+    appId: 'moments',
+    appName: '朋友圈',
+    purpose: '生成 TA 的动态',
+  });
+
+  // 4. 解析返回
+  const content = data?.choices?.[0]?.message?.content || '';
+  const parsed = extractJson(content) as AiMomentsResponse | null;
+  if (!parsed) {
+    throw new Error('AI 返回的内容无法解析为 JSON');
+  }
+
+  // 5. 构造 MomentPost[]
+  const now = new Date();
+  const newPosts: MomentPost[] = (parsed.newPosts || [])
+    .filter(p => p.text?.trim())
+    .slice(0, maxPosts)
+    .map(p => {
+      // 解析 postTime → 时间戳
+      let timestamp = now.getTime() - Math.floor(Math.random() * 3600_000); // 默认：过去 1 小时内
+      if (p.postTime && /^\d{1,2}:\d{2}$/.test(p.postTime)) {
+        const [h, m] = p.postTime.split(':').map(Number);
+        const d = new Date(now);
+        d.setHours(h, m, Math.floor(Math.random() * 60), 0);
+        // 确保在过去
+        if (d.getTime() > now.getTime()) {
+          d.setTime(now.getTime() - Math.floor(Math.random() * 600_000));
+        }
+        timestamp = d.getTime();
+      }
+
+      const post: MomentPost = {
+        id: createPostId(),
+        charId,
+        author: charId,
+        authorName: charName,
+        authorAvatar: char.avatar || '',
+        type: 'text',
+        text: p.text.trim(),
+        likes: [],
+        likeNames: [],
+        comments: [],
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+      return post;
+    });
+
+  // 6. 处理互动（更新用户的动态）
+  const updatedUserPosts: MomentPost[] = [];
+  for (const interaction of (parsed.interactions || [])) {
+    if (!interaction.postId) continue;
+    const userPost = existingPosts.find(p => p.id === interaction.postId && p.author === 'user');
+    if (!userPost) continue;
+
+    let updated = { ...userPost };
+    let changed = false;
+
+    // 点赞
+    if (interaction.like && !updated.likes.includes(charId)) {
+      updated = {
+        ...updated,
+        likes: [...updated.likes, charId],
+        likeNames: [...updated.likeNames, charName],
+      };
+      changed = true;
+    }
+
+    // 评论
+    if (interaction.comment?.trim()) {
+      const alreadyCommented = updated.comments.some(c => c.author === charId);
+      if (!alreadyCommented) {
+        const comment: MomentComment = {
+          id: createCommentId(),
+          author: charId,
+          authorName: charName,
+          content: interaction.comment.trim(),
+          createdAt: Date.now() - Math.floor(Math.random() * 300_000), // 过去几分钟
+        };
+        updated = {
+          ...updated,
+          comments: [...updated.comments, comment],
+        };
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      updated.updatedAt = Date.now();
+      updatedUserPosts.push(updated);
+    }
+  }
+
+  return { newPosts, updatedUserPosts };
+}
+
+// ==================== 冷却检查 ====================
+
+/** 距离上次生成是否已过冷却期（默认 5 分钟） */
+export function canGenerate(settings: MomentSettings, cooldownMs = 5 * 60_000): boolean {
+  if (!settings.lastGeneratedAt) return true;
+  return Date.now() - settings.lastGeneratedAt > cooldownMs;
+}
