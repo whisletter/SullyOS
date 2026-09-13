@@ -49,6 +49,8 @@ import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel } from '
 import { configFromPreset, findActivePresetId, type PresetSwitchPatch } from '../utils/apiPresetSwitch';
 import type { APIConfig, TtsProvider } from '../types';
 import { describeImageWithVisionApi, VISION_API_TEST_IMAGE_DATA_URL, visionApiConfigFromPreset } from '../utils/visionApi';
+import { generateImage, IMAGE_GEN_API_TEST_PROMPT } from '../utils/imageGenApi';
+import type { ImageGenApiFormat } from '../types';
 import {
     FIRECRAWL_API_KEYS_URL,
     getFirecrawlApiKey,
@@ -501,6 +503,17 @@ const Settings: React.FC = () => {
   const [visionStatusMsg, setVisionStatusMsg] = useState('');
   const [testingVisionApi, setTestingVisionApi] = useState(false);
   const [visionTestResult, setVisionTestResult] = useState<string | null>(null);
+  const [localImageGenEnabled, setLocalImageGenEnabled] = useState(apiConfig.imageGenApi?.enabled === true);
+  const [localImageGenFormat, setLocalImageGenFormat] = useState<ImageGenApiFormat>(
+    apiConfig.imageGenApi?.format === 'google' ? 'google' : 'openai'
+  );
+  const [localImageGenUrl, setLocalImageGenUrl] = useState(apiConfig.imageGenApi?.baseUrl || '');
+  const [localImageGenKey, setLocalImageGenKey] = useState(apiConfig.imageGenApi?.apiKey || '');
+  const [localImageGenModel, setLocalImageGenModel] = useState(apiConfig.imageGenApi?.model || '');
+  const [imageGenStatusMsg, setImageGenStatusMsg] = useState('');
+  const [testingImageGenApi, setTestingImageGenApi] = useState(false);
+  const [imageGenTestResult, setImageGenTestResult] = useState<string | null>(null);
+  const [imageGenTestImageSrc, setImageGenTestImageSrc] = useState<string | null>(null);
   const [localMiniMaxKey, setLocalMiniMaxKey] = useState(apiConfig.minimaxApiKey || '');
   const [localMiniMaxGroupId, setLocalMiniMaxGroupId] = useState(apiConfig.minimaxGroupId || '');
   const [localMiniMaxRegion, setLocalMiniMaxRegion] = useState<'domestic' | 'overseas'>(
@@ -931,6 +944,21 @@ const Settings: React.FC = () => {
   }, [apiConfig.visionApi?.baseUrl || '', apiConfig.visionApi?.apiKey || '', apiConfig.visionApi?.model || '']);
 
   useEffect(() => {
+      setLocalImageGenEnabled(apiConfig.imageGenApi?.enabled === true);
+  }, [apiConfig.imageGenApi?.enabled]);
+  useEffect(() => {
+      setLocalImageGenFormat(apiConfig.imageGenApi?.format === 'google' ? 'google' : 'openai');
+      setLocalImageGenUrl(apiConfig.imageGenApi?.baseUrl || '');
+      setLocalImageGenKey(apiConfig.imageGenApi?.apiKey || '');
+      setLocalImageGenModel(apiConfig.imageGenApi?.model || '');
+  }, [
+      apiConfig.imageGenApi?.format,
+      apiConfig.imageGenApi?.baseUrl || '',
+      apiConfig.imageGenApi?.apiKey || '',
+      apiConfig.imageGenApi?.model || '',
+  ]);
+
+  useEffect(() => {
       setLocalMiniMaxKey(apiConfig.minimaxApiKey || '');
       setLocalMiniMaxGroupId(apiConfig.minimaxGroupId || '');
       setLocalMiniMaxRegion(apiConfig.minimaxRegion === 'overseas' ? 'overseas' : 'domestic');
@@ -1226,6 +1254,72 @@ const Settings: React.FC = () => {
       trackEvent('测试识图 API', { result: '失败' });
     } finally {
       setTestingVisionApi(false);
+    }
+  };
+
+  const handleSaveImageGenApi = (enabled = localImageGenEnabled) => {
+    const nextImageGenApi = {
+      enabled,
+      format: localImageGenFormat,
+      baseUrl: normalizeApiBaseUrl(localImageGenUrl),
+      apiKey: normalizeApiCredential(localImageGenKey),
+      model: normalizeApiModel(localImageGenModel),
+    };
+    if (nextImageGenApi.enabled && (!nextImageGenApi.apiKey || !nextImageGenApi.model)) {
+      addToast('开启生图 API 前，请填写完整的 Key 和 Model', 'error');
+      return;
+    }
+    setLocalImageGenUrl(nextImageGenApi.baseUrl);
+    setLocalImageGenKey(nextImageGenApi.apiKey);
+    setLocalImageGenModel(nextImageGenApi.model);
+    updateApiConfig({ imageGenApi: nextImageGenApi });
+    setImageGenStatusMsg(nextImageGenApi.enabled ? '生图 API 已接入' : '已关闭生图 API');
+    setTimeout(() => setImageGenStatusMsg(''), 2200);
+  };
+
+  const handleToggleImageGenApi = () => {
+    const enabled = !localImageGenEnabled;
+    setLocalImageGenEnabled(enabled);
+    if (!enabled) {
+      // 关闭立即落盘；保留已保存的凭据，未保存的输入仍留在表单里。
+      updateApiConfig({ imageGenApi: {
+        format: 'openai', baseUrl: '', apiKey: '', model: '', ...apiConfig.imageGenApi, enabled: false,
+      } });
+      setImageGenStatusMsg('已关闭生图 API');
+    } else if (normalizeApiCredential(localImageGenKey) && normalizeApiModel(localImageGenModel)) {
+      handleSaveImageGenApi(true);
+    } else {
+      setImageGenStatusMsg('请填写 Key 和 Model，保存后接入');
+    }
+  };
+
+  const handleTestImageGenApi = async () => {
+    const config = {
+      enabled: true,
+      format: localImageGenFormat,
+      baseUrl: normalizeApiBaseUrl(localImageGenUrl),
+      apiKey: normalizeApiCredential(localImageGenKey),
+      model: normalizeApiModel(localImageGenModel),
+    };
+    if (!config.apiKey || !config.model) {
+      setImageGenTestResult('❌ 请先填写完整的 Key 和 Model');
+      return;
+    }
+    setTestingImageGenApi(true);
+    setImageGenTestResult(null);
+    setImageGenTestImageSrc(null);
+    try {
+      const results = await generateImage(config, IMAGE_GEN_API_TEST_PROMPT, { n: 1 });
+      if (!results.length || !results[0].src) throw new Error('未返回图片');
+      setImageGenTestImageSrc(results[0].src);
+      setImageGenTestResult('✅ 生图成功');
+      trackEvent('测试生图 API', { result: '成功' });
+    } catch (error: any) {
+      console.error('Test ImageGen API Error', error);
+      setImageGenTestResult(`❌ 生图失败：${error?.message || '未知错误'}`);
+      trackEvent('测试生图 API', { result: '失败' });
+    } finally {
+      setTestingImageGenApi(false);
     }
   };
 
@@ -2668,6 +2762,159 @@ const Settings: React.FC = () => {
                     }`}>
                         {visionTestResult}
                     </div>
+                )}
+            </div>
+        </SettingsSection>
+
+        {/* 独立生图 API：聊天 / 朋友圈等场景出图，OpenAI 兼容格式与 Google 格式二选一。 */}
+        <SettingsSection
+            title="生图 API"
+            badge={
+                <span className={`text-[9px] font-bold px-2 py-1 rounded-full ${
+                    apiConfig.imageGenApi?.enabled
+                        ? 'bg-pink-100 text-pink-600'
+                        : 'bg-slate-100 text-slate-400'
+                }`}>
+                    {apiConfig.imageGenApi?.enabled ? '已接入' : '未接入'}
+                </span>
+            }
+            icon={
+                <div className="p-2 bg-pink-100/60 rounded-xl text-pink-600">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909M3 12V4.5A1.5 1.5 0 0 1 4.5 3h15A1.5 1.5 0 0 1 21 4.5V12M3 12v7.5A1.5 1.5 0 0 0 4.5 21h15a1.5 1.5 0 0 0 1.5-1.5V12M3 12h18" />
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M9 9.75a1.125 1.125 0 1 1-2.25 0 1.125 1.125 0 0 1 2.25 0Z" />
+                    </svg>
+                </div>
+            }
+        >
+            <div className="space-y-4">
+                <div className="rounded-2xl border border-pink-100 bg-pink-50/60 p-3.5">
+                    <div className="flex items-center justify-between gap-3">
+                        <div>
+                            <div className="text-xs font-bold text-slate-600">接入独立生图 API</div>
+                            <p className="text-[10px] text-slate-400 mt-1 leading-relaxed">
+                                聊天、朋友圈等场景发图会用这里配置的模型。
+                            </p>
+                        </div>
+                        <button
+                            type="button"
+                            role="switch"
+                            aria-checked={localImageGenEnabled}
+                            onClick={handleToggleImageGenApi}
+                            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${localImageGenEnabled ? 'bg-pink-500' : 'bg-slate-200'}`}
+                        >
+                            <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${localImageGenEnabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                        </button>
+                    </div>
+                </div>
+
+                <div className={`space-y-3 transition-opacity ${localImageGenEnabled ? 'opacity-100' : 'opacity-50'}`}>
+                    <div>
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">格式</label>
+                        <div className="grid grid-cols-2 gap-2">
+                            <button
+                                type="button"
+                                onClick={() => { setLocalImageGenFormat('openai'); setImageGenTestResult(null); }}
+                                disabled={!localImageGenEnabled}
+                                className={`py-2.5 rounded-xl text-xs font-bold border transition-all disabled:cursor-not-allowed ${
+                                    localImageGenFormat === 'openai'
+                                        ? 'bg-pink-100 border-pink-200 text-pink-700'
+                                        : 'bg-white/60 border-slate-200/60 text-slate-400'
+                                }`}
+                            >
+                                OpenAI 兼容
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => { setLocalImageGenFormat('google'); setImageGenTestResult(null); }}
+                                disabled={!localImageGenEnabled}
+                                className={`py-2.5 rounded-xl text-xs font-bold border transition-all disabled:cursor-not-allowed ${
+                                    localImageGenFormat === 'google'
+                                        ? 'bg-pink-100 border-pink-200 text-pink-700'
+                                        : 'bg-white/60 border-slate-200/60 text-slate-400'
+                                }`}
+                            >
+                                Google
+                            </button>
+                        </div>
+                        <p className="text-[9px] text-slate-300 mt-1.5 pl-1 leading-relaxed">
+                            {localImageGenFormat === 'openai'
+                                ? 'gpt-image-2 / Grok / GLM CogView / 中转站等，走 /v1/images/generations'
+                                : 'Imagen 3（model 以 imagen 开头走 predict）或 Gemini 原生生图（走 generateContent）'}
+                        </p>
+                    </div>
+                    <div>
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">
+                            URL <span className="normal-case font-normal text-slate-300">留空用默认地址</span>
+                        </label>
+                        <input
+                            type="text"
+                            value={localImageGenUrl}
+                            onChange={event => { setLocalImageGenUrl(event.target.value); setImageGenTestResult(null); }}
+                            disabled={!localImageGenEnabled}
+                            placeholder={localImageGenFormat === 'openai' ? 'https://api.openai.com' : 'https://generativelanguage.googleapis.com'}
+                            className="w-full bg-white/60 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all disabled:cursor-not-allowed"
+                        />
+                    </div>
+                    <div>
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">Key</label>
+                        <input
+                            type="password"
+                            value={localImageGenKey}
+                            onChange={event => { setLocalImageGenKey(event.target.value); setImageGenTestResult(null); }}
+                            disabled={!localImageGenEnabled}
+                            placeholder="sk-..."
+                            className="w-full bg-white/60 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all disabled:cursor-not-allowed"
+                        />
+                    </div>
+                    <div>
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">Model</label>
+                        <input
+                            type="text"
+                            value={localImageGenModel}
+                            onChange={event => { setLocalImageGenModel(event.target.value); setImageGenTestResult(null); }}
+                            disabled={!localImageGenEnabled}
+                            placeholder={localImageGenFormat === 'openai' ? 'gpt-image-2 / grok-2-image-1212 / cogview-3-flash' : 'imagen-3.0-generate-001 / gemini-2.0-flash-exp'}
+                            className="w-full bg-white/60 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all disabled:cursor-not-allowed"
+                        />
+                    </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                    <button
+                        type="button"
+                        onClick={handleTestImageGenApi}
+                        disabled={testingImageGenApi || !localImageGenEnabled || !localImageGenKey.trim() || !localImageGenModel.trim()}
+                        className="py-3 rounded-2xl font-bold text-pink-600 border border-pink-200 bg-pink-50 active:scale-95 transition-all disabled:opacity-40"
+                    >
+                        {testingImageGenApi ? '生图测试中…' : '🎨 测试生图'}
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => handleSaveImageGenApi()}
+                        disabled={testingImageGenApi}
+                        className="py-3 rounded-2xl font-bold text-white shadow-lg shadow-pink-500/20 bg-pink-500 active:scale-95 transition-all disabled:opacity-50"
+                    >
+                        保存生图 API
+                    </button>
+                </div>
+                {imageGenStatusMsg && (
+                    <div className="text-[11px] text-center text-pink-600 bg-pink-50 px-3 py-2 rounded-xl">{imageGenStatusMsg}</div>
+                )}
+                <p className="text-[9px] text-slate-300 px-1">测试会实际生成一张图，消耗一次生图额度。</p>
+                {imageGenTestResult && (
+                    <div className={`text-xs px-3 py-2 rounded-xl leading-relaxed ${
+                        imageGenTestResult.startsWith('✅') ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'
+                    }`}>
+                        {imageGenTestResult}
+                    </div>
+                )}
+                {imageGenTestImageSrc && (
+                    <img
+                        src={imageGenTestImageSrc}
+                        alt="生图测试结果"
+                        className="w-24 h-24 rounded-2xl object-cover border border-pink-100 mx-auto"
+                    />
                 )}
             </div>
         </SettingsSection>
