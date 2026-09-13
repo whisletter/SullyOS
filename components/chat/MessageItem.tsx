@@ -801,8 +801,55 @@ const ForwardCard: React.FC<{
 };
 
 // ============================================================
-// 转账卡片：点开看精美详情，可接收 / 退回；回执则渲染成小卡
+// 朋友圈动态转发卡片：点开看原动态图文，卡片大小随内容走（不做固定尺寸截断）
 // ============================================================
+
+const MomentForwardCard: React.FC<{
+    momentData: any;
+    commonLayout: (content: React.ReactNode) => JSX.Element;
+    selectionMode: boolean;
+}> = ({ momentData, commonLayout, selectionMode }) => {
+    const formatMomentTime = (ts: number) => {
+        if (!ts) return '';
+        const d = new Date(ts);
+        return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    };
+
+    return commonLayout(
+        <div
+            className="w-64 bg-white rounded-2xl overflow-hidden shadow-sm border border-slate-100 active:scale-[0.98] transition-transform cursor-pointer"
+            onClick={(e) => { if (selectionMode) return; e.stopPropagation(); }}
+        >
+            <div className="px-3 pt-2.5 pb-1.5 flex items-center gap-2">
+                <div className="w-6 h-6 rounded-full overflow-hidden shrink-0 bg-slate-200">
+                    {momentData.charAvatar
+                        ? <TokenImg value={momentData.charAvatar} className="w-full h-full object-cover" />
+                        : null}
+                </div>
+                <div className="text-xs font-bold text-slate-700 truncate">{momentData.charName}的朋友圈</div>
+            </div>
+            {momentData.text && (
+                <div className="px-3 pb-2 text-[13px] text-slate-700 leading-relaxed whitespace-pre-wrap break-all">
+                    {momentData.text}
+                </div>
+            )}
+            {Array.isArray(momentData.images) && momentData.images.length > 0 && (
+                <div className={`grid gap-0.5 px-3 pb-2 ${momentData.images.length === 1 ? 'grid-cols-1' : 'grid-cols-2'}`}>
+                    {momentData.images.slice(0, 4).map((img: string, i: number) => (
+                        <div key={i} className="rounded-lg overflow-hidden bg-slate-100" style={{ aspectRatio: momentData.images.length === 1 ? '4/5' : '1/1' }}>
+                            <TokenImg value={img} className="w-full h-full object-cover" />
+                        </div>
+                    ))}
+                </div>
+            )}
+            <div className="px-3 py-1.5 border-t border-slate-50 text-[10px] text-slate-400">
+                {formatMomentTime(momentData.createdAt)}
+            </div>
+        </div>
+    );
+};
+
+
 
 type TransferStatus = 'pending' | 'accepted' | 'returned';
 
@@ -2043,6 +2090,15 @@ const MessageItem = React.memo(({
         try { forwardData = JSON.parse(m.content); } catch {}
         if (forwardData) {
             return <ForwardCard forwardData={forwardData} commonLayout={commonLayout} interactionProps={interactionProps} selectionMode={selectionMode} />;
+        }
+    }
+
+    // --- Moment Forward Card（朋友圈动态转发）---
+    if (m.type === 'moment_card') {
+        let momentData: any = null;
+        try { momentData = JSON.parse(m.content); } catch {}
+        if (momentData) {
+            return <MomentForwardCard momentData={momentData} commonLayout={commonLayout} selectionMode={selectionMode} />;
         }
     }
 
