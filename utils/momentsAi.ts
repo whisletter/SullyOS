@@ -344,22 +344,23 @@ export async function generateMoments(input: GenerateMomentsInput): Promise<Gene
         // 前端根据 imagePrompt 是否存在决定 type，不需要 AI 自己在 text/image/imageText 里三选一。
         type: imagePrompt ? 'imageText' : 'text',
         text: p.text.trim(),
+        imagePrompt,
         likes: [],
         likeNames: [],
         comments: [],
         createdAt: timestamp,
         updatedAt: timestamp,
       };
-      return imagePrompt ? Object.assign(post, { __imagePrompt: imagePrompt }) : post;
+      return post;
     });
 
-  // 5.5 并发给需要配图的动态生图。单条失败只退化成纯文字发布（去掉 images 和刚设的 type），
-  // 不影响其他条、也不影响整批发布。
+  // 5.5 并发给需要配图的动态生图。单条失败只退化成纯文字发布（type 改回 text，但保留
+  // imagePrompt——用户在朋友圈里点裂图上的 🔄 时，还能用同一句描述再试一次，不用重新
+  // 问 AI「这条要不要配图、配什么」。
   if (imageGenAvailable && apiConfig.imageGenApi) {
     const imageGenApiConfig = apiConfig.imageGenApi;
     await Promise.all(newPosts.map(async (post) => {
-      const imagePrompt = (post as any).__imagePrompt as string | undefined;
-      delete (post as any).__imagePrompt;
+      const imagePrompt = post.imagePrompt;
       if (!imagePrompt) {
         // AI 这条没写 imagePrompt，属于它自己判断"不配图"，不是故障。
         console.info('[Moments] 这条动态 AI 没有给 imagePrompt，按纯文字发布:', post.id);
