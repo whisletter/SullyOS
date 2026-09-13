@@ -19,6 +19,9 @@ export const normalizeApiModel = (value: unknown): string =>
 export function normalizeApiConfig(config: APIConfig): APIConfig {
   const visionApi = config.visionApi;
   const imageGenApi = config.imageGenApi;
+  // 和 utils/imageGenApi.ts 的 MAX_REFERENCE_IMAGES 保持一致；不从那边 import 是为了
+  // 避免循环依赖（imageGenApi.ts 本身就依赖这个文件的 normalizeApi* 系列函数）。
+  const MAX_REFERENCE_IMAGES = 5;
   return {
     ...config,
     baseUrl: normalizeApiBaseUrl(config.baseUrl),
@@ -39,6 +42,16 @@ export function normalizeApiConfig(config: APIConfig): APIConfig {
         baseUrl: normalizeApiBaseUrl(imageGenApi.baseUrl),
         apiKey: normalizeApiCredential(imageGenApi.apiKey),
         model: normalizeApiModel(imageGenApi.model),
+        // 之前这里漏了这两个字段，导致每次 updateApiConfig()（包括保存生图 API 本身）
+        // 都会把风格预设和参考脸图静默清空——保留时做个防御性校验，别把脏数据放进去。
+        stylePreset: typeof imageGenApi.stylePreset === 'string' && imageGenApi.stylePreset.trim()
+          ? imageGenApi.stylePreset
+          : undefined,
+        referenceImages: Array.isArray(imageGenApi.referenceImages)
+          ? imageGenApi.referenceImages
+              .filter((img): img is string => typeof img === 'string' && img.trim().length > 0)
+              .slice(0, MAX_REFERENCE_IMAGES)
+          : undefined,
       },
     } : {}),
   };
