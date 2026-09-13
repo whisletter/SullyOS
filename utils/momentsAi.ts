@@ -306,8 +306,14 @@ export async function generateMoments(input: GenerateMomentsInput): Promise<Gene
   const content = data?.choices?.[0]?.message?.content || '';
   const parsed = extractJson(content) as AiMomentsResponse | null;
   if (!parsed) {
+    console.warn('[Moments] JSON 解析失败，原始返回内容:', content);
     throw new Error('AI 返回的内容无法解析为 JSON');
   }
+  // 诊断日志：一眼看出这一轮 AI 到底给没给 imagePrompt，不用等配图失败才排查。
+  console.info(
+    '[Moments] AI 返回的 newPosts 原始内容:',
+    (parsed.newPosts || []).map(p => ({ text: p.text?.slice(0, 30), imagePrompt: p.imagePrompt })),
+  );
 
   // 5. 构造 MomentPost[]
   const now = new Date();
@@ -354,17 +360,31 @@ export async function generateMoments(input: GenerateMomentsInput): Promise<Gene
     await Promise.all(newPosts.map(async (post) => {
       const imagePrompt = (post as any).__imagePrompt as string | undefined;
       delete (post as any).__imagePrompt;
-      if (!imagePrompt) return;
+      if (!imagePrompt) {
+        // AI 这条没写 imagePrompt，属于它自己判断"不配图"，不是故障。
+        console.info('[Moments] 这条动态 AI 没有给 imagePrompt，按纯文字发布:', post.id);
+        return;
+      }
+      console.info('[Moments] 开始为动态配图:', post.id, 'prompt =', imagePrompt);
       try {
         const results = await generateImage(imageGenApiConfig, imagePrompt, {
           meta: { appId: 'moments', appName: '朋友圈', purpose: '朋友圈自动配图', charId, charName } as any,
         });
         const first = results[0];
-        if (!first?.src) throw new Error('生图 API 没有返回图片');
+        if (!first?.src) throw new Error('生图 API 没有返回图片（results 为空或缺少 src）');
+        console.info('[Moments] 生图成功，开始转存本地引用:', post.id);
         const storedContent = first.src.startsWith('data:') ? await migrateDataUrlToRef(first.src) : first.src;
         post.images = [storedContent];
-      } catch (e) {
-        console.warn('[Moments] 这条动态配图失败，退化成纯文字:', e);
+        console.info('[Moments] 配图完成:', post.id);
+      } catch (e: any) {
+        // 显式打印 message + stack，而不是让 console.warn 自己决定怎么展开 Error 对象，
+        // 方便直接从控制台文本里看出是网络错误、格式错误还是 migrateDataUrlToRef 失败。
+        console.warn(
+          '[Moments] 这条动态配图失败，退化成纯文字:',
+          post.id,
+          '\nmessage:', e?.message || String(e),
+          '\nstack:', e?.stack || '(无堆栈)',
+        );
         post.type = 'text';
       }
     }));
