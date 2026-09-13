@@ -49,10 +49,21 @@ interface AiInteraction {
   comment?: string;
 }
 
+/** AI 返回的、对 TA 自己动态评论区里用户追评的回复 */
+interface AiCommentReply {
+  /** TA 自己那条动态的 id */
+  postId: string;
+  /** 要回复的那条用户评论的 id */
+  replyToCommentId: string;
+  /** 回复内容 */
+  comment: string;
+}
+
 /** AI 返回的完整结构 */
 interface AiMomentsResponse {
   newPosts: AiGeneratedPost[];
   interactions: AiInteraction[];
+  commentReplies?: AiCommentReply[];
 }
 
 /** generateMoments 的入参 */
@@ -73,6 +84,8 @@ export interface GenerateMomentsResult {
   newPosts: MomentPost[];
   /** 被 AI 互动过的用户动态（已更新 likes/comments，可直接 savePost） */
   updatedUserPosts: MomentPost[];
+  /** TA 自己的动态里被追加了「回复用户追评」的那些（已更新 comments，可直接 savePost） */
+  updatedTaPosts: MomentPost[];
 }
 
 // ==================== Prompt 构建 ====================
@@ -165,6 +178,37 @@ function formatTaRecentPosts(posts: MomentPost[], charId: string): string {
 }
 
 /**
+ * 扫描出「TA 自己发的动态里，评论区最后一条是用户发的」这些——也就是轮到 TA 接话的动态。
+ * 只看最后一条评论的作者：如果最后一条已经是 TA 自己回的，说明这一串对话已经回复完了，
+ * 不需要再扫到它，避免同一条动态被反复追问。
+ */
+function findPendingReplies(posts: MomentPost[], charId: string): MomentPost[] {
+  return posts.filter(p => {
+    if (p.author !== charId) return false;
+    if (p.comments.length === 0) return false;
+    const last = [...p.comments].sort((a, b) => a.createdAt - b.createdAt)[p.comments.length - 1];
+    return last.author === 'user';
+  });
+}
+
+/**
+ * 格式化「待回复列表」喂给 prompt：每条动态本身的内容 + 完整评论串（谁说了什么，按时间顺序），
+ * 让 AI 能看懂这段对话聊到哪、该接谁的话。
+ */
+function formatPendingReplies(pendingPosts: MomentPost[], charName: string): string {
+  if (pendingPosts.length === 0) return '(没有需要你回复的评论)';
+  return pendingPosts.map(p => {
+    const sortedComments = [...p.comments].sort((a, b) => a.createdAt - b.createdAt);
+    const commentsText = sortedComments.map(c => {
+      const speaker = c.author === 'user' ? '用户' : charName;
+      const replyPart = c.replyToName ? `回复${c.replyToName}` : '';
+      return `  [commentId=${c.id}] ${speaker}${replyPart}: "${c.content}"`;
+    }).join('\n');
+    return `[postId=${p.id}] 你发的动态: "${(p.text || '').slice(0, 60)}"\n${commentsText}`;
+  }).join('\n\n');
+}
+
+/**
  * 组装完整的 system prompt
  */
 function buildMomentsPrompt(
@@ -175,6 +219,7 @@ function buildMomentsPrompt(
   chatSummary: string,
   userPostsText: string,
   taRecentText: string,
+  pendingRepliesText: string,
   maxPosts: number,
   imageGenAvailable: boolean,
 ): string {
@@ -210,9 +255,12 @@ ${userPostsText}
 【你最近发的朋友圈（不要重复类似内容）】
 ${taRecentText}
 
+【你自己动态下面，用户刚追评、还等你回话的】
+${pendingRepliesText}
+
 ===
 
-现在你要做两件事：
+现在你要做三件事：
 
 1. 发 1 到 ${maxPosts} 条朋友圈动态
    - 内容要符合你的人设、当前时间和日程
@@ -227,6 +275,13 @@ ${taRecentText}
    - 对标了"(你已点赞)"或"(你已评论)"的动态不要重复互动
    - 评论要简短自然、符合你和用户的关系
    - 不是每条都要互动，根据内容和你的性格决定
+
+3. 看"用户刚追评、还等你回话的"这部分，逐条决定要不要接话
+   - 每条动态下面列出的评论是完整对话串（谁在什么时候说了什么），最后一条一定是用户发的
+   - 你可以回复也可以不回复（觉得没必要接就跳过），符合你的性格和当下语境即可
+   - 如果要回复，commentReplies 里加一项：postId 填对应动态的 id，replyToCommentId 填你要回复的
+     那条用户评论的 commentId（通常是列表里最后一条，除非你想回应更早的某句话），comment 填回复内容
+   - 回复要像真人聊天接话，别写成一段客套的官方回应
 
 请严格按以下 JSON 格式返回，不要附加任何其他文字：
 
@@ -243,6 +298,13 @@ ${taRecentText}
       "postId": "用户动态的 id",
       "like": true,
       "comment": "评论内容或 null"
+    }
+  ],
+  "commentReplies": [
+    {
+      "postId": "你自己动态的 id（来自「用户刚追评」列表）",
+      "replyToCommentId": "要回复的那条用户评论的 commentId",
+      "comment": "回复内容"
     }
   ]
 }`;
@@ -267,12 +329,14 @@ export async function generateMoments(input: GenerateMomentsInput): Promise<Gene
   ]);
   const userPostsText = formatUserPosts(existingPosts);
   const taRecentText = formatTaRecentPosts(existingPosts, charId);
+  const pendingReplyPosts = findPendingReplies(existingPosts, charId);
+  const pendingRepliesText = formatPendingReplies(pendingReplyPosts, charName);
 
   // 2. 构建 prompt
   const imageGenAvailable = isImageGenApiReady(apiConfig.imageGenApi);
   const systemPrompt = buildMomentsPrompt(
     char, userProfile, settings,
-    scheduleText, chatSummary, userPostsText, taRecentText,
+    scheduleText, chatSummary, userPostsText, taRecentText, pendingRepliesText,
     maxPosts, imageGenAvailable,
   );
 
@@ -285,7 +349,7 @@ export async function generateMoments(input: GenerateMomentsInput): Promise<Gene
       { role: 'user', content: '请根据当前时间和日程，发你的朋友圈，并看看我发的朋友圈。只返回 JSON。' },
     ],
     temperature: 0.85,
-    max_tokens: 2000,
+    max_tokens: 2600,
   };
 
   const data = await safeFetchJson(url, {
@@ -436,7 +500,42 @@ export async function generateMoments(input: GenerateMomentsInput): Promise<Gene
     }
   }
 
-  return { newPosts, updatedUserPosts };
+  // 7. 处理 commentReplies（TA 回复自己动态下面、用户刚追评的那些）
+  const updatedTaPosts: MomentPost[] = [];
+  for (const reply of (parsed.commentReplies || [])) {
+    if (!reply.postId || !reply.replyToCommentId || !reply.comment?.trim()) continue;
+    // 只允许回复"确实在待回复列表里"的动态，防止 AI 瞎编 postId/commentId 造成脏数据。
+    const taPost = pendingReplyPosts.find(p => p.id === reply.postId);
+    if (!taPost) continue;
+    const targetComment = taPost.comments.find(c => c.id === reply.replyToCommentId);
+    if (!targetComment) continue;
+
+    const alreadyUpdated = updatedTaPosts.find(p => p.id === taPost.id);
+    const base = alreadyUpdated || taPost;
+    const comment: MomentComment = {
+      id: createCommentId(),
+      author: charId,
+      authorName: charName,
+      replyTo: targetComment.id,
+      replyToName: targetComment.authorName,
+      replyToAuthor: targetComment.author,
+      content: reply.comment.trim(),
+      createdAt: Date.now() - Math.floor(Math.random() * 300_000), // 过去几分钟
+    };
+    const updated: MomentPost = {
+      ...base,
+      comments: [...base.comments, comment],
+      updatedAt: Date.now(),
+    };
+    if (alreadyUpdated) {
+      const idx = updatedTaPosts.findIndex(p => p.id === taPost.id);
+      updatedTaPosts[idx] = updated;
+    } else {
+      updatedTaPosts.push(updated);
+    }
+  }
+
+  return { newPosts, updatedUserPosts, updatedTaPosts };
 }
 
 // ==================== 冷却检查 ====================
