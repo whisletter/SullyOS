@@ -261,11 +261,27 @@ export interface VisionApiConfig {
   model: string;
 }
 
+// 生图 API 请求/响应格式。
+// 'openai' → POST {baseUrl}/v1/images/generations（gpt-image-2 / Grok / GLM CogView / 中转站等）
+// 'google' → model 以 'imagen' 开头走 :predict，其余走 Gemini 原生 :generateContent
+export type ImageGenApiFormat = 'openai' | 'google';
+
+export interface ImageGenApiConfig {
+  /** 开启后，聊天 / 朋友圈等场景可调用独立生图模型出图。 */
+  enabled: boolean;
+  format: ImageGenApiFormat;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+}
+
 export interface APIConfig {
   baseUrl: string;
   apiKey: string;
   // 可选识图中转：给不支持 image_url 的主模型补视觉能力。
   visionApi?: VisionApiConfig;
+  // 可选生图中转：聊天 / 朋友圈等场景生成图片。
+  imageGenApi?: ImageGenApiConfig;
   minimaxApiKey?: string;
   minimaxGroupId?: string;
   // 'domestic' → https://api.minimaxi.com (国内站)
