@@ -813,6 +813,7 @@ ${coreContext}
 
   // 背景图：能生就生，生不出来不阻塞（名字/签名依然生效）。竖版尺寸，贴近手机封面比例。
   if (isImageGenApiReady(apiConfig.imageGenApi) && apiConfig.imageGenApi) {
+    console.info('[Moments/Secret] 开始生成秘密空间背景图');
     try {
       const bgPrompt = `A dreamy, private, abstract background image representing a secret personal space, `
         + `soft colors, atmospheric, no text, no people, portrait orientation`;
@@ -821,12 +822,18 @@ ${coreContext}
         meta: { appId: 'moments', appName: '朋友圈', purpose: '秘密空间背景生成', charId: char.id, charName: char.name } as any,
       });
       const first = results[0];
-      if (first?.src) {
-        identity.coverImage = first.src.startsWith('data:') ? await migrateDataUrlToRef(first.src) : first.src;
-      }
+      if (!first?.src) throw new Error('生图 API 没有返回图片（results 为空或缺少 src）');
+      identity.coverImage = first.src.startsWith('data:') ? await migrateDataUrlToRef(first.src) : first.src;
+      console.info('[Moments/Secret] 背景图生成成功');
     } catch (e: any) {
-      console.warn('[Moments/Secret] 背景图生成失败，跳过:', e?.message || String(e));
+      console.warn(
+        '[Moments/Secret] 背景图生成失败，跳过:',
+        '\nmessage:', e?.message || String(e),
+        '\nstack:', e?.stack || '(无堆栈)',
+      );
     }
+  } else {
+    console.info('[Moments/Secret] 生图 API 未就绪，跳过背景图生成');
   }
 
   return identity;
