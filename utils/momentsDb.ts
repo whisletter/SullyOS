@@ -54,6 +54,12 @@ export interface MomentPost {
   type: MomentPostType;
   text?: string;                   // 文字内容
   images?: string[];               // 图片 URL 或 base64
+  /**
+   * 生成这些图片时用的英文描述（仅 AI 自动配图的动态才有）。重新生成失败的图片时
+   * 复用同一句描述再调一次生图 API，而不是重新问 AI「这条要不要配图」——避免多打一次
+   * 聊天补全 API，图的内容也和这条动态原本想表达的场景保持一致。
+   */
+  imagePrompt?: string;
   music?: MomentMusicCard;
   article?: MomentArticleCard;
   likes: string[];                 // 点赞人列表（'user' 或 charId）
