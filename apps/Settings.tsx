@@ -49,8 +49,9 @@ import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel } from '
 import { configFromPreset, findActivePresetId, type PresetSwitchPatch } from '../utils/apiPresetSwitch';
 import type { APIConfig, TtsProvider } from '../types';
 import { describeImageWithVisionApi, VISION_API_TEST_IMAGE_DATA_URL, visionApiConfigFromPreset } from '../utils/visionApi';
-import { generateImage, IMAGE_GEN_API_TEST_PROMPT } from '../utils/imageGenApi';
+import { generateImage, IMAGE_GEN_API_TEST_PROMPT, MAX_REFERENCE_IMAGES } from '../utils/imageGenApi';
 import type { ImageGenApiFormat } from '../types';
+import { processImage } from '../utils/file';
 import {
     FIRECRAWL_API_KEYS_URL,
     getFirecrawlApiKey,
@@ -511,10 +512,13 @@ const Settings: React.FC = () => {
   const [localImageGenKey, setLocalImageGenKey] = useState(apiConfig.imageGenApi?.apiKey || '');
   const [localImageGenModel, setLocalImageGenModel] = useState(apiConfig.imageGenApi?.model || '');
   const [localImageGenStylePreset, setLocalImageGenStylePreset] = useState(apiConfig.imageGenApi?.stylePreset || '');
+  const [localImageGenReferenceImages, setLocalImageGenReferenceImages] = useState<string[]>(apiConfig.imageGenApi?.referenceImages || []);
   const [imageGenStatusMsg, setImageGenStatusMsg] = useState('');
   const [testingImageGenApi, setTestingImageGenApi] = useState(false);
   const [imageGenTestResult, setImageGenTestResult] = useState<string | null>(null);
   const [imageGenTestImageSrc, setImageGenTestImageSrc] = useState<string | null>(null);
+  const [uploadingImageGenReference, setUploadingImageGenReference] = useState(false);
+  const imageGenReferenceInputRef = useRef<HTMLInputElement>(null);
   const [localMiniMaxKey, setLocalMiniMaxKey] = useState(apiConfig.minimaxApiKey || '');
   const [localMiniMaxGroupId, setLocalMiniMaxGroupId] = useState(apiConfig.minimaxGroupId || '');
   const [localMiniMaxRegion, setLocalMiniMaxRegion] = useState<'domestic' | 'overseas'>(
@@ -953,12 +957,15 @@ const Settings: React.FC = () => {
       setLocalImageGenKey(apiConfig.imageGenApi?.apiKey || '');
       setLocalImageGenModel(apiConfig.imageGenApi?.model || '');
       setLocalImageGenStylePreset(apiConfig.imageGenApi?.stylePreset || '');
+      setLocalImageGenReferenceImages(apiConfig.imageGenApi?.referenceImages || []);
   }, [
       apiConfig.imageGenApi?.format,
       apiConfig.imageGenApi?.baseUrl || '',
       apiConfig.imageGenApi?.apiKey || '',
       apiConfig.imageGenApi?.model || '',
       apiConfig.imageGenApi?.stylePreset || '',
+      // 数组不能直接放依赖项（每次引用都不同会导致死循环）；用内容摘要代替。
+      (apiConfig.imageGenApi?.referenceImages || []).join('|'),
   ]);
 
   useEffect(() => {
@@ -1272,6 +1279,34 @@ const Settings: React.FC = () => {
     }
   };
 
+  /** 参考脸图上传：压缩后转 base64，追加进本地 state（保存按钮点了才落盘到 apiConfig）。支持一次多选，超出上限的会被丢弃并提示。 */
+  const handleImageGenReferenceUpload = async (files: File[]) => {
+    if (files.length === 0) return;
+    setUploadingImageGenReference(true);
+    try {
+      const remainingSlots = MAX_REFERENCE_IMAGES - localImageGenReferenceImages.length;
+      const toUpload = files.slice(0, Math.max(0, remainingSlots));
+      if (toUpload.length < files.length) {
+        addToast(`最多上传 ${MAX_REFERENCE_IMAGES} 张参考图，多余的已忽略`, 'info');
+      }
+      if (toUpload.length === 0) return;
+      // 参考图不需要太大；1024 足够模型识别五官细节，同时控制体积别把配置存爆。
+      const dataUrls = await Promise.all(toUpload.map(file => processImage(file, { maxWidth: 1024, quality: 0.9 })));
+      setLocalImageGenReferenceImages(prev => [...prev, ...dataUrls]);
+      setImageGenTestResult(null);
+    } catch (error: any) {
+      addToast(error?.message || '参考图上传失败', 'error');
+    } finally {
+      setUploadingImageGenReference(false);
+      if (imageGenReferenceInputRef.current) imageGenReferenceInputRef.current.value = '';
+    }
+  };
+
+  const handleRemoveImageGenReference = (index: number) => {
+    setLocalImageGenReferenceImages(prev => prev.filter((_, i) => i !== index));
+    setImageGenTestResult(null);
+  };
+
   const handleSaveImageGenApi = (enabled = localImageGenEnabled) => {
     const nextImageGenApi = {
       enabled,
@@ -1280,6 +1315,7 @@ const Settings: React.FC = () => {
       apiKey: normalizeApiCredential(localImageGenKey),
       model: normalizeApiModel(localImageGenModel),
       stylePreset: localImageGenStylePreset.trim() || undefined,
+      referenceImages: localImageGenReferenceImages.length > 0 ? localImageGenReferenceImages : undefined,
     };
     if (nextImageGenApi.enabled && (!nextImageGenApi.apiKey || !nextImageGenApi.model)) {
       addToast('开启生图 API 前，请填写完整的 Key 和 Model', 'error');
@@ -1316,6 +1352,8 @@ const Settings: React.FC = () => {
       baseUrl: normalizeApiBaseUrl(localImageGenUrl),
       apiKey: normalizeApiCredential(localImageGenKey),
       model: normalizeApiModel(localImageGenModel),
+      stylePreset: localImageGenStylePreset.trim() || undefined,
+      referenceImages: localImageGenReferenceImages.length > 0 ? localImageGenReferenceImages : undefined,
     };
     if (!config.apiKey || !config.model) {
       setImageGenTestResult('❌ 请先填写完整的 Key 和 Model');
@@ -2926,6 +2964,50 @@ const Settings: React.FC = () => {
                         className="w-full bg-white/60 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm leading-relaxed focus:bg-white transition-all disabled:cursor-not-allowed resize-none min-h-[80px]"
                     />
                     <p className="text-[9px] text-slate-300 px-1">聊天 / 朋友圈 / 测试生图时都会自动带上这段提示词。支持锁脸描述、画风指定等。</p>
+                </div>
+
+                {/* 参考脸图：填了之后自动切图生图（OpenAI 走 /v1/images/edits，Agnes 走 extra_body.image）。最多 5 张。 */}
+                <div className="space-y-1.5 pt-1">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+                        参考脸图（锁脸用，可选） <span className="normal-case font-normal text-slate-300">{localImageGenReferenceImages.length}/{MAX_REFERENCE_IMAGES}</span>
+                    </label>
+                    <input
+                        type="file"
+                        ref={imageGenReferenceInputRef}
+                        className="hidden"
+                        accept="image/*"
+                        multiple
+                        onChange={(e) => { const files = Array.from(e.target.files || []); if (files.length) handleImageGenReferenceUpload(files); }}
+                    />
+                    <div className="grid grid-cols-5 gap-2">
+                        {localImageGenReferenceImages.map((src, index) => (
+                            <div key={index} className="relative aspect-square rounded-xl overflow-hidden border border-pink-200 group">
+                                <img src={src} alt={`参考图 ${index + 1}`} className="w-full h-full object-cover" />
+                                <button
+                                    type="button"
+                                    onClick={() => handleRemoveImageGenReference(index)}
+                                    disabled={!localImageGenEnabled || uploadingImageGenReference}
+                                    aria-label="删除这张参考图"
+                                    className="absolute top-0.5 right-0.5 w-4 h-4 flex items-center justify-center rounded-full bg-black/60 text-white text-[10px] leading-none active:scale-90 transition-all disabled:opacity-40"
+                                >
+                                    ✕
+                                </button>
+                            </div>
+                        ))}
+                        {localImageGenReferenceImages.length < MAX_REFERENCE_IMAGES && (
+                            <button
+                                type="button"
+                                onClick={() => imageGenReferenceInputRef.current?.click()}
+                                disabled={!localImageGenEnabled || uploadingImageGenReference}
+                                className="aspect-square rounded-xl border-2 border-dashed border-pink-200 bg-pink-50/40 text-pink-400 text-[10px] font-bold flex items-center justify-center active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                                {uploadingImageGenReference ? '…' : '＋'}
+                            </button>
+                        )}
+                    </div>
+                    <p className="text-[9px] text-slate-300 px-1">
+                        上传后生图会自动切换成图生图模式（以这些图为参考锁脸），不再是纯文字出图。可一次多选，最多 {MAX_REFERENCE_IMAGES} 张；留空则按原来的文字生图。
+                    </p>
                 </div>
 
                 <div className="grid grid-cols-2 gap-2">
