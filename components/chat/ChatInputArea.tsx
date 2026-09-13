@@ -52,6 +52,8 @@ interface ChatInputAreaProps {
     luckinActivated?: boolean;
     // HTML 模块模式
     htmlModeEnabled?: boolean;
+    /** 聊天框自动发图开关（角色 imageGenChatEnabled），点击「+」菜单里的「生图」按钮打开设置弹窗调整 */
+    imageGenChatEnabled?: boolean;
     // 思考过程展示（会话级）
     showThinkingChain?: boolean;
     // Input style
@@ -78,6 +80,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
     luckinConfigured = false,
     luckinActivated = false,
     htmlModeEnabled = false,
+    imageGenChatEnabled = false,
     showThinkingChain = false,
     inputStyle = 'default',
     sendButtonStyle = 'circle',
@@ -782,6 +785,23 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                                   {htmlModeEnabled && <span className={`absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 ${isDiscordStyle ? 'bg-fuchsia-400 border-slate-900' : 'bg-fuchsia-500 border-white'}`} />}
                               </div>)}
                               <span className="text-xs font-bold">{htmlModeEnabled ? 'HTML已开' : 'HTML模式'}</span>
+                            </button>
+
+                            {/* 生图：点击打开设置弹窗（含开关），TA 开启后会自己判断聊天里要不要发图 */}
+                            <button
+                              onClick={() => onPanelAction('image-gen-settings')}
+                              className={`flex flex-col items-center gap-2 active:scale-95 transition-transform relative ${acnh ? 'text-[#725d42]' : isDiscordStyle ? 'text-slate-200' : 'text-slate-600'}`}
+                            >
+                              {acnh ? <div className="relative"><AcnhActionTile kind="html" />{imageGenChatEnabled && <span className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-teal-400 border-2 border-white" />}</div> : (
+                              <div className={`w-14 h-14 rounded-2xl flex items-center justify-center shadow-sm border relative ${
+                                  imageGenChatEnabled
+                                    ? (isDiscordStyle ? 'bg-teal-500/20 text-teal-300 border-teal-400/40' : 'bg-teal-100 text-teal-600 border-teal-200')
+                                    : (isDiscordStyle ? 'bg-slate-800 text-teal-300 border-teal-400/20' : 'bg-teal-50 text-teal-500 border-teal-100')
+                              }`}>
+                                  <Image className="w-6 h-6" weight="bold" />
+                                  {imageGenChatEnabled && <span className={`absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 ${isDiscordStyle ? 'bg-teal-400 border-slate-900' : 'bg-teal-500 border-white'}`} />}
+                              </div>)}
+                              <span className="text-xs font-bold">{imageGenChatEnabled ? '生图已开' : '生图'}</span>
                             </button>
 
                             {/* 「展示思考」按钮：tap → 直接打开思考链设置弹窗（含开关），不再做 inline toggle */}
