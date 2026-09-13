@@ -10,7 +10,7 @@
  */
 
 import type { CharacterProfile, UserProfile, APIConfig } from '../types';
-import type { MomentPost, MomentComment, MomentSettings } from './momentsDb';
+import type { MomentPost, MomentComment, MomentSettings, MomentUpdateFrequency } from './momentsDb';
 import { createPostId, createCommentId } from './momentsDb';
 import { ContextBuilder } from './context';
 import { DB } from './db';
@@ -74,6 +74,11 @@ export interface GenerateMomentsInput {
   settings: MomentSettings;
   /** 当前已有的全部动态（用于去重 + 提供用户动态给 AI 互动） */
   existingPosts: MomentPost[];
+  /**
+   * "暂停营业"模式下为 true：只做任务 1（发新动态），跳过任务 2（点赞/评论用户动态）
+   * 和任务 3（回复自己动态下的追评）——因为这个状态代表"联系不上 TA"，TA 不会看用户的朋友圈。
+   */
+  skipInteractions?: boolean;
   /** 可选：外部传入的 AbortSignal */
   signal?: AbortSignal;
 }
@@ -222,6 +227,7 @@ function buildMomentsPrompt(
   pendingRepliesText: string,
   maxPosts: number,
   imageGenAvailable: boolean,
+  skipInteractions: boolean,
 ): string {
   // 角色核心人设
   const coreContext = ContextBuilder.buildCoreContext(char, userProfile, false, undefined, {
@@ -233,22 +239,7 @@ function buildMomentsPrompt(
   const currentTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
   const currentDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
-  return `你是「${char.name}」，正在发朋友圈和浏览朋友圈。
-
-${coreContext}
-
-【你和用户的关系】
-用户名: ${userProfile.name || '用户'}
-${userProfile.bio ? `用户简介: ${userProfile.bio}` : ''}
-
-【当前时间】${currentDate} ${currentTime}
-
-【你今天的日程】
-${scheduleText}
-
-【你和用户的近期聊天片段】
-${chatSummary}
-
+  const contextSections = skipInteractions ? '' : `
 【用户最近发的朋友圈】
 ${userPostsText}
 
@@ -257,10 +248,19 @@ ${taRecentText}
 
 【你自己动态下面，用户刚追评、还等你回话的】
 ${pendingRepliesText}
+`;
 
-===
+  const tasksSection = skipInteractions
+    ? `现在你只需要做一件事：
 
-现在你要做三件事：
+1. 发 1 到 ${maxPosts} 条朋友圈动态
+   - 内容要符合你的人设、当前时间和日程
+   - postTime 填你"发"这条的时间（必须是今天且早于 ${currentTime}），格式 "HH:MM"
+   - 文字风格要像真人发朋友圈：简短、口语化、可以带 emoji、不要太正式
+   - 可以分享日常、感想、吐槽、自拍描述、转发感悟等${imageGenAvailable ? `
+   - 这条动态要不要配图，由你自己判断：想配图就在这条里加一个 "imagePrompt" 字段，
+     写一句简短的英文图片描述（场景/动作/穿着等细节）；不想配图就不要写这个字段` : ''}`
+    : `现在你要做三件事：
 
 1. 发 1 到 ${maxPosts} 条朋友圈动态
    - 内容要符合你的人设、当前时间和日程
@@ -281,11 +281,19 @@ ${pendingRepliesText}
    - 你可以回复也可以不回复（觉得没必要接就跳过），符合你的性格和当下语境即可
    - 如果要回复，commentReplies 里加一项：postId 填对应动态的 id，replyToCommentId 填你要回复的
      那条用户评论的 commentId（通常是列表里最后一条，除非你想回应更早的某句话），comment 填回复内容
-   - 回复要像真人聊天接话，别写成一段客套的官方回应
+   - 回复要像真人聊天接话，别写成一段客套的官方回应`;
 
-请严格按以下 JSON 格式返回，不要附加任何其他文字：
-
-{
+  const jsonFormat = skipInteractions
+    ? `{
+  "newPosts": [
+    {
+      "text": "朋友圈文字内容",
+      "postTime": "HH:MM"${imageGenAvailable ? `,
+      "imagePrompt": "可选：想配图就写一句简短的英文图片描述；不配图就不要写这个字段"` : ''}
+    }
+  ]
+}`
+    : `{
   "newPosts": [
     {
       "text": "朋友圈文字内容",
@@ -308,6 +316,30 @@ ${pendingRepliesText}
     }
   ]
 }`;
+
+  return `你是「${char.name}」，正在发朋友圈${skipInteractions ? '' : '和浏览朋友圈'}。
+
+${coreContext}
+
+【你和用户的关系】
+用户名: ${userProfile.name || '用户'}
+${userProfile.bio ? `用户简介: ${userProfile.bio}` : ''}
+
+【当前时间】${currentDate} ${currentTime}
+
+【你今天的日程】
+${scheduleText}
+
+【你和用户的近期聊天片段】
+${chatSummary}
+${contextSections}
+===
+
+${tasksSection}
+
+请严格按以下 JSON 格式返回，不要附加任何其他文字：
+
+${jsonFormat}`;
 }
 
 // ==================== API 调用 ====================
@@ -316,28 +348,28 @@ ${pendingRepliesText}
  * 核心函数：生成 TA 的朋友圈动态 + 对用户动态的互动
  */
 export async function generateMoments(input: GenerateMomentsInput): Promise<GenerateMomentsResult> {
-  const { char, userProfile, apiConfig, settings, existingPosts, signal } = input;
+  const { char, userProfile, apiConfig, settings, existingPosts, skipInteractions, signal } = input;
   const charId = char.id;
   const charName = char.name;
   const userName = userProfile.name || '用户';
   const maxPosts = settings.taPostFrequency || 3;
 
-  // 1. 收集上下文
+  // 1. 收集上下文（暂停营业模式跳过用户动态/待回复相关的收集，反正 prompt 不会用到）
   const [chatSummary, scheduleText] = await Promise.all([
     getRecentChatSummary(charId, charName, userName),
     getTodayScheduleText(char),
   ]);
-  const userPostsText = formatUserPosts(existingPosts);
+  const userPostsText = skipInteractions ? '' : formatUserPosts(existingPosts);
   const taRecentText = formatTaRecentPosts(existingPosts, charId);
-  const pendingReplyPosts = findPendingReplies(existingPosts, charId);
-  const pendingRepliesText = formatPendingReplies(pendingReplyPosts, charName);
+  const pendingReplyPosts = skipInteractions ? [] : findPendingReplies(existingPosts, charId);
+  const pendingRepliesText = skipInteractions ? '' : formatPendingReplies(pendingReplyPosts, charName);
 
   // 2. 构建 prompt
   const imageGenAvailable = isImageGenApiReady(apiConfig.imageGenApi);
   const systemPrompt = buildMomentsPrompt(
     char, userProfile, settings,
     scheduleText, chatSummary, userPostsText, taRecentText, pendingRepliesText,
-    maxPosts, imageGenAvailable,
+    maxPosts, imageGenAvailable, !!skipInteractions,
   );
 
   // 3. 调用 API
@@ -346,7 +378,7 @@ export async function generateMoments(input: GenerateMomentsInput): Promise<Gene
     model: apiConfig.model,
     messages: [
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: '请根据当前时间和日程，发你的朋友圈，并看看我发的朋友圈。只返回 JSON。' },
+      { role: 'user', content: skipInteractions ? '请根据当前时间和日程，发你的朋友圈。只返回 JSON。' : '请根据当前时间和日程，发你的朋友圈，并看看我发的朋友圈。只返回 JSON。' },
     ],
     temperature: 0.85,
     max_tokens: 2600,
@@ -540,8 +572,262 @@ export async function generateMoments(input: GenerateMomentsInput): Promise<Gene
 
 // ==================== 冷却检查 ====================
 
-/** 距离上次生成是否已过冷却期（默认 5 分钟） */
-export function canGenerate(settings: MomentSettings, cooldownMs = 5 * 60_000): boolean {
+/** 更新频率档位 → 冷却毫秒数；'paused' 特殊处理，见 canGenerate。 */
+const FREQUENCY_COOLDOWN_MS: Record<Exclude<MomentUpdateFrequency, 'paused'>, number> = {
+  '5min': 5 * 60_000,
+  '30min': 30 * 60_000,
+  '1h': 60 * 60_000,
+  '2h': 2 * 60 * 60_000,
+};
+
+/**
+ * 距离上次生成是否已过冷却期。'paused'（暂停营业）下，自动触发（打开 App / 查手机跳转）
+ * 永远返回 false——那条路径完全不生成；🌼 秘密空间走的是独立的 generateSecretMemory，
+ * 不经过这个函数，所以暂停营业下🌼依然可用。
+ */
+export function canGenerate(settings: MomentSettings): boolean {
+  if (settings.updateFrequency === 'paused') return false;
   if (!settings.lastGeneratedAt) return true;
+  const cooldownMs = FREQUENCY_COOLDOWN_MS[settings.updateFrequency] ?? FREQUENCY_COOLDOWN_MS['30min'];
   return Date.now() - settings.lastGeneratedAt > cooldownMs;
+}
+
+// ==================== 秘密空间（🌼）====================
+
+/** generateSecretMemory 的入参 */
+export interface GenerateSecretMemoryInput {
+  char: CharacterProfile;
+  userProfile: UserProfile;
+  apiConfig: APIConfig;
+  settings: MomentSettings;
+  /** 当前已有的全部动态（用于算"最早时间点"和防重复） */
+  existingPosts: MomentPost[];
+  signal?: AbortSignal;
+}
+
+/**
+ * "暂停营业"状态下，TA 朋友圈页面的🌼按钮触发：生成一条更早于 TA 当前最早动态时间的
+ * "秘密心事"——不读最近聊天上下文（这是过去的事，跟当下语境无关），依据人设 + 记忆宫殿
+ * 生成。这批动态只进 TA 的秘密空间列表，不进"我的朋友圈"混合时间线，也不进 TA 朋友圈
+ * 常规列表（调用方要用 isSecretMemory 过滤）。
+ */
+export async function generateSecretMemory(input: GenerateSecretMemoryInput): Promise<MomentPost> {
+  const { char, userProfile, apiConfig, existingPosts, signal } = input;
+  const charId = char.id;
+  const charName = char.name;
+
+  // 找出整条历史线（含之前已生成的秘密动态）里最早的时间点，新的一条必须比它更早，
+  // 避免多次点🌼之间互相穿插、时间线乱掉。
+  const taPosts = existingPosts.filter(p => p.author === charId);
+  const earliestTs = taPosts.length > 0
+    ? Math.min(...taPosts.map(p => p.createdAt))
+    : Date.now();
+  const earliestDate = new Date(earliestTs);
+  const earliestDateStr = `${earliestDate.getFullYear()}-${String(earliestDate.getMonth() + 1).padStart(2, '0')}-${String(earliestDate.getDate()).padStart(2, '0')}`;
+
+  const coreContext = ContextBuilder.buildCoreContext(char, userProfile, false, undefined, {
+    skipUserProfile: true,
+    headerOverride: '[角色档案]',
+  });
+  const memorySnippet = char.memoryPalaceEnabled && char.memoryPalaceInjection?.trim()
+    ? char.memoryPalaceInjection.trim()
+    : '(暂无记忆宫殿内容，凭人设自行想象一段合理的过去经历)';
+  const imageGenAvailable = isImageGenApiReady(apiConfig.imageGenApi);
+
+  const systemPrompt = `你是「${char.name}」。现在要写一条你自己都没对任何人说过的朋友圈——一条秘密心事，
+只有你自己能看到，用户和其他任何人都看不到、也不知道这条动态存在。
+
+${coreContext}
+
+【你的部分记忆片段（可作为这条秘密心事的素材）】
+${memorySnippet}
+
+【时间限制】这条动态必须发生在 ${earliestDateStr} 之前（可以是具体某一年、几个月前、几周前、几天前、
+甚至几小时前，只要早于这个日期即可）。必须写清楚具体的年月日，禁止使用"多年前""很久以前"这种模糊表达。
+
+【写作要求】
+- 内容是一段没对用户或任何人说出口的心事、隐秘的感受、独自藏着的小事——不是日常流水账
+- 完全不用考虑当下的聊天语境或日程，这是纯粹的过去
+- 文字风格自然、私密，像写给自己看的${imageGenAvailable ? `
+- 想配图就加一个 "imagePrompt" 字段，写一句简短的英文图片描述；不想配图就不要写这个字段` : ''}
+
+请严格按以下 JSON 格式返回，不要附加任何其他文字：
+
+{
+  "text": "这条秘密心事的内容",
+  "date": "YYYY-MM-DD"${imageGenAvailable ? `,
+  "imagePrompt": "可选：想配图就写一句简短的英文图片描述"` : ''}
+}`;
+
+  const url = `${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+  const body = {
+    model: apiConfig.model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: '写一条你的秘密心事。只返回 JSON。' },
+    ],
+    temperature: 0.95,
+    max_tokens: 800,
+  };
+
+  const data = await safeFetchJson(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiConfig.apiKey}`,
+    },
+    body: JSON.stringify(body),
+    signal,
+  } as RequestInit, 1, 30_000, {
+    appId: 'moments',
+    appName: '朋友圈',
+    purpose: '生成秘密空间历史动态',
+  });
+
+  const content = data?.choices?.[0]?.message?.content || '';
+  const parsed = extractJson(content) as { text?: string; date?: string; imagePrompt?: string } | null;
+  if (!parsed?.text?.trim()) {
+    console.warn('[Moments/Secret] JSON 解析失败或缺少 text，原始返回内容:', content);
+    throw new Error('AI 没有返回有效的秘密动态内容');
+  }
+
+  // 解析日期 → 时间戳，必须早于 earliestTs；解析失败或晚于下限就兜底成"最早时间点再往前随机 1~90 天"。
+  let timestamp: number;
+  const dateMatch = parsed.date && /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(parsed.date.trim());
+  if (dateMatch) {
+    const [, y, m, d] = dateMatch;
+    const candidate = new Date(Number(y), Number(m) - 1, Number(d), Math.floor(Math.random() * 24), Math.floor(Math.random() * 60));
+    timestamp = candidate.getTime() < earliestTs ? candidate.getTime() : earliestTs - (1 + Math.floor(Math.random() * 90)) * 86_400_000;
+  } else {
+    timestamp = earliestTs - (1 + Math.floor(Math.random() * 90)) * 86_400_000;
+  }
+
+  const imagePrompt = imageGenAvailable ? parsed.imagePrompt?.trim() : undefined;
+  const post: MomentPost = {
+    id: createPostId(),
+    charId,
+    author: charId,
+    authorName: charName,
+    authorAvatar: char.avatar || '',
+    type: imagePrompt ? 'imageText' : 'text',
+    text: parsed.text.trim(),
+    imagePrompt,
+    isSecretMemory: true,
+    likes: [],
+    likeNames: [],
+    comments: [],
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+
+  if (imagePrompt && apiConfig.imageGenApi) {
+    try {
+      const results = await generateImage(apiConfig.imageGenApi, imagePrompt, {
+        meta: { appId: 'moments', appName: '朋友圈', purpose: '秘密空间动态配图', charId, charName } as any,
+      });
+      const first = results[0];
+      if (!first?.src) throw new Error('生图 API 没有返回图片');
+      const storedContent = first.src.startsWith('data:') ? await migrateDataUrlToRef(first.src) : first.src;
+      post.images = [storedContent];
+    } catch (e: any) {
+      console.warn('[Moments/Secret] 配图失败，退化成纯文字:', e?.message || String(e));
+      post.type = 'text';
+    }
+  }
+
+  return post;
+}
+
+/** generateSecretSpaceIdentity 的返回：背景图 + 名字 + 签名（"换个心情"按钮用） */
+export interface SecretSpaceIdentity {
+  coverImage?: string;
+  name: string;
+  signature: string;
+}
+
+/**
+ * 🌼 秘密空间"换个心情"：只重新生成背景图 + 名字 + 个性签名，不动下面的历史动态列表。
+ * 名字和签名要体现"卸下平时人设包袱"的私密自称感，跟 TA 平时在朋友圈/聊天里的样子不同。
+ */
+export async function generateSecretSpaceIdentity(
+  char: CharacterProfile,
+  userProfile: UserProfile,
+  apiConfig: APIConfig,
+  signal?: AbortSignal,
+): Promise<SecretSpaceIdentity> {
+  const coreContext = ContextBuilder.buildCoreContext(char, userProfile, false, undefined, {
+    skipUserProfile: true,
+    headerOverride: '[角色档案]',
+  });
+
+  const systemPrompt = `你是「${char.name}」。这里是你的秘密空间——一个完全属于你自己、别人（包括用户）都看不到的私密角落。
+
+${coreContext}
+
+请为这个秘密空间取一个只有你自己会用的称呼和一句个性签名。这个称呼和签名要体现你卸下平时在朋友圈/
+日常里的人设包袱后，更私密、更真实的一面——可以是自嘲、脆弱、任性、或藏在心底没说出口的样子，
+不需要维持你平时给别人看的形象。
+
+请严格按以下 JSON 格式返回，不要附加任何其他文字：
+
+{
+  "name": "这个秘密空间里你给自己的称呼",
+  "signature": "一句个性签名"
+}`;
+
+  const url = `${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+  const body = {
+    model: apiConfig.model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: '换个心情，重新取一个称呼和签名。只返回 JSON。' },
+    ],
+    temperature: 1.0,
+    max_tokens: 300,
+  };
+
+  const data = await safeFetchJson(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiConfig.apiKey}`,
+    },
+    body: JSON.stringify(body),
+    signal,
+  } as RequestInit, 1, 30_000, {
+    appId: 'moments',
+    appName: '朋友圈',
+    purpose: '秘密空间换心情',
+  });
+
+  const content = data?.choices?.[0]?.message?.content || '';
+  const parsed = extractJson(content) as { name?: string; signature?: string } | null;
+  if (!parsed?.name?.trim()) {
+    throw new Error('AI 没有返回有效的称呼');
+  }
+
+  const identity: SecretSpaceIdentity = {
+    name: parsed.name.trim(),
+    signature: parsed.signature?.trim() || '',
+  };
+
+  // 背景图：能生就生，生不出来不阻塞（名字/签名依然生效）。竖版尺寸，贴近手机封面比例。
+  if (isImageGenApiReady(apiConfig.imageGenApi) && apiConfig.imageGenApi) {
+    try {
+      const bgPrompt = `A dreamy, private, abstract background image representing a secret personal space, `
+        + `soft colors, atmospheric, no text, no people, portrait orientation`;
+      const results = await generateImage(apiConfig.imageGenApi, bgPrompt, {
+        size: '1024x1536',
+        meta: { appId: 'moments', appName: '朋友圈', purpose: '秘密空间背景生成', charId: char.id, charName: char.name } as any,
+      });
+      const first = results[0];
+      if (first?.src) {
+        identity.coverImage = first.src.startsWith('data:') ? await migrateDataUrlToRef(first.src) : first.src;
+      }
+    } catch (e: any) {
+      console.warn('[Moments/Secret] 背景图生成失败，跳过:', e?.message || String(e));
+    }
+  }
+
+  return identity;
 }
