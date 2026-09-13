@@ -49,6 +49,8 @@ import Modal from '../components/os/Modal';
 import ProactiveSettingsModal from '../components/chat/ProactiveSettingsModal';
 import ActiveMsg2SettingsModal from '../components/chat/ActiveMsg2SettingsModal';
 import ThinkingChainSettingsModal from '../components/chat/ThinkingChainSettingsModal';
+import ImageGenChatSettingsModal from '../components/chat/ImageGenChatSettingsModal';
+import { isImageGenApiReady } from '../utils/imageGenApi';
 import ScheduleChangeNotice from '../components/chat/ScheduleChangeNotice';
 import { useChatAI } from '../hooks/useChatAI';
 import { cleanTextForTts, parseVoiceOutput } from '../utils/minimaxTts';
@@ -261,6 +263,7 @@ const Chat: React.FC = () => {
     const [showProactiveModal, setShowProactiveModal] = useState(false);
     const [showActiveMsg2Modal, setShowActiveMsg2Modal] = useState(false);
     const [showThinkingChainModal, setShowThinkingChainModal] = useState(false);
+    const [showImageGenModal, setShowImageGenModal] = useState(false);
 
     // Archive Prompts State
     const [archivePrompts, setArchivePrompts] = useState<{id: string, name: string, content: string}[]>(DEFAULT_ARCHIVE_PROMPTS);
@@ -1719,7 +1722,7 @@ const Chat: React.FC = () => {
         if ([
             'transfer', 'archive', 'settings', 'chrome-css', 'chrome-sound', 'fine-tune',
             'meetup', 'proactive', 'active-msg-2', 'schedule', 'mcd-request', 'luckin-request',
-            'html-mode-toggle', 'html-mode-settings', 'thinking-settings', 'favorites', 'collaboration',
+            'html-mode-toggle', 'html-mode-settings', 'thinking-settings', 'favorites', 'collaboration', 'image-gen-settings',
             // 独立小功能：点一下就是用了一次，跟「打开某个面板」同一性质。
             // send-emoji / select-category 这些是「挑哪一个」，不进名单。
             'poke', 'emoji-import', 'add-category', 'mcd-end', 'luckin-end',
@@ -1789,6 +1792,13 @@ const Chat: React.FC = () => {
                 // 「展示思考」按钮 → 打开思考链设置 modal（开关 / 卡片风格 / 配色 / 追加提示词）
                 if (!char) break;
                 setShowThinkingChainModal(true);
+                break;
+            }
+            case 'image-gen-settings': {
+                // 「生图」按钮 → 打开极简开关弹窗
+                if (!char) break;
+                setShowPanel('none');
+                setShowImageGenModal(true);
                 break;
             }
         }
@@ -3773,6 +3783,7 @@ const Chat: React.FC = () => {
                 xhsEnabled={!!char.xhsEnabled}
                 onToggleXhs={() => updateCharacter(char.id, { xhsEnabled: !char.xhsEnabled })}
                 htmlModeEnabled={!!(char as any).htmlModeEnabled}
+                imageGenChatEnabled={!!(char as any).imageGenChatEnabled}
                 onToggleHtmlMode={() => updateCharacter(char.id, { htmlModeEnabled: !((char as any).htmlModeEnabled) } as any)}
                 htmlModeCustomPrompt={settingsHtmlModeCustomPrompt}
                 setHtmlModeCustomPrompt={setSettingsHtmlModeCustomPrompt}
@@ -4340,6 +4351,7 @@ const Chat: React.FC = () => {
                     luckinConfigured={luckinConfiguredFlag}
                     luckinActivated={luckinActivated}
                     htmlModeEnabled={!!(char as any).htmlModeEnabled}
+                    imageGenChatEnabled={!!(char as any).imageGenChatEnabled}
                     showThinkingChain={!!(char as any).showThinkingChain}
                     inputStyle={osTheme.chatInputStyle}
                     sendButtonStyle={osTheme.chatSendButtonStyle}
@@ -4428,6 +4440,17 @@ const Chat: React.FC = () => {
                         if (next.customCss !== undefined) patch.thinkingChainCustomCss = next.customCss;
                         if (Object.keys(patch).length) updateCharacter(char.id, patch as any);
                     }}
+                />
+            )}
+
+            {/* 生图设置弹窗 — 入口：聊天加号面板「生图」按钮 */}
+            {char && (
+                <ImageGenChatSettingsModal
+                    isOpen={showImageGenModal}
+                    onClose={() => setShowImageGenModal(false)}
+                    enabled={!!(char as any).imageGenChatEnabled}
+                    apiReady={isImageGenApiReady(apiConfig.imageGenApi)}
+                    onChange={(next) => updateCharacter(char.id, { imageGenChatEnabled: next } as any)}
                 />
             )}
 
