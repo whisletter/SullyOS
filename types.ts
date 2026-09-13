@@ -275,6 +275,13 @@ export interface ImageGenApiConfig {
   model: string;
   /** 风格预设：每次生图时自动附加到 prompt 末尾，统一画风 / 锁脸 / 色调等。 */
   stylePreset?: string;
+  /**
+   * 参考脸图（base64 data URL 数组，最多 5 张）。填了之后 generateImage() 会自动切换成
+   * 图生图调用方式：OpenAI 格式走 /v1/images/edits（多图用重复 image 字段传），
+   * Agnes 系列走 /v1/images/generations 但把图放进 extra_body.image 数组。
+   * 用来锁脸 / 保持人物一致性，多张时可以是不同角度或不同参考素材。
+   */
+  referenceImages?: string[];
 }
 
 export interface APIConfig {
