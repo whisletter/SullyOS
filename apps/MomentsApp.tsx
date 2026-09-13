@@ -45,6 +45,7 @@ import {
   MomentMusicCard,
   MomentArticleCard,
   MomentPostType,
+  MomentUpdateFrequency,
   DEFAULT_MOMENT_SETTINGS,
   getPostsByCharId,
   savePost,
@@ -54,7 +55,8 @@ import {
   createPostId,
   createCommentId,
 } from '../utils/momentsDb';
-import { generateMoments, canGenerate } from '../utils/momentsAi';
+import { generateMoments, canGenerate, generateSecretMemory, generateSecretSpaceIdentity } from '../utils/momentsAi';
+import { DB } from '../utils/db';
 import { generateImage, isImageGenApiReady } from '../utils/imageGenApi';
 import { migrateDataUrlToRef } from '../utils/blobRef';
 
@@ -65,7 +67,7 @@ const AVATAR_SIZE = 64;
 
 // ==================== 主组件 ====================
 
-type View = 'main' | 'taPage' | 'compose' | 'settings';
+type View = 'main' | 'taPage' | 'compose' | 'settings' | 'secretSpace';
 type ComposeType = MomentPostType | null;
 
 const MomentsApp: React.FC = () => {
@@ -101,12 +103,15 @@ const MomentsApp: React.FC = () => {
   const [settings, setSettings] = useState<MomentSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
+  const [secretSpaceRefreshing, setSecretSpaceRefreshing] = useState(false);
   const genAbortRef = useRef<AbortController | null>(null);
 
   // ---- 互动状态 ----
   const [activeCommentPostId, setActiveCommentPostId] = useState<string | null>(null);
   const [commentText, setCommentText] = useState('');
   const [replyTarget, setReplyTarget] = useState<{ id: string; name: string } | null>(null);
+  /** 左滑展开删除按钮的那条评论，key: `${postId}:${commentId}`。同一时间只展开一条。 */
+  const [swipedCommentKey, setSwipedCommentKey] = useState<string | null>(null);
   /** 图片加载失败（裂图）的位置集合，key: `${postId}:${index}`。命中时中心显示 🔄 重试图标。 */
   const [brokenImageKeys, setBrokenImageKeys] = useState<Set<string>>(new Set());
   const [menuPostId, setMenuPostId] = useState<string | null>(null);
@@ -159,10 +164,13 @@ const MomentsApp: React.FC = () => {
       if (manual) addToast('请先配置 API', 'info');
       return;
     }
-    if (!canGenerate(settings)) {
+    const isPaused = settings.updateFrequency === 'paused';
+    // 暂停营业下，手动点🔄是"翻出历史动态"，不受正常更新的冷却限制；只挡自动触发和并发点击。
+    if (!isPaused && !canGenerate(settings)) {
       if (manual) addToast('刷新太频繁了，稍后再试', 'info');
       return;
     }
+    if (isPaused && !manual) return; // 暂停营业下，自动触发（打开App/查手机跳转）完全不生成
     if (generating) return;
 
     // 取消上一次未完成的请求
@@ -171,6 +179,29 @@ const MomentsApp: React.FC = () => {
     genAbortRef.current = ac;
 
     setGenerating(true);
+
+    // 暂停营业 + 手动点击：走独立的"历史动态生成"，同时进 TA 常规列表和🌼秘密空间归档。
+    if (isPaused) {
+      try {
+        const post = await generateSecretMemory({
+          char, userProfile, apiConfig, settings,
+          existingPosts: posts,
+          signal: ac.signal,
+        });
+        if (ac.signal.aborted) return;
+        await savePost(post);
+        setPosts(prev => [post, ...prev]);
+        addToast(`翻到了 ${charName} 更早以前的一条动态`, 'success');
+      } catch (e: any) {
+        if (ac.signal.aborted) return;
+        console.error('[Moments] generateSecretMemory failed', e);
+        addToast(`生成失败: ${e.message?.slice(0, 60) || '未知错误'}`, 'error');
+      } finally {
+        if (!ac.signal.aborted) setGenerating(false);
+      }
+      return;
+    }
+
     try {
       const result = await generateMoments({
         char,
@@ -178,6 +209,7 @@ const MomentsApp: React.FC = () => {
         apiConfig,
         settings,
         existingPosts: posts,
+        skipInteractions: false,
         signal: ac.signal,
       });
 
@@ -236,7 +268,33 @@ const MomentsApp: React.FC = () => {
     } finally {
       if (!ac.signal.aborted) setGenerating(false);
     }
-  }, [char, settings, apiConfig, userProfile, posts, generating, addToast]);
+  }, [char, charName, settings, apiConfig, userProfile, posts, generating, addToast]);
+
+  // "换个心情"：只重新生成秘密空间的背景/名字/签名，不动下面的历史动态列表。
+  const handleRefreshSecretSpace = useCallback(async () => {
+    if (!char || !settings || !apiConfig.apiKey || !apiConfig.baseUrl) {
+      addToast('请先配置 API', 'info');
+      return;
+    }
+    if (secretSpaceRefreshing) return;
+    setSecretSpaceRefreshing(true);
+    try {
+      const identity = await generateSecretSpaceIdentity(char, userProfile, apiConfig);
+      const updated: MomentSettings = {
+        ...settings,
+        secretSpaceName: identity.name,
+        secretSpaceSignature: identity.signature,
+        secretSpaceCoverImage: identity.coverImage || settings.secretSpaceCoverImage,
+      };
+      await saveMomentSettings(updated);
+      setSettings(updated);
+      addToast('心情换好了', 'success');
+    } catch (e: any) {
+      addToast(`换心情失败: ${e.message?.slice(0, 60) || '未知错误'}`, 'error');
+    } finally {
+      setSecretSpaceRefreshing(false);
+    }
+  }, [char, settings, apiConfig, userProfile, secretSpaceRefreshing, addToast]);
 
   // 打开 App 时自动触发一次 AI 生成
   const autoGenTriggered = useRef(false);
@@ -406,6 +464,44 @@ const MomentsApp: React.FC = () => {
     addToast('已删除', 'info');
   }, [addToast]);
 
+  /** 左滑露出的垃圾桶点击：删除单条评论（不影响这条动态本身）。 */
+  const handleDeleteComment = useCallback(async (postId: string, commentId: string) => {
+    const post = posts.find(p => p.id === postId);
+    if (!post) return;
+    const updated: MomentPost = {
+      ...post,
+      comments: post.comments.filter(c => c.id !== commentId),
+      updatedAt: Date.now(),
+    };
+    await savePost(updated);
+    setPosts(prev => prev.map(p => p.id === postId ? updated : p));
+    setSwipedCommentKey(null);
+    addToast('评论已删除', 'info');
+  }, [posts, addToast]);
+
+  /** 转发这条动态到聊天框：生成一张卡片消息，内容=动态图文（不含评论），大小随内容走。 */
+  const handleForwardToChat = useCallback(async (post: MomentPost) => {
+    try {
+      const momentData = {
+        charId: post.charId,
+        charName: post.author === 'user' ? (settings?.userNickname || userProfile.name || '我') : charName,
+        charAvatar: post.author === 'user' ? (userProfile.perCharAvatars?.[charId] || userProfile.avatar) : charAvatar,
+        text: post.text || '',
+        images: post.images || [],
+        createdAt: post.createdAt,
+      };
+      await DB.saveMessage({
+        charId,
+        role: 'user',
+        type: 'moment_card' as any,
+        content: JSON.stringify(momentData),
+      });
+      addToast('已转发到聊天框', 'success');
+    } catch (e: any) {
+      addToast(`转发失败: ${e.message?.slice(0, 60) || '未知错误'}`, 'error');
+    }
+  }, [settings, userProfile, charName, charAvatar, charId, addToast]);
+
   const togglePin = useCallback(async (postId: string) => {
     const post = posts.find(p => p.id === postId);
     if (!post) return;
@@ -522,8 +618,19 @@ const MomentsApp: React.FC = () => {
 
   // ==================== 筛选 ====================
 
+  // 秘密空间（🌼）动态：只在秘密空间页面展示，"我的朋友圈"混合线和 TA 朋友圈常规列表都要排除。
+  const visiblePosts = useMemo(() =>
+    posts.filter(p => !p.isSecretMemory),
+    [posts],
+  );
+
   const taPosts = useMemo(() =>
-    posts.filter(p => p.author !== 'user'),
+    visiblePosts.filter(p => p.author !== 'user'),
+    [visiblePosts],
+  );
+
+  const secretMemoryPosts = useMemo(() =>
+    posts.filter(p => p.isSecretMemory).sort((a, b) => a.createdAt - b.createdAt),
     [posts],
   );
 
@@ -790,6 +897,7 @@ const MomentsApp: React.FC = () => {
 
                 {/* 分享 */}
                 <button
+                  onClick={() => handleForwardToChat(post)}
                   className="flex items-center gap-1 text-xs active:scale-90 transition"
                   style={{ color: 'var(--moments-text-secondary, #64748b)' }}
                 >
@@ -844,6 +952,8 @@ const MomentsApp: React.FC = () => {
                 style={{ background: 'rgba(255,255,255,0.04)' }}>
                 {post.comments.map(c => {
                   const isEditingThis = editingField?.postId === post.id && editingField?.commentId === c.id;
+                  const swipeKey = `${post.id}:${c.id}`;
+                  const isSwipedOpen = swipedCommentKey === swipeKey;
                   // ID 实时读取：不用评论创建那一刻存的快照名字，改朋友圈昵称/角色名后旧评论也跟着变。
                   const liveAuthorName = c.author === 'user'
                     ? (settings?.userNickname || userProfile.name || '我')
@@ -855,7 +965,7 @@ const MomentsApp: React.FC = () => {
                         ? (char?.name || c.replyToName)
                         : c.replyToName;
                   return (
-                    <div key={c.id} className="text-xs leading-relaxed">
+                    <div key={c.id} className="text-xs leading-relaxed relative overflow-hidden">
                       {isEditingThis ? (
                         <div>
                           <input
@@ -871,33 +981,75 @@ const MomentsApp: React.FC = () => {
                           </div>
                         </div>
                       ) : (
-                        <div
-                          className="cursor-pointer"
-                          onContextMenu={e => { e.preventDefault(); handleLongPress(post.id, c.id); }}
-                          onTouchStart={() => {
-                            const timer = setTimeout(() => handleLongPress(post.id, c.id), 600);
-                            const clear = () => { clearTimeout(timer); document.removeEventListener('touchend', clear); };
-                            document.addEventListener('touchend', clear, { once: true });
-                          }}
-                          onClick={() => {
-                            setActiveCommentPostId(post.id);
-                            setReplyTarget({ id: c.id, name: liveAuthorName });
-                            setTimeout(() => commentInputRef.current?.focus(), 100);
-                          }}
-                        >
-                          <div>
-                            <span style={{ color: '#93c5fd' }} className="font-medium">{liveAuthorName}</span>
-                            {liveReplyToName && (
-                              <>
-                                <span style={{ color: 'var(--moments-text-secondary, #64748b)' }}> 回复 </span>
-                                <span style={{ color: '#93c5fd' }} className="font-medium">{liveReplyToName}</span>
-                              </>
-                            )}
-                            <span style={{ color: 'var(--moments-text-secondary, #64748b)' }}>：</span>
-                            <span style={{ color: 'var(--moments-text, #cbd5e1)' }}>{c.content}</span>
-                          </div>
-                          <div className="text-[10px] mt-0.5" style={{ color: 'var(--moments-text-secondary, #64748b)' }}>
-                            {formatTime(c.createdAt)}
+                        <div className="relative">
+                          {/* 左滑露出的垃圾桶：常驻在内容层下方，滑开后才可见/可点 */}
+                          <button
+                            onClick={() => handleDeleteComment(post.id, c.id)}
+                            className="absolute right-0 top-0 bottom-0 flex items-center justify-center px-3 bg-red-500/90 rounded-r"
+                            style={{
+                              opacity: isSwipedOpen ? 1 : 0,
+                              pointerEvents: isSwipedOpen ? 'auto' : 'none',
+                              transition: 'opacity 0.15s',
+                            }}
+                          >
+                            <Trash size={14} weight="fill" className="text-white" />
+                          </button>
+                          <div
+                            className="cursor-pointer relative"
+                            style={{
+                              transform: isSwipedOpen ? 'translateX(-52px)' : 'translateX(0)',
+                              transition: 'transform 0.2s ease-out',
+                              background: 'inherit',
+                            }}
+                            onContextMenu={e => { e.preventDefault(); handleLongPress(post.id, c.id); }}
+                            onTouchStart={(e) => {
+                              const startX = e.touches[0].clientX;
+                              const startY = e.touches[0].clientY;
+                              let moved = false;
+                              const longPressTimer = setTimeout(() => { if (!moved) handleLongPress(post.id, c.id); }, 600);
+                              const handleMove = (moveEvent: TouchEvent) => {
+                                const dx = moveEvent.touches[0].clientX - startX;
+                                const dy = moveEvent.touches[0].clientY - startY;
+                                if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
+                                  moved = true;
+                                  clearTimeout(longPressTimer);
+                                }
+                                // 只处理左滑（dx < 0），且横向位移明显大于纵向，避免和纵向滚动打架
+                                if (dx < -16 && Math.abs(dx) > Math.abs(dy)) {
+                                  setSwipedCommentKey(swipeKey);
+                                } else if (dx > 16) {
+                                  setSwipedCommentKey(prev => prev === swipeKey ? null : prev);
+                                }
+                              };
+                              const handleEnd = () => {
+                                clearTimeout(longPressTimer);
+                                document.removeEventListener('touchmove', handleMove);
+                                document.removeEventListener('touchend', handleEnd);
+                              };
+                              document.addEventListener('touchmove', handleMove, { passive: true });
+                              document.addEventListener('touchend', handleEnd, { once: true });
+                            }}
+                            onClick={() => {
+                              if (isSwipedOpen) { setSwipedCommentKey(null); return; }
+                              setActiveCommentPostId(post.id);
+                              setReplyTarget({ id: c.id, name: liveAuthorName });
+                              setTimeout(() => commentInputRef.current?.focus(), 100);
+                            }}
+                          >
+                            <div>
+                              <span style={{ color: '#93c5fd' }} className="font-medium">{liveAuthorName}</span>
+                              {liveReplyToName && (
+                                <>
+                                  <span style={{ color: 'var(--moments-text-secondary, #64748b)' }}> 回复 </span>
+                                  <span style={{ color: '#93c5fd' }} className="font-medium">{liveReplyToName}</span>
+                                </>
+                              )}
+                              <span style={{ color: 'var(--moments-text-secondary, #64748b)' }}>：</span>
+                              <span style={{ color: 'var(--moments-text, #cbd5e1)' }}>{c.content}</span>
+                            </div>
+                            <div className="text-[10px] mt-0.5" style={{ color: 'var(--moments-text-secondary, #64748b)' }}>
+                              {formatTime(c.createdAt)}
+                            </div>
                           </div>
                         </div>
                       )}
@@ -1171,6 +1323,38 @@ const MomentsApp: React.FC = () => {
             </div>
           </div>
 
+          {/* TA 更新朋友圈的频率 */}
+          <div>
+            <label className="text-xs text-white/50 mb-1 block">TA 更新朋友圈的频率</label>
+            <div className="flex flex-wrap items-center gap-2">
+              {([
+                { value: '5min', label: '5mins' },
+                { value: '30min', label: '30mins' },
+                { value: '1h', label: '1h' },
+                { value: '2h', label: '2h' },
+                { value: 'paused', label: '暂停营业' },
+              ] as { value: MomentUpdateFrequency; label: string }[]).map(({ value, label }) => (
+                <button
+                  key={value}
+                  onClick={() => setSettings({ ...settings, updateFrequency: value })}
+                  className="px-3.5 py-2 rounded-lg text-xs transition"
+                  style={{
+                    background: settings.updateFrequency === value ? (value === 'paused' ? '#ef4444' : '#3b82f6') : 'rgba(255,255,255,0.08)',
+                    color: settings.updateFrequency === value ? 'white' : '#94a3b8',
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {settings.updateFrequency === 'paused' && (
+              <div className="text-[11px] text-white/40 mt-1.5 leading-relaxed">
+                暂停营业期间，打开朋友圈 / 从查手机跳转都不会触发 TA 更新动态或回复评论。
+                TA 朋友圈页面的🔄按钮也会禁用；但🌼秘密空间依然可以查看 TA 更早以前的心事。
+              </div>
+            )}
+          </div>
+
           {/* 异步延时互动 */}
           <div className="flex items-center justify-between">
             <div>
@@ -1206,6 +1390,79 @@ const MomentsApp: React.FC = () => {
     );
   };
 
+  // ==================== 渲染：🌼 秘密空间 ====================
+
+  const renderSecretSpace = () => {
+    const name = settings?.secretSpaceName || `${charName}的角落`;
+    const signature = settings?.secretSpaceSignature || '';
+    const coverImage = settings?.secretSpaceCoverImage;
+
+    return (
+      <div className="flex flex-col h-full" style={{ background: '#0f0f1a', color: '#e2e8f0' }}>
+        <div className="flex items-center justify-between px-4 py-2 shrink-0" style={{ background: 'rgba(15,15,26,0.95)' }}>
+          <button onClick={() => setView('taPage')} className="text-white/60 active:scale-90 transition">
+            <CaretLeft size={22} />
+          </button>
+          <div className="text-sm font-medium text-white/80">🌼 秘密空间</div>
+          <button
+            onClick={handleRefreshSecretSpace}
+            disabled={secretSpaceRefreshing}
+            className="text-xs text-white/60 active:scale-90 transition disabled:opacity-40"
+          >
+            {secretSpaceRefreshing ? '生成中…' : '换个心情'}
+          </button>
+        </div>
+
+        <div ref={scrollRef} className="flex-1 overflow-y-auto no-scrollbar overscroll-contain">
+          {/* 封面：背景/名字/签名都由 AI 生成，只有头像继承 TA 本体 */}
+          <div className="relative w-full shrink-0" style={{ marginBottom: signature ? 28 : 16 }}>
+            <div className="relative w-full" style={{ height: COVER_HEIGHT }}>
+              <div
+                className="absolute inset-0 bg-gradient-to-b from-purple-900/60 to-slate-900"
+                style={coverImage ? {
+                  backgroundImage: `url(${coverImage})`,
+                  backgroundSize: 'cover',
+                  backgroundPosition: 'center',
+                } : {}}
+              />
+              <div className="absolute inset-0 bg-gradient-to-t from-black/50 via-transparent to-black/10 pointer-events-none" />
+            </div>
+            <div className="absolute right-4 flex items-end gap-3" style={{ bottom: -30 }}>
+              <div className="text-right self-center pb-1">
+                <div className="text-white font-bold text-[16px] drop-shadow-lg">{name}</div>
+              </div>
+              <div
+                className="shrink-0 overflow-hidden shadow-lg"
+                style={{ width: 60, height: 60, borderRadius: 12, border: '2px solid rgba(255,255,255,0.3)' }}
+              >
+                {charAvatar
+                  ? <TokenImg value={charAvatar} className="w-full h-full object-cover" />
+                  : <div className="w-full h-full bg-slate-600" />
+                }
+              </div>
+            </div>
+            {signature && (
+              <div className="absolute right-5 text-xs text-white/50 drop-shadow" style={{ bottom: -48 }}>
+                {signature}
+              </div>
+            )}
+          </div>
+
+          {/* 历史动态列表：只来自"暂停营业"下🔄生成的秘密动态，按时间正序排列 */}
+          <div className="px-3 pb-6">
+            {secretMemoryPosts.length === 0 ? (
+              <div className="text-center text-white/30 text-xs py-16">
+                还没有翻到 {charName} 更早以前的心事<br />去 TA 的朋友圈点🔄看看吧
+              </div>
+            ) : (
+              secretMemoryPosts.map(renderPost)
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   // ==================== 渲染：主视图 ====================
 
   if (!charId) {
@@ -1218,9 +1475,10 @@ const MomentsApp: React.FC = () => {
 
   if (view === 'compose' && composeType) return renderCompose();
   if (view === 'settings') return renderSettings();
+  if (view === 'secretSpace') return renderSecretSpace();
 
   const isTA = view === 'taPage';
-  const displayPosts = isTA ? taPosts : posts;
+  const displayPosts = isTA ? taPosts : visiblePosts;
 
   return (
     <div className="flex flex-col h-full" style={{ background: '#0f0f1a', color: '#e2e8f0' }}>
@@ -1239,16 +1497,25 @@ const MomentsApp: React.FC = () => {
 
         <div className="flex items-center gap-4">
           {isTA ? (
-            /* TA 页面：刷新按钮 */
-            <button
-              className="text-white/60 active:scale-90 transition"
-              style={generating ? { animation: 'spin 1s linear infinite' } : {}}
-              title="让 TA 更新动态"
-              disabled={generating}
-              onClick={() => handleGenerate(true)}
-            >
-              <ArrowsClockwise size={20} />
-            </button>
+            /* TA 页面：🌼 秘密空间入口 + 刷新（暂停营业下🔄改为触发"历史动态生成"，同时归档进🌼） */
+            <>
+              <button
+                className="text-white/60 active:scale-90 transition"
+                title="秘密空间"
+                onClick={() => setView('secretSpace')}
+              >
+                <span style={{ fontSize: 20, lineHeight: 1 }}>🌼</span>
+              </button>
+              <button
+                className="text-white/60 active:scale-90 transition"
+                style={generating ? { animation: 'spin 1s linear infinite' } : {}}
+                title={settings?.updateFrequency === 'paused' ? '翻出 TA 更早以前的心事' : '让 TA 更新动态'}
+                disabled={generating}
+                onClick={() => handleGenerate(true)}
+              >
+                <ArrowsClockwise size={20} />
+              </button>
+            </>
           ) : (
             /* 我的页面：发布 + 设置 */
             <>
