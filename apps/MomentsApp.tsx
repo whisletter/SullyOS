@@ -55,6 +55,8 @@ import {
   createCommentId,
 } from '../utils/momentsDb';
 import { generateMoments, canGenerate } from '../utils/momentsAi';
+import { generateImage, isImageGenApiReady } from '../utils/imageGenApi';
+import { migrateDataUrlToRef } from '../utils/blobRef';
 
 // ==================== 样式常量 ====================
 
@@ -105,7 +107,12 @@ const MomentsApp: React.FC = () => {
   const [activeCommentPostId, setActiveCommentPostId] = useState<string | null>(null);
   const [commentText, setCommentText] = useState('');
   const [replyTarget, setReplyTarget] = useState<{ id: string; name: string } | null>(null);
+  /** 图片加载失败（裂图）的位置集合，key: `${postId}:${index}`。命中时中心显示 🔄 重试图标。 */
+  const [brokenImageKeys, setBrokenImageKeys] = useState<Set<string>>(new Set());
   const [menuPostId, setMenuPostId] = useState<string | null>(null);
+  /** 图裂了点 🔄 重新生成时，标记「哪条动态的第几张图」正在重试，避免重复点击。key: `${postId}:${index}` */
+  const [retryingImageKeys, setRetryingImageKeys] = useState<Set<string>>(new Set());
+
 
   // ---- 发布状态 ----
   const [composeText, setComposeText] = useState('');
@@ -408,6 +415,47 @@ const MomentsApp: React.FC = () => {
     addToast(updated.pinned ? '已置顶' : '已取消置顶', 'info');
   }, [posts, addToast]);
 
+  /**
+   * 图裂了点中心的 🔄：用这条动态原本的 imagePrompt 重新调一次生图 API（不重新问 AI
+   * 要不要配图、配什么，避免多打一次聊天补全 API），成功就替换对应位置的图片。
+   */
+  const handleRetryImage = useCallback(async (postId: string, imageIndex: number) => {
+    const key = `${postId}:${imageIndex}`;
+    if (retryingImageKeys.has(key)) return;
+    const post = posts.find(p => p.id === postId);
+    if (!post?.imagePrompt) {
+      addToast('这条动态没有可用于重新生成的描述', 'error');
+      return;
+    }
+    if (!isImageGenApiReady(apiConfig.imageGenApi)) {
+      addToast('生图 API 未配置或未启用，去设置里检查一下', 'error');
+      return;
+    }
+    setRetryingImageKeys(prev => new Set(prev).add(key));
+    try {
+      const results = await generateImage(apiConfig.imageGenApi, post.imagePrompt, {
+        meta: { appId: 'moments', appName: '朋友圈', purpose: '朋友圈配图重新生成', charId, charName },
+      });
+      const first = results[0];
+      if (!first?.src) throw new Error('生图 API 没有返回图片');
+      const storedContent = first.src.startsWith('data:') ? await migrateDataUrlToRef(first.src) : first.src;
+      const nextImages = [...(post.images || [])];
+      nextImages[imageIndex] = storedContent;
+      const updated: MomentPost = { ...post, images: nextImages, updatedAt: Date.now() };
+      await savePost(updated);
+      setPosts(prev => prev.map(p => p.id === postId ? updated : p));
+      addToast('已重新生成', 'success');
+    } catch (e: any) {
+      addToast(`重新生成失败: ${e?.message?.slice(0, 60) || '未知错误'}`, 'error');
+    } finally {
+      setRetryingImageKeys(prev => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    }
+  }, [posts, apiConfig.imageGenApi, charId, charName, addToast, retryingImageKeys]);
+
   // ==================== 长按编辑 ====================
 
   const handleLongPress = useCallback((postId: string, commentId?: string) => {
@@ -583,16 +631,41 @@ const MomentsApp: React.FC = () => {
 
   // ==================== 渲染：图片网格 ====================
 
-  const renderImageGrid = (images: string[]) => {
+  const renderImageGrid = (images: string[], postId: string) => {
     const count = images.length;
     const cols = count === 1 ? 1 : count <= 4 ? 2 : 3;
     return (
       <div className={`grid gap-1 mt-2`} style={{ gridTemplateColumns: `repeat(${cols}, 1fr)` }}>
-        {images.map((img, i) => (
-          <div key={i} className="aspect-square rounded-lg overflow-hidden bg-slate-800">
-            <img src={img} alt="" className="w-full h-full object-cover" />
-          </div>
-        ))}
+        {images.map((img, i) => {
+          const key = `${postId}:${i}`;
+          const broken = brokenImageKeys.has(key);
+          const retrying = retryingImageKeys.has(key);
+          return (
+            <div key={i} className="relative aspect-square rounded-lg overflow-hidden bg-slate-800">
+              <TokenImg
+                value={img}
+                className="w-full h-full object-cover"
+                style={broken ? { visibility: 'hidden' } : undefined}
+                onError={() => setBrokenImageKeys(prev => new Set(prev).add(key))}
+                onLoad={() => setBrokenImageKeys(prev => {
+                  if (!prev.has(key)) return prev;
+                  const next = new Set(prev);
+                  next.delete(key);
+                  return next;
+                })}
+              />
+              {broken && (
+                <button
+                  onClick={() => handleRetryImage(postId, i)}
+                  disabled={retrying}
+                  className="absolute inset-0 flex items-center justify-center bg-black/40 active:scale-90 transition disabled:opacity-60"
+                >
+                  <ArrowsClockwise size={24} className="text-white" style={retrying ? { animation: 'spin 1s linear infinite' } : undefined} />
+                </button>
+              )}
+            </div>
+          );
+        })}
       </div>
     );
   };
@@ -669,7 +742,7 @@ const MomentsApp: React.FC = () => {
             )}
 
             {/* 图片 */}
-            {post.images && post.images.length > 0 && renderImageGrid(post.images)}
+            {post.images && post.images.length > 0 && renderImageGrid(post.images, post.id)}
 
             {/* 音乐卡片 */}
             {post.music && renderMusicCard(post.music)}
