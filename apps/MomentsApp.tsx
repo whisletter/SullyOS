@@ -8,6 +8,7 @@
  *   settings — 朋友圈设置（发布频率、异步互动等）
  */
 
+
 import React, {
   useState,
   useEffect,
@@ -64,7 +65,10 @@ import { migrateDataUrlToRef } from '../utils/blobRef';
 
 // ==================== 样式常量 ====================
 
-const COVER_HEIGHT = 280;
+const COVER_HEIGHT = 240;
+const AVATAR_BOTTOM = -20;
+const NAME_BOTTOM = 30;
+const SIGNATURE_BOTTOM = -35;
 const AVATAR_SIZE = 64;
 
 // ==================== 主组件 ====================
@@ -555,6 +559,8 @@ const MomentsApp: React.FC = () => {
         charAvatar: post.author === 'user' ? (userProfile.perCharAvatars?.[charId] || userProfile.avatar) : charAvatar,
         text: post.text || '',
         images: post.images || [],
+        music: post.music || undefined,
+        article: post.article || undefined,
         createdAt: post.createdAt,
       };
       await DB.saveMessage({
@@ -736,11 +742,8 @@ const MomentsApp: React.FC = () => {
           <div className="absolute inset-0 bg-gradient-to-t from-black/50 via-transparent to-black/10 pointer-events-none" />
         </div>
 
-        {/* 头像 + 名字：头像底部与背景图底部齐平、向下探出一半 */}
-        <div className="absolute right-4 flex items-end gap-3" style={{ bottom: -30 }}>
-          <div className="text-right self-center pb-1">
-            <div className="text-white font-bold text-[16px] drop-shadow-lg">{name}</div>
-          </div>
+        {/* 头像：底部相对背景图探出（露出比例由 AVATAR_BOTTOM 控制） */}
+        <div className="absolute right-4" style={{ bottom: AVATAR_BOTTOM }}>
           <div
             className="shrink-0 overflow-hidden shadow-lg"
             style={{
@@ -757,11 +760,16 @@ const MomentsApp: React.FC = () => {
           </div>
         </div>
 
-        {/* 个性签名：在头像下方 */}
+        {/* ID：头像左上角附近 */}
+        <div className="absolute right-4 text-right" style={{ bottom: NAME_BOTTOM }}>
+          <div className="text-white font-bold text-[16px] drop-shadow-lg">{name}</div>
+        </div>
+
+        {/* 个性签名：跟随头像位置 */}
         {signature && (
           <div
             className="absolute right-5 text-xs text-white/50 drop-shadow"
-            style={{ bottom: -48 }}
+            style={{ bottom: SIGNATURE_BOTTOM }}
           >
             {signature}
           </div>
@@ -1510,10 +1518,7 @@ const MomentsApp: React.FC = () => {
               />
               <div className="absolute inset-0 bg-gradient-to-t from-black/50 via-transparent to-black/10 pointer-events-none" />
             </div>
-            <div className="absolute right-4 flex items-end gap-3" style={{ bottom: -30 }}>
-              <div className="text-right self-center pb-1">
-                <div className="text-white font-bold text-[16px] drop-shadow-lg">{name}</div>
-              </div>
+            <div className="absolute right-4" style={{ bottom: AVATAR_BOTTOM }}>
               <div
                 className="shrink-0 overflow-hidden shadow-lg"
                 style={{ width: 60, height: 60, borderRadius: 12, border: '2px solid rgba(255,255,255,0.3)' }}
@@ -1524,8 +1529,11 @@ const MomentsApp: React.FC = () => {
                 }
               </div>
             </div>
+            <div className="absolute right-4 text-right" style={{ bottom: NAME_BOTTOM }}>
+              <div className="text-white font-bold text-[16px] drop-shadow-lg">{name}</div>
+            </div>
             {signature && (
-              <div className="absolute right-5 text-xs text-white/50 drop-shadow" style={{ bottom: -48 }}>
+              <div className="absolute right-5 text-xs text-white/50 drop-shadow" style={{ bottom: SIGNATURE_BOTTOM }}>
                 {signature}
               </div>
             )}
