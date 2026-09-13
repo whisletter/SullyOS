@@ -58,6 +58,8 @@ import {
 } from '../utils/momentsDb';
 import { generateMoments, canGenerate, generateSecretMemory, generateSecretSpaceIdentity } from '../utils/momentsAi';
 import { DB } from '../utils/db';
+import { useMusic, musicApi, toHttps } from '../context/MusicContext';
+import { expandShortUrl } from '../utils/webpageExtractor';
 import { generateImage, isImageGenApiReady } from '../utils/imageGenApi';
 import { migrateDataUrlToRef } from '../utils/blobRef';
 
@@ -81,6 +83,7 @@ const MomentsApp: React.FC = () => {
     closeApp,
     theme: osTheme,
   } = useOS();
+  const { cfg: musicCfg } = useMusic();
 
   const char = characters.find(c => c.id === activeCharacterId) || null;
   const charId = activeCharacterId || '';
@@ -126,6 +129,10 @@ const MomentsApp: React.FC = () => {
   const [composeMusicName, setComposeMusicName] = useState('');
   const [composeMusicArtist, setComposeMusicArtist] = useState('');
   const [composeMusicCover, setComposeMusicCover] = useState('');
+  const [composeMusicSongId, setComposeMusicSongId] = useState<number | null>(null);
+  const [composeMusicLinkInput, setComposeMusicLinkInput] = useState('');
+  const [musicParsing, setMusicParsing] = useState(false);
+  const [musicParseError, setMusicParseError] = useState('');
   const [composeArticleTitle, setComposeArticleTitle] = useState('');
   const [composeArticleUrl, setComposeArticleUrl] = useState('');
   const [composeArticleBody, setComposeArticleBody] = useState('');
@@ -351,6 +358,9 @@ const MomentsApp: React.FC = () => {
     setComposeMusicName('');
     setComposeMusicArtist('');
     setComposeMusicCover('');
+    setComposeMusicSongId(null);
+    setComposeMusicLinkInput('');
+    setMusicParseError('');
     setComposeArticleTitle('');
     setComposeArticleUrl('');
     setComposeArticleBody('');
@@ -381,6 +391,63 @@ const MomentsApp: React.FC = () => {
     };
     input.click();
   }, []);
+
+  // ==================== 分享音乐：粘贴网易云链接自动识别 ====================
+
+  /** 从网易云链接（长链接或 163cn.tv 短链展开后）里提取 songId。 */
+  const extractNeteaseSongId = (url: string): number | null => {
+    const match = /[?&#]id=(\d+)/.exec(url) || /\/song\/(\d+)/.exec(url);
+    return match ? Number(match[1]) : null;
+  };
+
+  /**
+   * 粘贴框里的文本一旦看起来像网易云链接就自动识别：短链先展开，提取 songId 后
+   * 调用网易云代理的 song/detail（和网易云音乐 App 走同一个 worker + cfg），
+   * 拿真实歌名/歌手/封面，而不是把链接本身当封面 URL 硬塞进 <img>。
+   */
+  const handleMusicCoverInputChange = useCallback(async (rawInput: string) => {
+    setMusicParseError('');
+    const trimmed = rawInput.trim();
+    if (!trimmed) { setComposeMusicSongId(null); return; }
+
+    // 不像链接（不含 http 也不含常见网易云域名关键字）就当成普通 URL 输入，不触发识别。
+    const looksLikeLink = /^https?:\/\//i.test(trimmed) || /music\.163\.com|163cn\.tv/i.test(trimmed);
+    if (!looksLikeLink) { setComposeMusicSongId(null); return; }
+
+    setMusicParsing(true);
+    try {
+      let resolvedUrl = trimmed;
+      // 163cn.tv 等短链不含 songId，需要先跟随重定向展开成真实长链接。
+      if (/163cn\.tv/i.test(trimmed) && !/music\.163\.com/i.test(trimmed)) {
+        resolvedUrl = await expandShortUrl(trimmed);
+      }
+      const songId = extractNeteaseSongId(resolvedUrl);
+      if (!songId) {
+        setMusicParseError('没能从链接里识别出歌曲，换个链接试试，或者手动填歌名/歌手');
+        setComposeMusicSongId(null);
+        return;
+      }
+      const detail = await musicApi.call(musicCfg, 'song/detail', { ids: [songId] });
+      const song = detail?.songs?.[0];
+      if (!song) {
+        setMusicParseError('没查到这首歌的信息，可能已下架，换一首或手动填写');
+        setComposeMusicSongId(null);
+        return;
+      }
+      const name = song.name || '';
+      const artists = (song.ar || song.artists || []).map((a: any) => a.name).filter(Boolean).join(' / ');
+      const cover = toHttps(song.al?.picUrl || song.album?.picUrl || '');
+      setComposeMusicName(name);
+      setComposeMusicArtist(artists || '未知歌手');
+      setComposeMusicCover(cover);
+      setComposeMusicSongId(songId);
+    } catch (e: any) {
+      setMusicParseError(`识别失败: ${e?.message?.slice(0, 60) || '未知错误'}`);
+      setComposeMusicSongId(null);
+    } finally {
+      setMusicParsing(false);
+    }
+  }, [musicCfg]);
 
   // ==================== 封面上传 ====================
 
@@ -1158,7 +1225,16 @@ const MomentsApp: React.FC = () => {
       <div className="flex flex-col h-full" style={{ background: '#0f0f1a', color: '#e2e8f0' }}>
         {/* 顶栏 */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-white/10 shrink-0">
-          <button onClick={() => { setView('main'); setComposeType(null); }} className="text-white/60 active:scale-90">
+          <button onClick={() => {
+            setView('main');
+            setComposeType(null);
+            setComposeMusicName('');
+            setComposeMusicArtist('');
+            setComposeMusicCover('');
+            setComposeMusicSongId(null);
+            setComposeMusicLinkInput('');
+            setMusicParseError('');
+          }} className="text-white/60 active:scale-90">
             <X size={22} />
           </button>
           <div className="text-sm font-medium text-white/80">
@@ -1216,23 +1292,30 @@ const MomentsApp: React.FC = () => {
           {/* 音乐输入 */}
           {composeType === 'music' && (
             <div className="space-y-3">
+              <div>
+                <input
+                  value={composeMusicLinkInput}
+                  onChange={e => { setComposeMusicLinkInput(e.target.value); handleMusicCoverInputChange(e.target.value); }}
+                  placeholder="粘贴网易云歌曲链接（长链接或分享短链），自动识别歌名/歌手/封面"
+                  className="w-full px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10 placeholder:text-white/30"
+                  autoFocus
+                />
+                {musicParsing && <div className="text-[11px] text-white/40 mt-1">识别中…</div>}
+                {!musicParsing && musicParseError && <div className="text-[11px] text-rose-400 mt-1">{musicParseError}</div>}
+                {!musicParsing && !musicParseError && composeMusicSongId && (
+                  <div className="text-[11px] text-emerald-400 mt-1">已识别 ✓ 也可以在下面手动微调</div>
+                )}
+              </div>
               <input
                 value={composeMusicName}
-                onChange={e => setComposeMusicName(e.target.value)}
-                placeholder="歌名"
+                onChange={e => { setComposeMusicName(e.target.value); setComposeMusicSongId(null); }}
+                placeholder="歌名（识别后自动填入，也可手动输入）"
                 className="w-full px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10 placeholder:text-white/30"
-                autoFocus
               />
               <input
                 value={composeMusicArtist}
-                onChange={e => setComposeMusicArtist(e.target.value)}
+                onChange={e => { setComposeMusicArtist(e.target.value); setComposeMusicSongId(null); }}
                 placeholder="歌手"
-                className="w-full px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10 placeholder:text-white/30"
-              />
-              <input
-                value={composeMusicCover}
-                onChange={e => setComposeMusicCover(e.target.value)}
-                placeholder="封面图 URL（粘贴网易云歌曲链接可自动识别）"
                 className="w-full px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10 placeholder:text-white/30"
               />
               {composeMusicCover && (
