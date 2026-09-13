@@ -67,7 +67,6 @@ import { migrateDataUrlToRef } from '../utils/blobRef';
 
 const COVER_HEIGHT = 240;
 const AVATAR_BOTTOM = -20;
-const NAME_BOTTOM = 30;
 const SIGNATURE_BOTTOM = -35;
 const AVATAR_SIZE = 64;
 
@@ -111,6 +110,9 @@ const MomentsApp: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [secretSpaceRefreshing, setSecretSpaceRefreshing] = useState(false);
+  const [secretSpaceEditing, setSecretSpaceEditing] = useState(false);
+  const [secretSpaceNameDraft, setSecretSpaceNameDraft] = useState('');
+  const [secretSpaceSignatureDraft, setSecretSpaceSignatureDraft] = useState('');
   const genAbortRef = useRef<AbortController | null>(null);
 
   // ---- 互动状态 ----
@@ -269,7 +271,7 @@ const MomentsApp: React.FC = () => {
         const parts: string[] = [];
         if (result.newPosts.length > 0) parts.push(`发了 ${result.newPosts.length} 条动态`);
         if (result.updatedUserPosts.length > 0) parts.push('互动了你的朋友圈');
-        if (result.updatedTaPosts.length > 0) parts.push('回复了评论');
+        if (result.updatedTaPosts.length > 0) parts.push('更新了动态');
         addToast(`${char.name} ${parts.join('，')}`, 'success');
       }
     } catch (e: any) {
@@ -454,7 +456,7 @@ const MomentsApp: React.FC = () => {
 
   // ==================== 封面上传 ====================
 
-  const handleCoverUpload = useCallback((target: 'user' | 'ta') => {
+  const handleCoverUpload = useCallback((target: 'user' | 'ta' | 'secret') => {
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = 'image/*';
@@ -468,7 +470,9 @@ const MomentsApp: React.FC = () => {
       });
       const updated = {
         ...settings,
-        ...(target === 'user' ? { userCoverImage: dataUrl } : { taCoverImage: dataUrl }),
+        ...(target === 'user' ? { userCoverImage: dataUrl }
+          : target === 'ta' ? { taCoverImage: dataUrl }
+          : { secretSpaceCoverImage: dataUrl }),
       };
       await saveMomentSettings(updated);
       setSettings(updated);
@@ -742,8 +746,11 @@ const MomentsApp: React.FC = () => {
           <div className="absolute inset-0 bg-gradient-to-t from-black/50 via-transparent to-black/10 pointer-events-none" />
         </div>
 
-        {/* 头像：底部相对背景图探出（露出比例由 AVATAR_BOTTOM 控制） */}
-        <div className="absolute right-4" style={{ bottom: AVATAR_BOTTOM }}>
+        {/* 头像 + ID：ID 在头像左边，底部对齐；头像底部相对背景图探出（露出比例由 AVATAR_BOTTOM 控制） */}
+        <div className="absolute right-4 flex items-end gap-3" style={{ bottom: AVATAR_BOTTOM }}>
+          <div className="text-right self-center pb-1">
+            <div className="text-white font-bold text-[16px] drop-shadow-lg">{name}</div>
+          </div>
           <div
             className="shrink-0 overflow-hidden shadow-lg"
             style={{
@@ -760,12 +767,7 @@ const MomentsApp: React.FC = () => {
           </div>
         </div>
 
-        {/* ID：头像左上角附近 */}
-        <div className="absolute right-4 text-right" style={{ bottom: NAME_BOTTOM }}>
-          <div className="text-white font-bold text-[16px] drop-shadow-lg">{name}</div>
-        </div>
-
-        {/* 个性签名：跟随头像位置 */}
+        {/* 个性签名：在头像下方 */}
         {signature && (
           <div
             className="absolute right-5 text-xs text-white/50 drop-shadow"
@@ -1385,13 +1387,28 @@ const MomentsApp: React.FC = () => {
 
           {/* 签名 */}
           <div>
-            <label className="text-xs text-white/50 mb-1 block">我的个性签名</label>
+            <label className="text-xs text-white/50 mb-1 block">我的个性签名（最多 30 字）</label>
             <input
               value={settings.userSignature || ''}
-              onChange={e => setSettings({ ...settings, userSignature: e.target.value })}
+              onChange={e => setSettings({ ...settings, userSignature: e.target.value.slice(0, 30) })}
               placeholder="写点什么..."
+              maxLength={30}
               className="w-full px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10"
             />
+            <div className="text-[10px] text-white/30 text-right mt-0.5">{(settings.userSignature || '').length}/30</div>
+          </div>
+
+          {/* TA 的个性签名 */}
+          <div>
+            <label className="text-xs text-white/50 mb-1 block">TA 的个性签名（最多 30 字）</label>
+            <input
+              value={settings.taSignature || ''}
+              onChange={e => setSettings({ ...settings, taSignature: e.target.value.slice(0, 30) })}
+              placeholder="写点什么..."
+              maxLength={30}
+              className="w-full px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10"
+            />
+            <div className="text-[10px] text-white/30 text-right mt-0.5">{(settings.taSignature || '').length}/30</div>
           </div>
 
           {/* TA 发布频率 */}
@@ -1484,30 +1501,85 @@ const MomentsApp: React.FC = () => {
   // ==================== 渲染：🌼 秘密空间 ====================
 
   const renderSecretSpace = () => {
-    const name = settings?.secretSpaceName || `${charName}的角落`;
+    const name = settings?.secretSpaceName || '对花说的事';
     const signature = settings?.secretSpaceSignature || '';
     const coverImage = settings?.secretSpaceCoverImage;
 
+    const handleStartEditSecretSpace = () => {
+      setSecretSpaceNameDraft(settings?.secretSpaceName || '');
+      setSecretSpaceSignatureDraft(settings?.secretSpaceSignature || '');
+      setSecretSpaceEditing(true);
+    };
+
+    const handleSaveSecretSpaceEdit = async () => {
+      if (!settings) return;
+      const updated = {
+        ...settings,
+        secretSpaceName: secretSpaceNameDraft.trim(),
+        secretSpaceSignature: secretSpaceSignatureDraft.trim().slice(0, 30),
+      };
+      await saveMomentSettings(updated);
+      setSettings(updated);
+      setSecretSpaceEditing(false);
+      addToast('已保存', 'success');
+    };
+
     return (
       <div className="flex flex-col h-full" style={{ background: '#0f0f1a', color: '#e2e8f0' }}>
-        <div className="flex items-center justify-between px-4 py-2 shrink-0" style={{ background: 'rgba(15,15,26,0.95)' }}>
+        <div className="relative flex items-center justify-between px-4 py-2 shrink-0" style={{ background: 'rgba(15,15,26,0.95)' }}>
           <button onClick={() => setView('taPage')} className="text-white/60 active:scale-90 transition">
             <CaretLeft size={22} />
           </button>
-          <div className="text-sm font-medium text-white/80">🌼 秘密空间</div>
-          <button
-            onClick={handleRefreshSecretSpace}
-            disabled={secretSpaceRefreshing}
-            className="text-xs text-white/60 active:scale-90 transition disabled:opacity-40"
-          >
-            {secretSpaceRefreshing ? '生成中…' : '换个心情'}
-          </button>
+          <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-sm font-medium text-white/80 whitespace-nowrap">🌼 对花说的事</div>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleStartEditSecretSpace}
+              className="text-xs text-white/60 active:scale-90 transition"
+            >
+              编辑
+            </button>
+            <button
+              onClick={handleRefreshSecretSpace}
+              disabled={secretSpaceRefreshing}
+              className="text-xs text-white/60 active:scale-90 transition disabled:opacity-40"
+            >
+              {secretSpaceRefreshing ? '生成中…' : '换个心情'}
+            </button>
+          </div>
         </div>
 
+        {/* 内联编辑面板：名字 + 签名，手动改（换心情会整体覆盖，不锁字段） */}
+        {secretSpaceEditing && (
+          <div className="px-4 py-3 space-y-2 border-b border-white/10 shrink-0" style={{ background: 'rgba(255,255,255,0.03)' }}>
+            <input
+              value={secretSpaceNameDraft}
+              onChange={e => setSecretSpaceNameDraft(e.target.value)}
+              placeholder="这个空间里的称呼"
+              className="w-full px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10 placeholder:text-white/30"
+            />
+            <input
+              value={secretSpaceSignatureDraft}
+              onChange={e => setSecretSpaceSignatureDraft(e.target.value.slice(0, 30))}
+              placeholder="一句签名（最多 30 字）"
+              maxLength={30}
+              className="w-full px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10 placeholder:text-white/30"
+            />
+            <div className="text-[10px] text-white/30 text-right">{secretSpaceSignatureDraft.length}/30</div>
+            <div className="flex gap-2">
+              <button onClick={handleSaveSecretSpaceEdit} className="flex-1 py-2 rounded-lg text-sm font-medium bg-blue-500 text-white active:scale-95 transition">保存</button>
+              <button onClick={() => setSecretSpaceEditing(false)} className="flex-1 py-2 rounded-lg text-sm bg-white/10 text-white/60 active:scale-95 transition">取消</button>
+            </div>
+          </div>
+        )}
+
         <div ref={scrollRef} className="flex-1 overflow-y-auto no-scrollbar overscroll-contain">
-          {/* 封面：背景/名字/签名都由 AI 生成，只有头像继承 TA 本体 */}
+          {/* 封面：背景可点击上传；名字/签名点上面"编辑"手动改，或"换个心情"整体重新生成 */}
           <div className="relative w-full shrink-0" style={{ marginBottom: signature ? 28 : 16 }}>
-            <div className="relative w-full" style={{ height: COVER_HEIGHT }}>
+            <div
+              className="relative w-full cursor-pointer"
+              style={{ height: COVER_HEIGHT }}
+              onClick={() => handleCoverUpload('secret')}
+            >
               <div
                 className="absolute inset-0 bg-gradient-to-b from-purple-900/60 to-slate-900"
                 style={coverImage ? {
@@ -1518,7 +1590,10 @@ const MomentsApp: React.FC = () => {
               />
               <div className="absolute inset-0 bg-gradient-to-t from-black/50 via-transparent to-black/10 pointer-events-none" />
             </div>
-            <div className="absolute right-4" style={{ bottom: AVATAR_BOTTOM }}>
+            <div className="absolute right-4 flex items-end gap-3" style={{ bottom: AVATAR_BOTTOM }}>
+              <div className="text-right self-center pb-1">
+                <div className="text-white font-bold text-[16px] drop-shadow-lg">{name}</div>
+              </div>
               <div
                 className="shrink-0 overflow-hidden shadow-lg"
                 style={{ width: 60, height: 60, borderRadius: 12, border: '2px solid rgba(255,255,255,0.3)' }}
@@ -1528,9 +1603,6 @@ const MomentsApp: React.FC = () => {
                   : <div className="w-full h-full bg-slate-600" />
                 }
               </div>
-            </div>
-            <div className="absolute right-4 text-right" style={{ bottom: NAME_BOTTOM }}>
-              <div className="text-white font-bold text-[16px] drop-shadow-lg">{name}</div>
             </div>
             {signature && (
               <div className="absolute right-5 text-xs text-white/50 drop-shadow" style={{ bottom: SIGNATURE_BOTTOM }}>
@@ -1574,7 +1646,7 @@ const MomentsApp: React.FC = () => {
   return (
     <div className="flex flex-col h-full" style={{ background: '#0f0f1a', color: '#e2e8f0' }}>
       {/* 顶栏 */}
-      <div className="flex items-center justify-between px-4 py-2 shrink-0" style={{ background: 'rgba(15,15,26,0.95)' }}>
+      <div className="relative flex items-center justify-between px-4 py-2 shrink-0" style={{ background: 'rgba(15,15,26,0.95)' }}>
         <button
           onClick={() => { if (isTA) setView('main'); else closeApp(); }}
           className="text-white/60 active:scale-90 transition"
@@ -1582,7 +1654,7 @@ const MomentsApp: React.FC = () => {
           <CaretLeft size={22} />
         </button>
 
-        <div className="text-sm font-medium text-white/80">
+        <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-sm font-medium text-white/80 whitespace-nowrap">
           {isTA ? `${charName} 的朋友圈` : '朋友圈'}
         </div>
 
