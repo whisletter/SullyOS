@@ -510,6 +510,7 @@ const Settings: React.FC = () => {
   const [localImageGenUrl, setLocalImageGenUrl] = useState(apiConfig.imageGenApi?.baseUrl || '');
   const [localImageGenKey, setLocalImageGenKey] = useState(apiConfig.imageGenApi?.apiKey || '');
   const [localImageGenModel, setLocalImageGenModel] = useState(apiConfig.imageGenApi?.model || '');
+  const [localImageGenStylePreset, setLocalImageGenStylePreset] = useState(apiConfig.imageGenApi?.stylePreset || '');
   const [imageGenStatusMsg, setImageGenStatusMsg] = useState('');
   const [testingImageGenApi, setTestingImageGenApi] = useState(false);
   const [imageGenTestResult, setImageGenTestResult] = useState<string | null>(null);
@@ -951,11 +952,13 @@ const Settings: React.FC = () => {
       setLocalImageGenUrl(apiConfig.imageGenApi?.baseUrl || '');
       setLocalImageGenKey(apiConfig.imageGenApi?.apiKey || '');
       setLocalImageGenModel(apiConfig.imageGenApi?.model || '');
+      setLocalImageGenStylePreset(apiConfig.imageGenApi?.stylePreset || '');
   }, [
       apiConfig.imageGenApi?.format,
       apiConfig.imageGenApi?.baseUrl || '',
       apiConfig.imageGenApi?.apiKey || '',
       apiConfig.imageGenApi?.model || '',
+      apiConfig.imageGenApi?.stylePreset || '',
   ]);
 
   useEffect(() => {
@@ -1196,6 +1199,18 @@ const Settings: React.FC = () => {
     addToast(`已把「${preset.name}」填入识图 API；保存后生效`, 'info');
   };
 
+  /** 从通用模型预设一键填入生图 API 配置。 */
+  const loadImageGenApiPreset = (preset: typeof apiPresets[0]) => {
+    setLocalImageGenEnabled(true);
+    setLocalImageGenUrl(preset.baseUrl || '');
+    setLocalImageGenKey(preset.apiKey || '');
+    setLocalImageGenModel(preset.model || '');
+    setImageGenTestResult(null);
+    setImageGenStatusMsg(`已载入预设：${preset.name}`);
+    setTimeout(() => setImageGenStatusMsg(''), 2200);
+    addToast(`已把「${preset.name}」填入生图 API；保存后生效`, 'info');
+  };
+
   const fetchVisionModels = async () => {
     const baseUrl = normalizeApiBaseUrl(localVisionUrl);
     const apiKey = normalizeApiCredential(localVisionKey);
@@ -1264,6 +1279,7 @@ const Settings: React.FC = () => {
       baseUrl: normalizeApiBaseUrl(localImageGenUrl),
       apiKey: normalizeApiCredential(localImageGenKey),
       model: normalizeApiModel(localImageGenModel),
+      stylePreset: localImageGenStylePreset.trim() || undefined,
     };
     if (nextImageGenApi.enabled && (!nextImageGenApi.apiKey || !nextImageGenApi.model)) {
       addToast('开启生图 API 前，请填写完整的 Key 和 Model', 'error');
@@ -2878,6 +2894,38 @@ const Settings: React.FC = () => {
                             className="w-full bg-white/60 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all disabled:cursor-not-allowed"
                         />
                     </div>
+                </div>
+
+                {/* 从模型预设载入 */}
+                {apiPresets.length > 0 && (
+                    <div className="space-y-1.5 pt-1">
+                        <label className="text-[10px] font-bold text-pink-500 uppercase tracking-widest">从模型预设载入</label>
+                        <div className="flex flex-wrap gap-1.5">
+                            {apiPresets.map(preset => (
+                                <button
+                                    key={preset.id}
+                                    type="button"
+                                    onClick={() => loadImageGenApiPreset(preset)}
+                                    className="px-3 py-1.5 rounded-full text-[11px] font-medium bg-pink-50 text-pink-600 border border-pink-100 active:scale-95 transition-all"
+                                >
+                                    {preset.name}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
+                {/* 风格预设 */}
+                <div className="space-y-1.5 pt-1">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">风格预设（每次生图自动附加）</label>
+                    <textarea
+                        value={localImageGenStylePreset}
+                        onChange={e => setLocalImageGenStylePreset(e.target.value)}
+                        disabled={!localImageGenEnabled}
+                        placeholder="填入画风 / 锁脸 / 色调等提示词，每次生图都会自动拼在内容描述后面。例如：吉卜力水彩风，暖色调柔光，人物五官参考：圆眼、高鼻梁、薄唇..."
+                        className="w-full bg-white/60 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm leading-relaxed focus:bg-white transition-all disabled:cursor-not-allowed resize-none min-h-[80px]"
+                    />
+                    <p className="text-[9px] text-slate-300 px-1">聊天 / 朋友圈 / 测试生图时都会自动带上这段提示词。支持锁脸描述、画风指定等。</p>
                 </div>
 
                 <div className="grid grid-cols-2 gap-2">
