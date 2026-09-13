@@ -59,6 +59,22 @@ export async function generateImage(
   return openaiImageGen(config, finalPrompt, { size, n, meta });
 }
 
+/** model 名带 'agnes' → Agnes 系列，走 generations + extra_body.image（而非标准 edits 端点）。 */
+const isAgnesModel = (model: string): boolean => /agnes/i.test(model);
+
+/** 参考图最多 5 张（edits 端点本身支持到 16 张，这里按产品需要收紧上限）。 */
+export const MAX_REFERENCE_IMAGES = 5;
+
+/** data URL 转 { blob, filename }，供 multipart/form-data 上传（/v1/images/edits）用。 */
+async function dataUrlToBlob(dataUrl: string): Promise<{ blob: Blob; filename: string }> {
+  const match = /^data:([^;]+);base64,/.exec(dataUrl);
+  const mimeType = match?.[1] || 'image/png';
+  const res = await fetch(dataUrl);
+  const blob = await res.blob();
+  const ext = mimeType.split('/')[1]?.split('+')[0] || 'png';
+  return { blob: new Blob([blob], { type: mimeType }), filename: `reference.${ext}` };
+}
+
 // ─── OpenAI 兼容格式 ─────────────────────────────────────────────────────────
 // 覆盖：gpt-image-2 / Grok(xAI) / GLM CogView(智谱) / DALL·E / 中转站
 
@@ -74,14 +90,6 @@ async function openaiImageGen(
   const apiKey = normalizeApiCredential(config.apiKey);
   const model = normalizeApiModel(config.model);
 
-  const requestBody = (responseFormat?: 'b64_json') => JSON.stringify({
-    model,
-    prompt,
-    n,
-    size,
-    ...(responseFormat ? { response_format: responseFormat } : {}),
-  });
-
   const parse = (data: any): ImageGenResult[] => {
     const items = Array.isArray(data?.data) ? data.data : [];
     if (items.length === 0) throw new Error('生图 API 没有返回图片');
@@ -91,6 +99,81 @@ async function openaiImageGen(
         : { src: item.url || '' }
     ));
   };
+
+  const referenceImages = (config.referenceImages || [])
+    .map(img => img?.trim())
+    .filter((img): img is string => !!img)
+    .slice(0, MAX_REFERENCE_IMAGES);
+
+  // 有参考脸图 → 切走图生图调用方式。
+  if (referenceImages.length > 0) {
+    if (isAgnesModel(model)) {
+      // Agnes 系列：仍是 /v1/images/generations，但参考图放 extra_body.image 数组；
+      // response_format 也必须在 extra_body 里，放顶层会 400。图生图不需要 tags: ["img2img"]。
+      const data = await safeFetchJson(`${baseUrl}/v1/images/generations`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          prompt,
+          n,
+          size,
+          extra_body: {
+            image: referenceImages,
+            response_format: 'b64_json',
+          },
+        }),
+      }, 1, 90_000, meta);
+      return parse(data);
+    }
+
+    // 标准 OpenAI 格式：/v1/images/edits，multipart/form-data，image 参数传参考图。
+    // 单图字段名用 'image'，多图（OpenAI 官方约定）要用 'image[]' 否则部分 server 只取到最后一张。
+    const blobs = await Promise.all(referenceImages.map(dataUrlToBlob));
+    const imageFieldName = blobs.length > 1 ? 'image[]' : 'image';
+    const buildForm = (withResponseFormat: boolean) => {
+      const form = new FormData();
+      form.append('model', model);
+      form.append('prompt', prompt);
+      form.append('n', String(n));
+      form.append('size', size);
+      for (const { blob, filename } of blobs) {
+        form.append(imageFieldName, blob, filename);
+      }
+      if (withResponseFormat) form.append('response_format', 'b64_json');
+      return form;
+    };
+
+    try {
+      const data = await safeFetchJson(`${baseUrl}/v1/images/edits`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${apiKey}` },
+        body: buildForm(true),
+      }, 1, 90_000, meta);
+      return parse(data);
+    } catch (error: any) {
+      // 部分中转站不接受 response_format 字段；降级重试。
+      const message = String(error?.message || '');
+      if (!/response_format|400|422|invalid/i.test(message)) throw error;
+      const data = await safeFetchJson(`${baseUrl}/v1/images/edits`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${apiKey}` },
+        body: buildForm(false),
+      }, 1, 90_000, meta);
+      return parse(data);
+    }
+  }
+
+  const requestBody = (responseFormat?: 'b64_json') => JSON.stringify({
+    model,
+    prompt,
+    n,
+    size,
+    ...(responseFormat ? { response_format: responseFormat } : {}),
+  });
 
   try {
     // 优先要 b64_json：省一次跨域取图，也方便直接存 IndexedDB。
