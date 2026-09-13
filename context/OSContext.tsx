@@ -28,7 +28,7 @@ import { WorldScheduler, toTickEntries } from '../utils/worldHome/scheduler';
 import { runWorldEpisode, rerollWorldCharBeat } from '../utils/worldHome/engine';
 import { migrateWorldDaySegs } from '../utils/worldHome/prompts';
 import { ChatParser } from '../utils/chatParser';
-import { safeFetchJson } from '../utils/safeApi';
+import { safeFetchJson, isImageGenerationUrl } from '../utils/safeApi';
 import { captureApiRequestOnce, getApiCallAmbientContext, recordApiCall, setApiCallAmbientContext, updateApiRequestCaptureUsage } from '../utils/apiCallLog';
 import { isGlobalStreamEnabled, upgradeChatBodyToStream, assembleUpgradedResponse } from '../utils/streamUpgrade';
 import { rewriteStaleWorkerUrl } from '../utils/proxyWorker';
@@ -1195,7 +1195,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               // 流式透传的正文可能再流几十秒——旧版在 headers 处截止，「假流」渠道 6.5s 出头、
               // 正文 44s 才灌完，卡片却记成 6.5s（实测误导排查）。clone 与调用方并行消费同一
               // 条流，text() 完成时刻 ≈ 真实收完时刻。
-              if (urlStr.includes('/chat/completions')) {
+              if (urlStr.includes('/chat/completions') || isImageGenerationUrl(urlStr)) {
                   const meta = (config as any)?.__sullyMeta || ambientMetaAtStart;
                   const requestId = (config as any)?.__sullyApiCallId;
                   const body = (sendArgs[1] as any)?.body;
@@ -1227,8 +1227,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               }
 
               if (!response.ok) {
-                  // Only log if it's likely an API call (contains chat/completions or models)
-                  if (urlStr.includes('/chat/completions') || urlStr.includes('/models')) {
+                  // Only log if it's likely an API call (chat/completions, models, or image generation endpoints)
+                  if (urlStr.includes('/chat/completions') || urlStr.includes('/models') || isImageGenerationUrl(urlStr)) {
                       try {
                           const clone = response.clone();
                           const text = await clone.text();
@@ -1266,7 +1266,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               return response;
           } catch (err: any) {
               // Network Failure
-              if (urlStr.includes('/chat/completions')) {
+              if (urlStr.includes('/chat/completions') || isImageGenerationUrl(urlStr)) {
                   updateApiRequestCaptureUsage({ captureId: apiRequestCaptureId, ok: false });
                   recordApiCall({ requestId: (config as any)?.__sullyApiCallId, url: urlStr, body: (sendArgs[1] as any)?.body, ok: false, meta: (config as any)?.__sullyMeta || ambientMetaAtStart, durationMs: Date.now() - fetchStartedAt });
               }
