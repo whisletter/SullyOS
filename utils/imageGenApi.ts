@@ -46,12 +46,17 @@ export async function generateImage(
     throw new Error('生图 prompt 不能为空');
   }
 
+  // 自动拼接风格预设（锁脸 / 画风 / 色调等用户自定义提示词）
+  const finalPrompt = config.stylePreset?.trim()
+    ? `${trimmedPrompt}\n\n${config.stylePreset.trim()}`
+    : trimmedPrompt;
+
   const { size = '1024x1024', n = 1, meta } = options;
 
   if (config.format === 'google') {
-    return googleImageGen(config, trimmedPrompt, { n, meta });
+    return googleImageGen(config, finalPrompt, { n, meta });
   }
-  return openaiImageGen(config, trimmedPrompt, { size, n, meta });
+  return openaiImageGen(config, finalPrompt, { size, n, meta });
 }
 
 // ─── OpenAI 兼容格式 ─────────────────────────────────────────────────────────
