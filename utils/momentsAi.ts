@@ -64,6 +64,8 @@ interface AiMomentsResponse {
   newPosts: AiGeneratedPost[];
   interactions: AiInteraction[];
   commentReplies?: AiCommentReply[];
+  /** 想置顶/继续置顶的动态 id 列表；不写代表置顶现状不变。只在完整模式（非暂停营业）下可用。 */
+  pinnedPostIds?: string[];
 }
 
 /** generateMoments 的入参 */
@@ -178,7 +180,8 @@ function formatTaRecentPosts(posts: MomentPost[], charId: string): string {
   return taPosts.map(p => {
     const time = new Date(p.createdAt);
     const timeStr = `${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}`;
-    return `${timeStr} "${(p.text || '').slice(0, 80)}"`;
+    const pinnedTag = p.pinned ? ' (已置顶)' : '';
+    return `[id=${p.id}] ${timeStr} "${(p.text || '').slice(0, 80)}"${pinnedTag}`;
   }).join('\n');
 }
 
@@ -281,7 +284,13 @@ ${pendingRepliesText}
    - 你可以回复也可以不回复（觉得没必要接就跳过），符合你的性格和当下语境即可
    - 如果要回复，commentReplies 里加一项：postId 填对应动态的 id，replyToCommentId 填你要回复的
      那条用户评论的 commentId（通常是列表里最后一条，除非你想回应更早的某句话），comment 填回复内容
-   - 回复要像真人聊天接话，别写成一段客套的官方回应`;
+   - 回复要像真人聊天接话，别写成一段客套的官方回应
+
+4. 看"你最近发的朋友圈"列表，判断自己有没有想置顶的
+   - 通常是对你来说意义特别、值得放在最上面的一条（大部分时候不需要置顶任何东西）
+   - 如果想置顶，pinnedPostIds 填你想置顶的动态 id（可以是新的，也可以是标了"(已置顶)"、你想继续保留的）
+   - 不写这个字段，或者不把某条"(已置顶)"的 id 写进去，就代表它不再置顶
+   - 完全不需要变动现状（不新增也不取消）就整个不写这个字段`;
 
   const jsonFormat = skipInteractions
     ? `{
@@ -314,7 +323,8 @@ ${pendingRepliesText}
       "replyToCommentId": "要回复的那条用户评论的 commentId",
       "comment": "回复内容"
     }
-  ]
+  ],
+  "pinnedPostIds": ["想置顶/继续置顶的动态 id，完全不写这个字段代表现状不变"]
 }`;
 
   return `你是「${char.name}」，正在发朋友圈${skipInteractions ? '' : '和浏览朋友圈'}。
@@ -564,6 +574,26 @@ export async function generateMoments(input: GenerateMomentsInput): Promise<Gene
       updatedTaPosts[idx] = updated;
     } else {
       updatedTaPosts.push(updated);
+    }
+  }
+
+  // 8. 处理置顶（只在完整模式下生效；暂停营业模式的 prompt 不会教这个字段，AI 也不会返回它，
+  // 这里的 skipInteractions 判断是双重保险，防止未来改动误让暂停营业模式也生效）。
+  if (!skipInteractions && Array.isArray(parsed.pinnedPostIds)) {
+    const nextPinnedIds = new Set(parsed.pinnedPostIds.filter((id): id is string => typeof id === 'string'));
+    const taOwnPosts = existingPosts.filter(p => p.author === charId);
+    for (const taPost of taOwnPosts) {
+      const shouldBePinned = nextPinnedIds.has(taPost.id);
+      if (!!taPost.pinned === shouldBePinned) continue; // 状态没变，跳过
+      const alreadyUpdated = updatedTaPosts.find(p => p.id === taPost.id);
+      const base = alreadyUpdated || taPost;
+      const updated: MomentPost = { ...base, pinned: shouldBePinned, updatedAt: Date.now() };
+      if (alreadyUpdated) {
+        const idx = updatedTaPosts.findIndex(p => p.id === taPost.id);
+        updatedTaPosts[idx] = updated;
+      } else {
+        updatedTaPosts.push(updated);
+      }
     }
   }
 
