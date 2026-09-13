@@ -1,4 +1,3 @@
-
 import { DB } from './db';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { CharacterProfile, CharPlaylistSong } from '../types';
@@ -161,6 +160,15 @@ export const ChatParser = {
          * 只有主动消息 2.0 的定时路径传，其余路径不传 = 取用户此刻在听的那首。
          */
         frozenMusicSong?: FrozenMusicSong,
+        /**
+         * 出参（不是入参）：`[[IMG_GEN:...]]` 只在这里被识别、剥离，不在这一步里调用生图 API——
+         * 这一步跟文字气泡切分（Step 9-10）同步执行，真去 await 生图会拖慢文字气泡的出现。
+         * 识别到的描述文字写进这个对象的 `prompt` 字段，交给调用方（applyAssistantPostProcessing）
+         * 在文字气泡落库/渲染完成之后，另起一个不 await 的异步分支再调 generateImage()。
+         * 用 out 参数而不是改返回值形状，是为了不动这个函数已有的 `Promise<string>` 签名，
+         * 保持所有既有调用方（含测试）不用跟着改。
+         */
+        imgGenOut?: { prompt?: string },
     ) => {
         let content = aiContent;
         /** 落库统一走这里，别直接调 DB.saveMessage —— 漏一处就是一条消息两个时间、重试时还认不出来。 */
@@ -439,6 +447,24 @@ export const ChatParser = {
                 }
             }
             content = content.replace(NEWS_CARD_GLOBAL_RE, '').trim();
+        }
+
+        // IMG_GEN — char 根据聊天语境自主判断要不要发一张图、发什么内容：
+        //   [[IMG_GEN: 一句简短的英文图片描述]]
+        // 是否发、发什么完全交给 AI 自己判断（system prompt 里的指令段只在角色开了
+        // imageGenChatEnabled 且全局生图 API 也开启时才注入，见 utils/chatPrompts.ts）。
+        // 这里只识别 + 剥离标签，真正的 generateImage() 调用由调用方在文字气泡落库后
+        // 异步发起（见上面 imgGenOut 参数的说明），避免拖慢文字气泡出现的时机。
+        const IMG_GEN_RE = /\[\[IMG_GEN:\s*([^\]]*?)\s*\]\]/;
+        const IMG_GEN_GLOBAL_RE = /\[\[IMG_GEN:[^\]]*\]\]/g;
+        const imgGenMatch = content.match(IMG_GEN_RE);
+        if (imgGenMatch) {
+            const imgPrompt = (imgGenMatch[1] || '').trim();
+            if (imgPrompt && imgGenOut) {
+                imgGenOut.prompt = imgPrompt;
+            }
+            // 同类 tag 全清，防止 LLM 一条消息里插多次（跟 MUSIC_ACTION 一样，只认第一次出现）。
+            content = content.replace(IMG_GEN_GLOBAL_RE, '').trim();
         }
 
         // ADD_EVENT
