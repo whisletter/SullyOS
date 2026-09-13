@@ -190,6 +190,9 @@ const MomentsApp: React.FC = () => {
       for (const updated of result.updatedUserPosts) {
         await savePost(updated);
       }
+      for (const updated of result.updatedTaPosts) {
+        await savePost(updated);
+      }
 
       // 更新冷却时间戳
       const updatedSettings = { ...settings, lastGeneratedAt: Date.now() };
@@ -199,10 +202,13 @@ const MomentsApp: React.FC = () => {
       // 合并到 state 并排序
       setPosts(prev => {
         const existingIds = new Set(prev.map(p => p.id));
-        // 更新被互动过的 user posts
+        // 更新被互动过的 user posts + 被追加回复的 TA posts
         let merged = prev.map(p => {
-          const updated = result.updatedUserPosts.find(u => u.id === p.id);
-          return updated || p;
+          const updatedUser = result.updatedUserPosts.find(u => u.id === p.id);
+          if (updatedUser) return updatedUser;
+          const updatedTa = result.updatedTaPosts.find(u => u.id === p.id);
+          if (updatedTa) return updatedTa;
+          return p;
         });
         // 添加 TA 的新动态
         const brandNew = result.newPosts.filter(p => !existingIds.has(p.id));
@@ -216,10 +222,11 @@ const MomentsApp: React.FC = () => {
         return merged;
       });
 
-      if (result.newPosts.length > 0 || result.updatedUserPosts.length > 0) {
+      if (result.newPosts.length > 0 || result.updatedUserPosts.length > 0 || result.updatedTaPosts.length > 0) {
         const parts: string[] = [];
         if (result.newPosts.length > 0) parts.push(`发了 ${result.newPosts.length} 条动态`);
         if (result.updatedUserPosts.length > 0) parts.push('互动了你的朋友圈');
+        if (result.updatedTaPosts.length > 0) parts.push('回复了评论');
         addToast(`${char.name} ${parts.join('，')}`, 'success');
       }
     } catch (e: any) {
@@ -368,12 +375,14 @@ const MomentsApp: React.FC = () => {
     const post = posts.find(p => p.id === activeCommentPostId);
     if (!post) return;
 
+    const replyToComment = replyTarget ? post.comments.find(c => c.id === replyTarget.id) : undefined;
     const comment: MomentComment = {
       id: createCommentId(),
       author: 'user',
-      authorName: userProfile.name || '我',
+      authorName: settings?.userNickname || userProfile.name || '我',
       replyTo: replyTarget?.id,
       replyToName: replyTarget?.name,
+      replyToAuthor: replyToComment?.author,
       content: commentText.trim(),
       createdAt: Date.now(),
     };
@@ -388,7 +397,7 @@ const MomentsApp: React.FC = () => {
     setPosts(prev => prev.map(p => p.id === updated.id ? updated : p));
     setCommentText('');
     setReplyTarget(null);
-  }, [activeCommentPostId, commentText, replyTarget, posts, userProfile]);
+  }, [activeCommentPostId, commentText, replyTarget, posts, userProfile, settings]);
 
   const handleDeletePost = useCallback(async (postId: string) => {
     await deletePost(postId);
@@ -835,6 +844,16 @@ const MomentsApp: React.FC = () => {
                 style={{ background: 'rgba(255,255,255,0.04)' }}>
                 {post.comments.map(c => {
                   const isEditingThis = editingField?.postId === post.id && editingField?.commentId === c.id;
+                  // ID 实时读取：不用评论创建那一刻存的快照名字，改朋友圈昵称/角色名后旧评论也跟着变。
+                  const liveAuthorName = c.author === 'user'
+                    ? (settings?.userNickname || userProfile.name || '我')
+                    : (char?.name || c.authorName);
+                  const liveReplyToName = !c.replyTo ? undefined
+                    : c.replyToAuthor === 'user'
+                      ? (settings?.userNickname || userProfile.name || '我')
+                      : c.replyToAuthor
+                        ? (char?.name || c.replyToName)
+                        : c.replyToName;
                   return (
                     <div key={c.id} className="text-xs leading-relaxed">
                       {isEditingThis ? (
@@ -852,7 +871,7 @@ const MomentsApp: React.FC = () => {
                           </div>
                         </div>
                       ) : (
-                        <span
+                        <div
                           className="cursor-pointer"
                           onContextMenu={e => { e.preventDefault(); handleLongPress(post.id, c.id); }}
                           onTouchStart={() => {
@@ -862,20 +881,25 @@ const MomentsApp: React.FC = () => {
                           }}
                           onClick={() => {
                             setActiveCommentPostId(post.id);
-                            setReplyTarget({ id: c.id, name: c.authorName });
+                            setReplyTarget({ id: c.id, name: liveAuthorName });
                             setTimeout(() => commentInputRef.current?.focus(), 100);
                           }}
                         >
-                          <span style={{ color: '#93c5fd' }} className="font-medium">{c.authorName}</span>
-                          {c.replyToName && (
-                            <>
-                              <span style={{ color: 'var(--moments-text-secondary, #64748b)' }}> 回复 </span>
-                              <span style={{ color: '#93c5fd' }} className="font-medium">{c.replyToName}</span>
-                            </>
-                          )}
-                          <span style={{ color: 'var(--moments-text-secondary, #64748b)' }}>：</span>
-                          <span style={{ color: 'var(--moments-text, #cbd5e1)' }}>{c.content}</span>
-                        </span>
+                          <div>
+                            <span style={{ color: '#93c5fd' }} className="font-medium">{liveAuthorName}</span>
+                            {liveReplyToName && (
+                              <>
+                                <span style={{ color: 'var(--moments-text-secondary, #64748b)' }}> 回复 </span>
+                                <span style={{ color: '#93c5fd' }} className="font-medium">{liveReplyToName}</span>
+                              </>
+                            )}
+                            <span style={{ color: 'var(--moments-text-secondary, #64748b)' }}>：</span>
+                            <span style={{ color: 'var(--moments-text, #cbd5e1)' }}>{c.content}</span>
+                          </div>
+                          <div className="text-[10px] mt-0.5" style={{ color: 'var(--moments-text-secondary, #64748b)' }}>
+                            {formatTime(c.createdAt)}
+                          </div>
+                        </div>
                       )}
                     </div>
                   );
