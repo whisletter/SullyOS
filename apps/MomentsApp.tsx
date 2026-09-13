@@ -54,6 +54,7 @@ import {
   createPostId,
   createCommentId,
 } from '../utils/momentsDb';
+import { generateMoments, canGenerate } from '../utils/momentsAi';
 
 // ==================== 样式常量 ====================
 
@@ -70,6 +71,7 @@ const MomentsApp: React.FC = () => {
     characters,
     activeCharacterId,
     userProfile,
+    apiConfig,
     addToast,
     closeApp,
     theme: osTheme,
@@ -96,6 +98,8 @@ const MomentsApp: React.FC = () => {
   const [posts, setPosts] = useState<MomentPost[]>([]);
   const [settings, setSettings] = useState<MomentSettings | null>(null);
   const [loading, setLoading] = useState(true);
+  const [generating, setGenerating] = useState(false);
+  const genAbortRef = useRef<AbortController | null>(null);
 
   // ---- 互动状态 ----
   const [activeCommentPostId, setActiveCommentPostId] = useState<string | null>(null);
@@ -140,6 +144,99 @@ const MomentsApp: React.FC = () => {
   }, [charId]);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  // ==================== AI 生成 TA 动态 ====================
+
+  const handleGenerate = useCallback(async (manual = false) => {
+    if (!char || !settings || !apiConfig.apiKey || !apiConfig.baseUrl) {
+      if (manual) addToast('请先配置 API', 'info');
+      return;
+    }
+    if (!canGenerate(settings)) {
+      if (manual) addToast('刷新太频繁了，稍后再试', 'info');
+      return;
+    }
+    if (generating) return;
+
+    // 取消上一次未完成的请求
+    genAbortRef.current?.abort();
+    const ac = new AbortController();
+    genAbortRef.current = ac;
+
+    setGenerating(true);
+    try {
+      const result = await generateMoments({
+        char,
+        userProfile,
+        apiConfig,
+        settings,
+        existingPosts: posts,
+        signal: ac.signal,
+      });
+
+      if (ac.signal.aborted) return;
+
+      // 写入 IndexedDB
+      for (const post of result.newPosts) {
+        await savePost(post);
+      }
+      for (const updated of result.updatedUserPosts) {
+        await savePost(updated);
+      }
+
+      // 更新冷却时间戳
+      const updatedSettings = { ...settings, lastGeneratedAt: Date.now() };
+      await saveMomentSettings(updatedSettings);
+      setSettings(updatedSettings);
+
+      // 合并到 state 并排序
+      setPosts(prev => {
+        const existingIds = new Set(prev.map(p => p.id));
+        // 更新被互动过的 user posts
+        let merged = prev.map(p => {
+          const updated = result.updatedUserPosts.find(u => u.id === p.id);
+          return updated || p;
+        });
+        // 添加 TA 的新动态
+        const brandNew = result.newPosts.filter(p => !existingIds.has(p.id));
+        merged = [...brandNew, ...merged];
+        // 排序：置顶优先，时间倒序
+        merged.sort((a, b) => {
+          if (a.pinned && !b.pinned) return -1;
+          if (!a.pinned && b.pinned) return 1;
+          return b.createdAt - a.createdAt;
+        });
+        return merged;
+      });
+
+      if (result.newPosts.length > 0 || result.updatedUserPosts.length > 0) {
+        const parts: string[] = [];
+        if (result.newPosts.length > 0) parts.push(`发了 ${result.newPosts.length} 条动态`);
+        if (result.updatedUserPosts.length > 0) parts.push('互动了你的朋友圈');
+        addToast(`${char.name} ${parts.join('，')}`, 'success');
+      }
+    } catch (e: any) {
+      if (ac.signal.aborted) return;
+      console.error('[Moments] generateMoments failed', e);
+      if (manual) addToast(`生成失败: ${e.message?.slice(0, 60) || '未知错误'}`, 'error');
+    } finally {
+      if (!ac.signal.aborted) setGenerating(false);
+    }
+  }, [char, settings, apiConfig, userProfile, posts, generating, addToast]);
+
+  // 打开 App 时自动触发一次 AI 生成
+  const autoGenTriggered = useRef(false);
+  useEffect(() => {
+    if (!loading && settings && !autoGenTriggered.current && apiConfig.apiKey) {
+      autoGenTriggered.current = true;
+      handleGenerate(false);
+    }
+  }, [loading, settings, apiConfig.apiKey]); // handleGenerate 故意不加入依赖，只触发一次
+
+  // 卸载时取消进行中的请求
+  useEffect(() => {
+    return () => { genAbortRef.current?.abort(); };
+  }, []);
 
   // ==================== 发布逻辑 ====================
 
@@ -1048,8 +1145,10 @@ const MomentsApp: React.FC = () => {
             /* TA 页面：刷新按钮 */
             <button
               className="text-white/60 active:scale-90 transition"
+              style={generating ? { animation: 'spin 1s linear infinite' } : {}}
               title="让 TA 更新动态"
-              onClick={() => addToast('生成功能将在接入生图 API 后启用', 'info')}
+              disabled={generating}
+              onClick={() => handleGenerate(true)}
             >
               <ArrowsClockwise size={20} />
             </button>
@@ -1078,18 +1177,41 @@ const MomentsApp: React.FC = () => {
         {/* 封面 */}
         {renderCover(isTA ? 'ta' : 'user')}
 
+        {/* AI 生成中提示 */}
+        {generating && (
+          <div className="flex items-center justify-center gap-2 py-3 text-white/40 text-xs">
+            <ArrowsClockwise size={14} style={{ animation: 'spin 1s linear infinite' }} />
+            <span>{charName} 正在更新朋友圈…</span>
+          </div>
+        )}
+
         {/* 动态列表 */}
         {loading ? (
           <div className="flex items-center justify-center py-12 text-white/30 text-sm">加载中...</div>
         ) : displayPosts.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-16 text-white/30">
-            <div className="text-sm">{isTA ? `${charName} 还没发过动态` : '还没有动态'}</div>
-            {!isTA && (
+            <div className="text-sm">
+              {generating
+                ? `${charName} 正在思考发什么…`
+                : isTA
+                  ? `${charName} 还没发过动态`
+                  : '还没有动态'
+              }
+            </div>
+            {!isTA && !generating && (
               <button
                 onClick={() => setShowComposeMenu(true)}
                 className="mt-3 text-xs text-blue-400 active:scale-90 transition"
               >
                 发布第一条朋友圈
+              </button>
+            )}
+            {isTA && !generating && apiConfig.apiKey && (
+              <button
+                onClick={() => handleGenerate(true)}
+                className="mt-3 text-xs text-blue-400 active:scale-90 transition"
+              >
+                让 {charName} 发一条
               </button>
             )}
           </div>
