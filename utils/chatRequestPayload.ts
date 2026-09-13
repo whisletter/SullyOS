@@ -109,6 +109,8 @@ export interface BuildChatPayloadInput {
      * 出现两个钟、两份热搜、两套工具名。
      */
     timelyByWorker?: boolean;
+    /** 全局「生图 API」是否已开启（apiConfig.imageGenApi.enabled），透传给 system prompt 决定要不要教 IMG_GEN 指令。 */
+    imageGenApiEnabled?: boolean;
 }
 
 export interface BuildChatPayloadResult {
@@ -326,9 +328,10 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
         !!isListeningTogether,
         musicCfg,
         recentTrackSwitch,
-        (input.timelyByWorker || returningFromMode) ? {
+        (input.timelyByWorker || returningFromMode || input.imageGenApiEnabled) ? {
             timelyByWorker: input.timelyByWorker === true,
             returningFromMode: returningFromMode || undefined,
+            imageGenApiEnabled: input.imageGenApiEnabled === true,
         } : undefined,
     );
     let systemPrompt = parts.stable;
