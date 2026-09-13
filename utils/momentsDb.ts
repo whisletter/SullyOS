@@ -39,7 +39,8 @@ export interface MomentComment {
   author: 'user' | string;        // 'user' 或 charId
   authorName: string;
   replyTo?: string;                // 回复某条评论的 id
-  replyToName?: string;            // 被回复人的名字
+  replyToName?: string;            // 被回复人的名字（旧数据快照；新数据靠 replyToAuthor 实时读取）
+  replyToAuthor?: 'user' | string; // 被回复人是 'user' 还是 charId，用于渲染时实时取当前名字，而不是用创建时的快照
   content: string;
   createdAt: number;
 }
