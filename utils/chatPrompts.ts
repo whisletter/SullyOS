@@ -162,6 +162,8 @@ export interface PromptBuildOptions {
      * scheduleMessageTagEnabled 处的说明。
      */
     timelyByWorker?: boolean;
+    /** 全局「生图 API」是否已开启（apiConfig.imageGenApi.enabled）。跟 char.imageGenChatEnabled 同时满足才注入 IMG_GEN 指令。 */
+    imageGenApiEnabled?: boolean;
 }
 
 export const ChatPrompts = {
@@ -967,6 +969,16 @@ ${xhsEnabled ? `${[notionEnabled, feishuEnabled, notionNotesEnabled].filter(Bool
 
 ### 协同功能
 你在普通聊天。需要处理文件时，可引导${userProfile.name}从 ChatApp 加号页进入“协同工作”；不要在这里假装制作。系统另给已有文件标题，可按规则发送。
+`;
+        }
+
+        // 生图：按角色开关 + 全局生图 API 是否开启，两者都满足才注入指令。
+        // 发不发、发什么完全交给 AI 自己判断（不用关键词规则），跟朋友圈那套配图判断同一层设计哲学。
+        if (char.imageGenChatEnabled && promptOptions?.imageGenApiEnabled) {
+            baseSystemPrompt += `
+
+### 发图
+你可以给${userProfile.name}发自拍/场景图。当语境显示ta想看一张图（问在干嘛、吃的什么、穿的什么、想看看你等等），且你判断合适，就在回复末尾单独一行输出: \`[[IMG_GEN: 一句简短的英文图片描述，含场景/动作/穿着等细节]]\`。不是每次都要发，根据人设和当下情境自己判断要不要发、发什么；这条标签不会显示给对方，图片生成需要一点时间，会在你的文字之后单独发出。
 `;
         }
 
