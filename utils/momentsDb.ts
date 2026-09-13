@@ -67,9 +67,18 @@ export interface MomentPost {
   likeNames: string[];             // 点赞人名字列表（与 likes 一一对应）
   comments: MomentComment[];
   pinned?: boolean;
+  /**
+   * 仅"暂停营业"模式下、点 TA 朋友圈页面的🌼生成的历史动态才为 true。
+   * 这批动态只在 TA 的"秘密空间"里展示，不出现在"我的朋友圈"混合时间线，
+   * 也不出现在 TA 朋友圈子页面的常规列表里（那两处都要按这个字段过滤掉）。
+   */
+  isSecretMemory?: boolean;
   createdAt: number;
   updatedAt: number;
 }
+
+/** 朋友圈更新频率模式 */
+export type MomentUpdateFrequency = '5min' | '30min' | '1h' | '2h' | 'paused';
 
 /** 每角色的朋友圈设置 */
 export interface MomentSettings {
@@ -84,13 +93,24 @@ export interface MomentSettings {
   taSignature?: string;            // TA 的个性签名（TA 可自己改）
   // 生成设置
   taPostFrequency: number;         // TA 发布频率上限（每次打开最多生成几条）
+  /**
+   * TA 更新朋友圈的频率/状态。'paused'（暂停营业）时：打开 App / 从查手机跳转都不再
+   * 自动生成新动态或回复评论区；TA 朋友圈页面的🔄手动按钮也被禁用；
+   * 但🌼（秘密空间历史动态）依然可用，与这个状态是两套并列逻辑。
+   */
+  updateFrequency: MomentUpdateFrequency;
   asyncInteraction: boolean;       // 异步延时互动开关
   lastGeneratedAt: number;         // 上次 AI 生成时间戳
+  // 秘密空间（🌼）：TA 自己的独立小天地，背景/名字/签名由 AI 生成，只有头像继承本体
+  secretSpaceCoverImage?: string;
+  secretSpaceName?: string;
+  secretSpaceSignature?: string;
   updatedAt: number;
 }
 
 export const DEFAULT_MOMENT_SETTINGS: Omit<MomentSettings, 'id'> = {
   taPostFrequency: 3,
+  updateFrequency: '30min',
   asyncInteraction: false,
   lastGeneratedAt: 0,
   updatedAt: Date.now(),
