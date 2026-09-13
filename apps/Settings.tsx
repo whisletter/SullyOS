@@ -1209,9 +1209,9 @@ const Settings: React.FC = () => {
   /** 从通用模型预设一键填入生图 API 配置。 */
   const loadImageGenApiPreset = (preset: typeof apiPresets[0]) => {
     setLocalImageGenEnabled(true);
-    setLocalImageGenUrl(preset.baseUrl || '');
-    setLocalImageGenKey(preset.apiKey || '');
-    setLocalImageGenModel(preset.model || '');
+    setLocalImageGenUrl(normalizeApiBaseUrl(preset.config.baseUrl));
+    setLocalImageGenKey(normalizeApiCredential(preset.config.apiKey));
+    setLocalImageGenModel(normalizeApiModel(preset.config.model));
     setImageGenTestResult(null);
     setImageGenStatusMsg(`已载入预设：${preset.name}`);
     setTimeout(() => setImageGenStatusMsg(''), 2200);
@@ -3025,7 +3025,7 @@ const Settings: React.FC = () => {
                         disabled={testingImageGenApi}
                         className="py-3 rounded-2xl font-bold text-white shadow-lg shadow-pink-500/20 bg-pink-500 active:scale-95 transition-all disabled:opacity-50"
                     >
-                        保存生图 API
+                        保存
                     </button>
                 </div>
                 {imageGenStatusMsg && (
