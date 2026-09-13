@@ -3074,6 +3074,13 @@ export interface CharacterProfile {
   htmlModeCustomPrompt?: string;
   /** 可选：在日常 ChatApp 注入任务优先的协同工作规则。提示词较长，默认关闭。 */
   chatCollaborationEnabled?: boolean;
+  /**
+   * 按角色单独开关：开启后，聊天 system prompt 会注入 `[[IMG_GEN:...]]` 指令，
+   * 允许 TA 根据聊天语境自主判断要不要发一张图、发什么内容（不是关键词触发，AI 自己判断）。
+   * 真正生效还需要全局「生图 API」（apiConfig.imageGenApi.enabled）也已开启，两者都满足才注入指令、
+   * 才会在 TA 决定发图时真正调用生图 API。默认 false，避免用户还没配置生图 API 就被意外触发。
+   */
+  imageGenChatEnabled?: boolean;
   /** 该角色专属的聊天「白框」自定义 CSS（叠加在全局 osTheme.chatChromeCustomCss 之上）。 */
   chromeCustomCss?: string;
   /** 白框「提示音」：仅当 ta 新发的消息成为会话最后一条时播放一次。src 可为内置音效 key / 音频直链 / 上传后内联的 data:audio。
