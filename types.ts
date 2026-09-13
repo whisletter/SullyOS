@@ -273,6 +273,8 @@ export interface ImageGenApiConfig {
   baseUrl: string;
   apiKey: string;
   model: string;
+  /** 风格预设：每次生图时自动附加到 prompt 末尾，统一画风 / 锁脸 / 色调等。 */
+  stylePreset?: string;
 }
 
 export interface APIConfig {
