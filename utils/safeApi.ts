@@ -20,6 +20,16 @@ export function isChatCompletionUrl(url: string): boolean {
     return url.includes('/chat/completions');
 }
 
+/**
+ * 生图端点（OpenAI 兼容格式的 /v1/images/generations、/v1/images/edits）。
+ * 只用来判断「该不该记进 API 调用记录 / 失败日志」，不参与 /chat/completions 专属的
+ * 采样参数清理、blobref 图片令牌回填、流式升级、手动抓包统计——那些逻辑对生图请求
+ * 要么无意义要么结构不匹配，不应该被这个判断牵连。
+ */
+export function isImageGenerationUrl(url: string): boolean {
+    return url.includes('/images/generations') || url.includes('/images/edits');
+}
+
 /** Parse a fetch Response as JSON safely (text-first, then JSON.parse) */
 export async function safeResponseJson(response: Response): Promise<any> {
     const text = await response.text();
