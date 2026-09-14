@@ -27,6 +27,7 @@ import {
   TextAa,
   MusicNote,
   Article,
+  LinkSimple,
   Trash,
   PushPin,
   Gear,
@@ -59,7 +60,7 @@ import {
 import { generateMoments, canGenerate, generateSecretMemory, generateSecretSpaceIdentity, type MusicShareCandidate } from '../utils/momentsAi';
 import { DB } from '../utils/db';
 import { useMusic, musicApi, toHttps } from '../context/MusicContext';
-import { expandShortUrl } from '../utils/webpageExtractor';
+import { expandShortUrl, extractWebpageContent, detectFirstUrl } from '../utils/webpageExtractor';
 import { generateImage, isImageGenApiReady } from '../utils/imageGenApi';
 import { migrateDataUrlToRef } from '../utils/blobRef';
 
@@ -142,6 +143,11 @@ const MomentsApp: React.FC = () => {
   const [composeArticleTitle, setComposeArticleTitle] = useState('');
   const [composeArticleUrl, setComposeArticleUrl] = useState('');
   const [composeArticleBody, setComposeArticleBody] = useState('');
+  const [composeArticleImage, setComposeArticleImage] = useState('');
+  const [composeArticleLinkInput, setComposeArticleLinkInput] = useState('');
+  const [articleParsing, setArticleParsing] = useState(false);
+  const [articleParseError, setArticleParseError] = useState('');
+  const [articleParsed, setArticleParsed] = useState(false);
 
   // ---- 编辑状态 ----
   const [editingField, setEditingField] = useState<{ postId: string; commentId?: string } | null>(null);
@@ -403,6 +409,7 @@ const MomentsApp: React.FC = () => {
         title: composeArticleTitle,
         url: composeArticleUrl || undefined,
         body: composeArticleBody || undefined,
+        image: composeArticleImage || undefined,
       } : undefined,
       likes: [],
       likeNames: [],
@@ -426,10 +433,14 @@ const MomentsApp: React.FC = () => {
     setComposeArticleTitle('');
     setComposeArticleUrl('');
     setComposeArticleBody('');
+    setComposeArticleImage('');
+    setComposeArticleLinkInput('');
+    setArticleParsed(false);
+    setArticleParseError('');
     setComposeType(null);
     setView('main');
     addToast('已发布', 'success');
-  }, [charId, composeType, composeText, composeImages, composeMusicName, composeMusicArtist, composeMusicCover, composeArticleTitle, composeArticleUrl, composeArticleBody, userProfile, addToast]);
+  }, [charId, composeType, composeText, composeImages, composeMusicName, composeMusicArtist, composeMusicCover, composeArticleTitle, composeArticleUrl, composeArticleBody, composeArticleImage, userProfile, addToast]);
 
   // ==================== 图片上传 ====================
 
@@ -511,7 +522,42 @@ const MomentsApp: React.FC = () => {
     }
   }, [musicCfg]);
 
-  // ==================== 封面上传 ====================
+  // ==================== 分享文章：粘贴链接自动识别 ====================
+
+  /**
+   * 粘贴框里的文本看起来像链接就自动抓取：标题/摘要/封面图直接填进下面的字段。
+   * 覆盖范围取决于 extractWebpageContent 本身的多级抓取兜底（结构化提取 → 无头渲染
+   * → 直接抓 HTML），公开可访问的网页大多能抓到；需要登录、反爬严格、纯 JS 渲染
+   * 又没有服务端兜底的站点可能会失败，这时候提示手动填。
+   */
+  const handleArticleLinkInputChange = useCallback(async (rawInput: string) => {
+    setArticleParseError('');
+    const trimmed = rawInput.trim();
+    if (!trimmed) { setArticleParsed(false); return; }
+
+    const looksLikeLink = /^https?:\/\//i.test(trimmed) || !!detectFirstUrl(trimmed);
+    if (!looksLikeLink) { setArticleParsed(false); return; }
+
+    const url = detectFirstUrl(trimmed) || trimmed;
+    setArticleParsing(true);
+    try {
+      const webpage = await extractWebpageContent(url);
+      setComposeArticleTitle(webpage.title || '');
+      setComposeArticleBody(webpage.excerpt || '');
+      setComposeArticleImage(webpage.image || '');
+      setComposeArticleUrl(webpage.finalUrl || url);
+      setArticleParsed(true);
+    } catch (e: any) {
+      setArticleParseError(`识别失败: ${e?.message?.slice(0, 60) || '这个链接抓不到内容，可以手动填写'}`);
+      setArticleParsed(false);
+      // 抓取失败也把链接本身存上，用户可能就想留个链接、自己手动补标题。
+      setComposeArticleUrl(trimmed);
+    } finally {
+      setArticleParsing(false);
+    }
+  }, []);
+
+
 
   const handleCoverUpload = useCallback((target: 'user' | 'ta' | 'secret') => {
     const input = document.createElement('input');
@@ -948,22 +994,35 @@ const MomentsApp: React.FC = () => {
 
   // ==================== 渲染：文章卡片 ====================
 
-  const renderArticleCard = (article: MomentArticleCard) => (
-    <div className="rounded-xl p-3 mt-2"
-      style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)' }}>
-      <div className="text-sm font-medium" style={{ color: 'var(--moments-text, #e2e8f0)' }}>
-        {article.title}
-      </div>
-      {article.body && (
-        <div className="text-xs mt-1 line-clamp-3" style={{ color: 'var(--moments-text-secondary, #94a3b8)' }}>
-          {article.body}
+  const renderArticleCard = (article: MomentArticleCard) => {
+    const excerpt = article.body
+      ? (article.body.length > 50 ? `${article.body.slice(0, 50)}...` : article.body)
+      : '';
+    return (
+      <div className="flex items-center gap-3 rounded-xl p-3 mt-2"
+        style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)' }}>
+        <div className="w-14 h-14 rounded-lg overflow-hidden shrink-0">
+          {article.image ? (
+            <img src={article.image} alt="" className="w-full h-full object-cover" />
+          ) : (
+            <div className="w-full h-full flex items-center justify-center bg-slate-700">
+              <LinkSimple size={22} className="text-white/40" />
+            </div>
+          )}
         </div>
-      )}
-      {article.url && (
-        <div className="text-xs mt-1.5 text-blue-400 truncate">{article.url}</div>
-      )}
-    </div>
-  );
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-medium line-clamp-1" style={{ color: 'var(--moments-text, #e2e8f0)' }}>
+            {article.title || '未命名文章'}
+          </div>
+          {excerpt && (
+            <div className="text-xs mt-0.5 line-clamp-2" style={{ color: 'var(--moments-text-secondary, #94a3b8)' }}>
+              {excerpt}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
 
   // ==================== 渲染：图片网格 ====================
 
@@ -1376,6 +1435,13 @@ const MomentsApp: React.FC = () => {
             setComposeMusicSongId(null);
             setComposeMusicLinkInput('');
             setMusicParseError('');
+            setComposeArticleTitle('');
+            setComposeArticleUrl('');
+            setComposeArticleBody('');
+            setComposeArticleImage('');
+            setComposeArticleLinkInput('');
+            setArticleParsed(false);
+            setArticleParseError('');
           }} className="text-white/60 active:scale-90">
             <X size={22} />
           </button>
@@ -1475,12 +1541,25 @@ const MomentsApp: React.FC = () => {
           {/* 文章输入 */}
           {composeType === 'article' && (
             <div className="space-y-3">
+              <div>
+                <input
+                  value={composeArticleLinkInput}
+                  onChange={e => { setComposeArticleLinkInput(e.target.value); handleArticleLinkInputChange(e.target.value); }}
+                  placeholder="粘贴文章链接，自动识别标题/摘要/封面（没有链接可直接手动填写）"
+                  className="w-full px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10 placeholder:text-white/30"
+                  autoFocus
+                />
+                {articleParsing && <div className="text-[11px] text-white/40 mt-1">识别中…</div>}
+                {!articleParsing && articleParseError && <div className="text-[11px] text-rose-400 mt-1">{articleParseError}</div>}
+                {!articleParsing && !articleParseError && articleParsed && (
+                  <div className="text-[11px] text-emerald-400 mt-1">已识别 ✓ 也可以在下面手动微调</div>
+                )}
+              </div>
               <input
                 value={composeArticleTitle}
-                onChange={e => setComposeArticleTitle(e.target.value)}
-                placeholder="文章标题"
+                onChange={e => { setComposeArticleTitle(e.target.value); setArticleParsed(false); }}
+                placeholder="文章标题（识别后自动填入，也可手动输入）"
                 className="w-full px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10 placeholder:text-white/30"
-                autoFocus
               />
               <input
                 value={composeArticleUrl}
@@ -1490,10 +1569,15 @@ const MomentsApp: React.FC = () => {
               />
               <textarea
                 value={composeArticleBody}
-                onChange={e => setComposeArticleBody(e.target.value)}
-                placeholder="正文摘要（可选）"
+                onChange={e => { setComposeArticleBody(e.target.value); setArticleParsed(false); }}
+                placeholder="正文摘要（可选，识别后自动填入，也可手动输入）"
                 className="w-full min-h-[80px] px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10 placeholder:text-white/30 resize-none"
               />
+              {composeArticleTitle && (
+                <div className="mt-2">
+                  {renderArticleCard({ title: composeArticleTitle, body: composeArticleBody, url: composeArticleUrl, image: composeArticleImage })}
+                </div>
+              )}
             </div>
           )}
         </div>
