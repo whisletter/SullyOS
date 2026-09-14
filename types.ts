@@ -3256,6 +3256,8 @@ export interface Toast {
     id: string;
     message: string;
     type: 'success' | 'error' | 'info';
+    /** 可选：点击这条 toast 时触发（比如跳转到某个 App），点击后 toast 立即消失，不用等自动超时。 */
+    onClick?: () => void;
 }
 
 export interface XhsStockImage {
