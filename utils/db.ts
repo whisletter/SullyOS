@@ -886,6 +886,33 @@ export const DB = {
     });
   },
 
+  /**
+   * 改一条消息的 content。给「数据存在 content 里的 JSON 字符串」那类卡片用
+   * （moment_card 朋友圈转发卡是第一个：整个 momentData 被 stringify 进 content，
+   * 不走 metadata），所以 updateMessageMetadata 那条路对它们不适用。
+   * updater 拿到旧 content、返回新 content，读改写在同一个事务里完成。
+   */
+  updateMessageContent: async (id: number, updater: (prev: string) => string): Promise<void> => {
+    const db = await openDB();
+    const transaction = db.transaction(STORE_MESSAGES, 'readwrite');
+    const store = transaction.objectStore(STORE_MESSAGES);
+
+    return new Promise((resolve, reject) => {
+        const req = store.get(id);
+        req.onsuccess = () => {
+            const data = req.result as Message | undefined;
+            if (data) {
+                (data as any).content = updater((data as any).content || '');
+                store.put(data);
+                resolve();
+            } else {
+                reject(new Error('Message not found'));
+            }
+        };
+        req.onerror = () => reject(req.error);
+    });
+  },
+
   deleteMessage: async (id: number): Promise<void> => {
     const { preserveContentFavoritesBeforeMessageDeletion } = await import('./contentFavorites');
     await preserveContentFavoritesBeforeMessageDeletion({ ids: [id] });
