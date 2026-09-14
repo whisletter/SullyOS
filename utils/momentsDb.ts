@@ -90,6 +90,11 @@ export interface MomentPost {
    */
   imageDescriptions?: string[];
   /**
+   * images 逐张的关键词压缩结果（与 images / imageDescriptions 严格同索引位）。
+   * 发布时由详细识图描述经 Memory Palace 的 LightLLM 压缩生成，生成后永久缓存。
+   */
+  imageKeywords?: string[];
+  /**
    * 生成这些图片时用的英文描述（仅 AI 自动配图的动态才有）。重新生成失败的图片时
    * 复用同一句描述再调一次生图 API，而不是重新问 AI「这条要不要配图」——避免多打一次
    * 聊天补全 API，图的内容也和这条动态原本想表达的场景保持一致。
