@@ -1,2157 +1,1234 @@
 /**
- * 朋友圈 App
+ * 朋友圈 AI 生成层
  *
- * 视图结构：
- *   main     — 混合时间线（我 + TA），顶部是我的封面
- *   taPage   — TA 的朋友圈子页面（只看 TA 发的，保留互动）
- *   compose  — 发布面板（发图/发文/发图文/分享音乐/分享文章）
- *   settings — 朋友圈设置（发布频率、异步互动等）
+ * 负责：
+ *   1. 组装 prompt（角色人设 + 今日日程 + 近期聊天摘要 + 用户最近发的朋友圈）
+ *   2. 调用 LLM API，返回结构化 JSON
+ *   3. 解析并规范化 AI 返回的数据（TA 的新动态 + 对用户动态的互动）
+ *
+ * 调用方：MomentsApp.tsx（打开时 + 手动刷新）
  */
 
-import React, {
-  useState,
-  useEffect,
-  useCallback,
-  useRef,
-  useMemo,
-} from 'react';
-import {
-  CaretLeft,
-  Camera,
-  ArrowsClockwise,
-  Heart,
-  ChatCircle,
-  ShareNetwork,
-  DotsThree,
-  ImageSquare,
-  TextAa,
-  MusicNote,
-  Article,
-  Trash,
-  PushPin,
-  Gear,
-  PaperPlaneTilt,
-  X,
-  Plus,
-  Image as ImageIcon,
-} from '@phosphor-icons/react';
-import { useOS } from '../context/OSContext';
-import TokenImg from '../components/os/TokenImg';
-import type { CharacterProfile } from '../types';
-import { AppID } from '../types';
-import {
-  MomentPost,
-  MomentComment,
-  MomentSettings,
-  MomentMusicCard,
-  MomentArticleCard,
-  FakeCommentThread,
-  MomentPostType,
-  MomentUpdateFrequency,
-  DEFAULT_MOMENT_SETTINGS,
-  getPostsByCharId,
-  savePost,
-  deletePost,
-  getMomentSettings,
-  saveMomentSettings,
-  createPostId,
-  createCommentId,
-} from '../utils/momentsDb';
-import { generateMoments, canGenerate, generateSecretMemory, generateSecretSpaceIdentity, generateFakeArticleComments, type MusicShareCandidate } from '../utils/momentsAi';
-import { DB } from '../utils/db';
-import { useMusic, musicApi, toHttps } from '../context/MusicContext';
-import { expandShortUrl, extractWebpageContent, detectFirstUrl } from '../utils/webpageExtractor';
-import { generateImage, isImageGenApiReady } from '../utils/imageGenApi';
-import { migrateDataUrlToRef } from '../utils/blobRef';
+import type { CharacterProfile, UserProfile, APIConfig } from '../types';
+import type { MomentPost, MomentComment, MomentSettings, MomentUpdateFrequency, MomentMusicCard, MomentArticleCard, FakeCommentThread } from './momentsDb';
+import { createPostId, createCommentId } from './momentsDb';
+import { ContextBuilder } from './context';
+import { DB } from './db';
+import { safeFetchJson, extractJson } from './safeApi';
+import type { MusicCfg } from '../context/MusicContext';
+import { musicApi, toHttps } from '../context/MusicContext';
+import { formatMessageForPrompt } from './messageFormat';
+import { buildScheduleInjection, type RenderableSchedule } from './scheduleInjection';
+import { generateImage, isImageGenApiReady } from './imageGenApi';
+import { migrateDataUrlToRef } from './blobRef';
+import { describeImageWithVisionApi, isVisionApiReady } from './visionApi';
 
-// ==================== 样式常量 ====================
+// ==================== 类型定义 ====================
 
-const COVER_HEIGHT = 240;
-const AVATAR_BOTTOM = -20;
-const SIGNATURE_BOTTOM = -35;
-const AVATAR_SIZE = 64;
-
-// ==================== 主组件 ====================
-
-type View = 'main' | 'taPage' | 'compose' | 'settings' | 'secretSpace';
-type ComposeType = MomentPostType | null;
-
-const MomentsApp: React.FC = () => {
-  const {
-    characters,
-    activeCharacterId,
-    userProfile,
-    apiConfig,
-    addToast,
-    closeApp,
-    openApp,
-    theme: osTheme,
-  } = useOS();
-  const { cfg: musicCfg, profile: neteaseProfile } = useMusic();
-
-  const char = characters.find(c => c.id === activeCharacterId) || null;
-  const charId = activeCharacterId || '';
-  const charName = char?.name || 'TA';
-  const charAvatar = char?.avatar || '';
-
-  // ---- 视图状态 ----
-  const [view, setView] = useState<View>(() => {
-    const openTa = localStorage.getItem('moments_open_ta');
-    if (openTa) {
-      localStorage.removeItem('moments_open_ta');
-      return 'taPage';
-    }
-    return 'main';
-  });
-  const [composeType, setComposeType] = useState<ComposeType>(null);
-  const [showComposeMenu, setShowComposeMenu] = useState(false);
-
-  // ---- 数据 ----
-  const [posts, setPosts] = useState<MomentPost[]>([]);
-  const [settings, setSettings] = useState<MomentSettings | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [generating, setGenerating] = useState(false);
-  const [secretSpaceRefreshing, setSecretSpaceRefreshing] = useState(false);
-  const [secretSpaceEditing, setSecretSpaceEditing] = useState(false);
-  /** 点文章卡片展开详情页时，正在看哪篇（含所属动态 id，null = 没打开）。 */
-  const [readingArticle, setReadingArticle] = useState<{ postId: string; article: MomentArticleCard } | null>(null);
-  const [articleCommentsGenerating, setArticleCommentsGenerating] = useState(false);
-  const [secretSpaceNameDraft, setSecretSpaceNameDraft] = useState('');
-  const [secretSpaceSignatureDraft, setSecretSpaceSignatureDraft] = useState('');
-  const genAbortRef = useRef<AbortController | null>(null);
-
-  // ---- 互动状态 ----
-  const [activeCommentPostId, setActiveCommentPostId] = useState<string | null>(null);
-  const [commentText, setCommentText] = useState('');
-  const [replyTarget, setReplyTarget] = useState<{ id: string; name: string } | null>(null);
-  /** 左滑展开删除按钮的那条评论，key: `${postId}:${commentId}`。同一时间只展开一条。 */
-  const [swipedCommentKey, setSwipedCommentKey] = useState<string | null>(null);
-  /** 图片加载失败（裂图）的位置集合，key: `${postId}:${index}`。命中时中心显示 🔄 重试图标。 */
-  const [brokenImageKeys, setBrokenImageKeys] = useState<Set<string>>(new Set());
-  const [menuPostId, setMenuPostId] = useState<string | null>(null);
-  /** 图裂了点 🔄 重新生成时，标记「哪条动态的第几张图」正在重试，避免重复点击。key: `${postId}:${index}` */
-  const [retryingImageKeys, setRetryingImageKeys] = useState<Set<string>>(new Set());
-
-
-  // ---- 发布状态 ----
-  const [composeText, setComposeText] = useState('');
-  const [composeImages, setComposeImages] = useState<string[]>([]);
-  const [composeMusicName, setComposeMusicName] = useState('');
-  const [composeMusicArtist, setComposeMusicArtist] = useState('');
-  const [composeMusicCover, setComposeMusicCover] = useState('');
-  const [composeMusicSongId, setComposeMusicSongId] = useState<number | null>(null);
-  const [composeMusicLinkInput, setComposeMusicLinkInput] = useState('');
-  const [musicParsing, setMusicParsing] = useState(false);
-  const [musicParseError, setMusicParseError] = useState('');
-  const [composeArticleTitle, setComposeArticleTitle] = useState('');
-  const [composeArticleUrl, setComposeArticleUrl] = useState('');
-  const [composeArticleBody, setComposeArticleBody] = useState('');
-  const [composeArticleImage, setComposeArticleImage] = useState('');
-  const [composeArticleFullText, setComposeArticleFullText] = useState('');
-  const [composeArticleLinkInput, setComposeArticleLinkInput] = useState('');
-  const [articleParsing, setArticleParsing] = useState(false);
-  const [articleParseError, setArticleParseError] = useState('');
-  const [articleParsed, setArticleParsed] = useState(false);
-
-  // ---- 编辑状态 ----
-  const [editingField, setEditingField] = useState<{ postId: string; commentId?: string } | null>(null);
-  const [editText, setEditText] = useState('');
-
-  // ---- 双击编辑（替代长按，避免误触） ----
-  const DOUBLE_TAP_EDIT_DELAY = 300; // ms，两次点击间隔阈值
-  const lastEditTapRef = useRef<{ key: string; time: number } | null>(null);
-  const commentTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const commentInputRef = useRef<HTMLInputElement>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
-
-  // ==================== 数据加载 ====================
-
-  const loadData = useCallback(async () => {
-    if (!charId) return;
-    setLoading(true);
-    try {
-      const [p, s] = await Promise.all([
-        getPostsByCharId(charId),
-        getMomentSettings(charId),
-      ]);
-      setPosts(p);
-      setSettings(s);
-    } catch (e) {
-      console.error('[Moments] loadData failed', e);
-    } finally {
-      setLoading(false);
-    }
-  }, [charId]);
-
-  useEffect(() => { loadData(); }, [loadData]);
-
-  // ==================== AI 生成 TA 动态 ====================
-
+/** AI 返回的一条 TA 的新动态（原始格式） */
+interface AiGeneratedPost {
+  text: string;
+  type?: 'text' | 'image' | 'imageText';
+  /** AI 自选的发布时间，格式 "HH:MM" 或 ISO */
+  postTime?: string;
+  /** 心情/场景标签，可选 */
+  mood?: string;
   /**
-   * 构建可供 TA 分享的候选歌曲池：TA 自己歌单里的歌 + 用户网易云"喜欢的音乐"（如果登录了、
-   * 且这个角色允许读取用户音乐）。失败/没有数据就返回空数组，调用方据此决定 prompt 里
-   * 提不提"分享音乐"这件事。
+   * 可选：这条动态想配一张图时，一句简短的英文图片描述；不想配图就不填。
+   * 是否配图完全由 AI 自己判断（人设/日程/近期聊天语境），前端只按这个字段是否
+   * 存在来决定最终落库的 type，不需要 AI 自己在 text/image/imageText 里三选一。
+   * 只有全局生图 API 已开启时，prompt 里才会教这个字段；否则 AI 不会写它。
    */
-  const buildMusicCandidates = useCallback(async (): Promise<MusicShareCandidate[]> => {
-    const candidates: MusicShareCandidate[] = [];
-    const seenIds = new Set<number>();
+  imagePrompt?: string;
+  /**
+   * 可选：这条动态想分享一首歌时，填候选列表里那首歌的 id；不想分享就不填。
+   * 只能选 prompt 里明确列出的候选（TA 自己歌单 / 用户网易云歌单），不能编造。
+   * 前端会先用 song/url 验证这首歌真的能播放，不能播就退化成不分享音乐。
+   * 类型写成 number | string 是因为有些模型会把数字 id 写成字符串（如 "123"），
+   * 用的地方会用 Number() 统一转换后再比较，这里如实反映运行时可能出现的两种形态。
+   */
+  shareMusicId?: number | string;
+  /**
+   * 可选：想分享一首不在候选列表里的歌（不限于候选池，自由发挥），就填"歌名 - 歌手"
+   * 或纯歌名（比如"晴天 - 周杰伦"）；不想分享就不填。和 shareMusicId 二选一，
+   * 两个都填时优先用 shareMusicId（候选池里的歌更确定）。前端会拿这句话去网易云搜索，
+   * 取第一条匹配结果，再用 song/url 验证能不能播放，搜不到或不能播就退化成不分享音乐。
+   */
+  shareMusicQuery?: string;
+}
 
-    // TA 自己歌单里的歌
-    const taSongs = (char?.musicProfile?.playlists || []).flatMap(pl => pl.songs || []);
-    for (const s of taSongs) {
-      if (seenIds.has(s.id)) continue;
-      seenIds.add(s.id);
-      candidates.push({ id: s.id, name: s.name, artists: s.artists, albumPic: s.albumPic, source: 'ta' });
-    }
+/** AI 返回的对用户某条动态的互动 */
+interface AiInteraction {
+  /** 对应的用户动态 id */
+  postId: string;
+  /** 是否点赞 */
+  like?: boolean;
+  /** 评论内容（空字符串或 null 表示不评论） */
+  comment?: string;
+}
 
-    // 用户网易云"喜欢的音乐"（需要登录 + 这个角色允许读取用户音乐）
-    const canReadUser = char?.musicProfile?.canReadUserMusic ?? true;
-    if (neteaseProfile && canReadUser && musicCfg.cookie) {
+/** AI 返回的、对 TA 自己动态评论区里用户追评的回复 */
+interface AiCommentReply {
+  /** TA 自己那条动态的 id */
+  postId: string;
+  /** 要回复的那条用户评论的 id */
+  replyToCommentId: string;
+  /** 回复内容 */
+  comment: string;
+}
+
+/** AI 返回的完整结构 */
+interface AiMomentsResponse {
+  newPosts: AiGeneratedPost[];
+  interactions: AiInteraction[];
+  commentReplies?: AiCommentReply[];
+  /** 想置顶/继续置顶的动态 id 列表；不写代表置顶现状不变。只在完整模式（非暂停营业）下可用。 */
+  pinnedPostIds?: string[];
+}
+
+/** 可供 TA 分享的候选歌曲（精简结构，来源可能是 TA 自己歌单或用户网易云歌单） */
+export interface MusicShareCandidate {
+  id: number;
+  name: string;
+  artists: string;
+  albumPic: string;
+  /** 'ta' = 来自 TA 自己的歌单；'user' = 来自用户的网易云歌单 */
+  source: 'ta' | 'user';
+}
+
+/** generateMoments 的入参 */
+export interface GenerateMomentsInput {
+  char: CharacterProfile;
+  userProfile: UserProfile;
+  apiConfig: APIConfig;
+  settings: MomentSettings;
+  /** 当前已有的全部动态（用于去重 + 提供用户动态给 AI 互动） */
+  existingPosts: MomentPost[];
+  /**
+   * 可供 TA 分享音乐的候选池（TA 自己歌单 + 用户网易云歌单，已在调用方去重合并）。
+   * 传了才会在 prompt 里教 AI"任务 5：分享音乐"；不传/空数组则完全不提这件事。
+   */
+  musicCandidates?: MusicShareCandidate[];
+  /** 网易云代理配置，音乐候选有值时用来验证 AI 选中的歌是否真能播放（song/url）。 */
+  musicCfg?: MusicCfg;
+  /**
+   * "暂停营业"模式下为 true：只做任务 1（发新动态），跳过任务 2（点赞/评论用户动态）
+   * 和任务 3（回复自己动态下的追评）——因为这个状态代表"联系不上 TA"，TA 不会看用户的朋友圈。
+   */
+  skipInteractions?: boolean;
+  /** 可选：外部传入的 AbortSignal */
+  signal?: AbortSignal;
+}
+
+/** generateMoments 的返回 */
+export interface GenerateMomentsResult {
+  /** TA 的新动态（已构造为 MomentPost，可直接 savePost） */
+  newPosts: MomentPost[];
+  /** 被 AI 互动过的用户动态（已更新 likes/comments，可直接 savePost） */
+  updatedUserPosts: MomentPost[];
+  /** TA 自己的动态里被追加了「回复用户追评」的那些（已更新 comments，可直接 savePost） */
+  updatedTaPosts: MomentPost[];
+}
+
+// ==================== Prompt 构建 ====================
+
+/**
+ * 收集近期聊天摘要（最近 15 条有语义价值的消息）
+ */
+async function getRecentChatSummary(
+  charId: string,
+  charName: string,
+  userName: string,
+): Promise<string> {
+  try {
+    const messages = await DB.getRecentMessagesByCharId(charId, 40, true);
+    // 过滤出有内容的文本消息
+    const meaningful = messages.filter(m =>
+      m.type === 'text' && m.content?.trim() && !m.groupId
+    ).slice(-15);
+    if (meaningful.length === 0) return '(暂无近期聊天记录)';
+    return meaningful
+      .map(m => formatMessageForPrompt(m, charName, userName).slice(0, 300))
+      .join('\n');
+  } catch {
+    return '(聊天记录读取失败)';
+  }
+}
+
+/**
+ * 获取今日日程文本
+ */
+async function getTodayScheduleText(char: CharacterProfile): Promise<string> {
+  try {
+    const today = new Date();
+    const dateKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    const schedule = await DB.getDailySchedule(char.id, dateKey);
+    if (!schedule || !schedule.slots?.length) return '(今天没有生成日程)';
+    const injection = buildScheduleInjection(schedule as RenderableSchedule);
+    if (injection.trim()) return injection;
+    // fallback：直接列出 slots
+    return schedule.slots
+      .map(s => `${s.startTime} ${s.activity}${s.location ? `（${s.location}）` : ''}`)
+      .join('\n');
+  } catch {
+    return '(日程读取失败)';
+  }
+}
+
+/**
+ * 给用户最近的动态（最多 5 条）里没识别过的图片补齐识图描述，写回 imageDescriptions
+ * 缓存字段（跟 images 同索引位）。识图 API 没开就直接跳过，不报错、不影响主流程——
+ * 图片这时候退回 formatUserPosts 里"图片 X 张"的数字提示。
+ *
+ * 返回值：被更新过 imageDescriptions 的动态列表（用于调用方落库缓存，避免下次重复识别）。
+ */
+async function describeUserPostImages(
+  posts: MomentPost[],
+  visionApiConfig?: import('../types').VisionApiConfig,
+): Promise<MomentPost[]> {
+  if (!isVisionApiReady(visionApiConfig)) return [];
+
+  const userPosts = posts.filter(p => p.author === 'user').slice(0, 5);
+  const updated: MomentPost[] = [];
+
+  for (const post of userPosts) {
+    if (!post.images || post.images.length === 0) continue;
+    const alreadyDescribed = post.images.every((_, i) => !!post.imageDescriptions?.[i]?.trim());
+    if (alreadyDescribed) continue;
+
+    const descriptions: string[] = [...(post.imageDescriptions || [])];
+    let changed = false;
+    // 串行识别：图片一般不多（朋友圈单条最多 9 张），并发对识图 API 的压力没必要；
+    // 失败的那一张留空，不拖累其他张也不影响这条动态本身正常参与互动。
+    for (let i = 0; i < post.images.length; i++) {
+      if (descriptions[i]?.trim()) continue;
       try {
-        const likeRes = await musicApi.call(musicCfg, 'likelist', {});
-        const likedIds: number[] = (likeRes?.ids || likeRes?.data?.ids || []).slice(0, 8);
-        if (likedIds.length > 0) {
-          const detail = await musicApi.call(musicCfg, 'song/detail', { ids: likedIds });
-          for (const song of (detail?.songs || [])) {
-            if (seenIds.has(song.id)) continue;
-            seenIds.add(song.id);
-            const artists = (song.ar || song.artists || []).map((a: any) => a.name).filter(Boolean).join(' / ');
-            candidates.push({
-              id: song.id,
-              name: song.name || '',
-              artists: artists || '未知歌手',
-              albumPic: toHttps(song.al?.picUrl || song.album?.picUrl || ''),
-              source: 'user',
-            });
-          }
-        }
-      } catch (e) {
-        console.warn('[Moments] 读取用户网易云喜欢列表失败，跳过（不影响其他功能）:', e);
-      }
-    }
-
-    return candidates;
-  }, [char, neteaseProfile, musicCfg]);
-
-  const handleGenerate = useCallback(async (manual = false) => {
-    if (!char || !settings || !apiConfig.apiKey || !apiConfig.baseUrl) {
-      if (manual) addToast('请先配置 API', 'info');
-      return;
-    }
-    const isPaused = settings.updateFrequency === 'paused';
-    // 暂停营业下，手动点🔄是"翻出历史动态"，不受正常更新的冷却限制；只挡自动触发和并发点击。
-    if (!isPaused && !canGenerate(settings)) {
-      if (manual) addToast('刷新太频繁了，稍后再试', 'info');
-      return;
-    }
-    if (isPaused && !manual) return; // 暂停营业下，自动触发（打开App/查手机跳转）完全不生成
-    if (generating) return;
-
-    // 取消上一次未完成的请求
-    genAbortRef.current?.abort();
-    const ac = new AbortController();
-    genAbortRef.current = ac;
-
-    setGenerating(true);
-
-    // 暂停营业 + 手动点击：走独立的"历史动态生成"，同时进 TA 常规列表和🌼秘密空间归档。
-    if (isPaused) {
-      try {
-        const post = await generateSecretMemory({
-          char, userProfile, apiConfig, settings,
-          existingPosts: posts,
-          signal: ac.signal,
-        });
-        if (ac.signal.aborted) return;
-        await savePost(post);
-        setPosts(prev => [post, ...prev]);
-        addToast(`翻到了 ${charName} 更早以前的一条动态`, 'success');
+        descriptions[i] = await describeImageWithVisionApi(post.images[i], visionApiConfig!);
+        changed = true;
       } catch (e: any) {
-        if (ac.signal.aborted) return;
-        console.error('[Moments] generateSecretMemory failed', e);
-        addToast(`生成失败: ${e.message?.slice(0, 60) || '未知错误'}`, 'error');
-      } finally {
-        if (!ac.signal.aborted) setGenerating(false);
+        console.warn('[Moments] 识别用户动态图片失败，跳过这一张:', post.id, i, e?.message || String(e));
       }
-      return;
     }
-
-    try {
-      const musicCandidates = await buildMusicCandidates();
-      console.info('[Moments] 本次可分享的候选歌曲池:', musicCandidates.map(c => `${c.name}(${c.source})`));
-      const result = await generateMoments({
-        char,
-        userProfile,
-        apiConfig,
-        settings,
-        existingPosts: posts,
-        musicCandidates,
-        musicCfg,
-        skipInteractions: false,
-        signal: ac.signal,
-      });
-
-      if (ac.signal.aborted) return;
-
-      // 写入 IndexedDB
-      for (const post of result.newPosts) {
-        await savePost(post);
-      }
-      for (const updated of result.updatedUserPosts) {
-        await savePost(updated);
-      }
-      for (const updated of result.updatedTaPosts) {
-        await savePost(updated);
-      }
-
-      // 更新冷却时间戳
-      const updatedSettings = { ...settings, lastGeneratedAt: Date.now() };
-      await saveMomentSettings(updatedSettings);
-      setSettings(updatedSettings);
-
-      // 合并到 state 并排序
-      setPosts(prev => {
-        const existingIds = new Set(prev.map(p => p.id));
-        // 更新被互动过的 user posts + 被追加回复的 TA posts
-        let merged = prev.map(p => {
-          const updatedUser = result.updatedUserPosts.find(u => u.id === p.id);
-          if (updatedUser) return updatedUser;
-          const updatedTa = result.updatedTaPosts.find(u => u.id === p.id);
-          if (updatedTa) return updatedTa;
-          return p;
-        });
-        // 添加 TA 的新动态
-        const brandNew = result.newPosts.filter(p => !existingIds.has(p.id));
-        merged = [...brandNew, ...merged];
-        // 排序：置顶优先，时间倒序
-        merged.sort((a, b) => {
-          if (a.pinned && !b.pinned) return -1;
-          if (!a.pinned && b.pinned) return 1;
-          return b.createdAt - a.createdAt;
-        });
-        return merged;
-      });
-
-      if (result.newPosts.length > 0 || result.updatedUserPosts.length > 0 || result.updatedTaPosts.length > 0) {
-        const parts: string[] = [];
-        if (result.newPosts.length > 0) parts.push(`发了 ${result.newPosts.length} 条动态`);
-        if (result.updatedUserPosts.length > 0) parts.push('互动了你的朋友圈');
-        if (result.updatedTaPosts.length > 0) parts.push('回复了评论');
-        addToast(`${char.name} ${parts.join('，')}`, 'success');
-      }
-    } catch (e: any) {
-      if (ac.signal.aborted) return;
-      console.error('[Moments] generateMoments failed', e);
-      if (manual) addToast(`生成失败: ${e.message?.slice(0, 60) || '未知错误'}`, 'error');
-    } finally {
-      if (!ac.signal.aborted) setGenerating(false);
+    if (changed) {
+      updated.push({ ...post, imageDescriptions: descriptions, updatedAt: Date.now() });
     }
-  }, [char, charName, settings, apiConfig, userProfile, posts, generating, addToast, buildMusicCandidates]);
+  }
 
-  // "换个心情"：只重新生成秘密空间的背景/名字/签名，不动下面的历史动态列表。
-  const handleRefreshSecretSpace = useCallback(async () => {
-    if (!char || !settings || !apiConfig.apiKey || !apiConfig.baseUrl) {
-      addToast('请先配置 API', 'info');
-      return;
-    }
-    if (secretSpaceRefreshing) return;
-    setSecretSpaceRefreshing(true);
-    try {
-      const identity = await generateSecretSpaceIdentity(char, userProfile, apiConfig);
-      const updated: MomentSettings = {
-        ...settings,
-        secretSpaceName: identity.name,
-        secretSpaceSignature: identity.signature,
-        secretSpaceCoverImage: identity.coverImage || settings.secretSpaceCoverImage,
-      };
-      await saveMomentSettings(updated);
-      setSettings(updated);
-      addToast('心情换好了', 'success');
-    } catch (e: any) {
-      addToast(`换心情失败: ${e.message?.slice(0, 60) || '未知错误'}`, 'error');
-    } finally {
-      setSecretSpaceRefreshing(false);
-    }
-  }, [char, settings, apiConfig, userProfile, secretSpaceRefreshing, addToast]);
+  return updated;
+}
 
-  // 打开 App 时自动触发一次 AI 生成
-  const autoGenTriggered = useRef(false);
-  useEffect(() => {
-    if (!loading && settings && !autoGenTriggered.current && apiConfig.apiKey) {
-      autoGenTriggered.current = true;
-      handleGenerate(false);
-    }
-  }, [loading, settings, apiConfig.apiKey]); // handleGenerate 故意不加入依赖，只触发一次
+/**
+ * 格式化用户最近的朋友圈动态（供 AI 参考和互动）。
+ * imageDescriptionOverrides：这一轮刚识别出来、还没真正落库的图片描述（key: postId，
+ * value: 跟 images 同索引位的描述数组）——优先用这份，没有才退回 post.imageDescriptions
+ * 里已经缓存好的旧结果。
+ */
+function formatUserPosts(
+  posts: MomentPost[],
+  imageDescriptionOverrides?: Map<string, string[]>,
+): string {
+  const userPosts = posts
+    .filter(p => p.author === 'user')
+    .slice(0, 5); // 最多 5 条
 
-  // 卸载时取消进行中的请求
-  useEffect(() => {
-    return () => { genAbortRef.current?.abort(); };
-  }, []);
+  if (userPosts.length === 0) return '(用户还没有发过朋友圈)';
 
-  // ==================== 发布逻辑 ====================
+  return userPosts.map(p => {
+    const time = new Date(p.createdAt);
+    const timeStr = `${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}`;
+    const alreadyLiked = p.likes.includes(p.charId);
+    const alreadyCommented = p.comments.some(c => c.author !== 'user');
+    const descriptions = imageDescriptionOverrides?.get(p.id) || p.imageDescriptions;
 
-  const handlePublish = useCallback(async () => {
-    if (!charId || !composeType) return;
-
-    const post: MomentPost = {
-      id: createPostId(),
-      charId,
-      author: 'user',
-      authorName: userProfile.name || '我',
-      authorAvatar: userProfile.perCharAvatars?.[charId] || userProfile.avatar,
-      type: composeType,
-      text: composeText.trim() || undefined,
-      images: composeImages.length > 0 ? composeImages : undefined,
-      music: composeType === 'music' ? {
-        songId: composeMusicSongId ?? undefined,
-        songName: composeMusicName,
-        artists: composeMusicArtist,
-        albumPic: composeMusicCover,
-      } : undefined,
-      article: composeType === 'article' ? {
-        title: composeArticleTitle,
-        url: composeArticleUrl || undefined,
-        body: composeArticleBody || undefined,
-        image: composeArticleImage || undefined,
-        fullText: composeArticleFullText || undefined,
-      } : undefined,
-      likes: [],
-      likeNames: [],
-      comments: [],
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
+    const formatImages = (): string => {
+      if (!p.images || p.images.length === 0) return '';
+      if (!descriptions || descriptions.length === 0) return `\n  [图片 ${p.images.length} 张，暂无法查看内容]`;
+      return p.images.map((_, i) => descriptions[i]?.trim()
+        ? `\n  [图 ${i + 1}] ${descriptions[i].trim().slice(0, 200)}`
+        : `\n  [图 ${i + 1}] （识别失败，看不清）`
+      ).join('');
     };
 
-    await savePost(post);
-    setPosts(prev => [post, ...prev]);
+    let desc = `[id=${p.id}] ${timeStr} `;
+    switch (p.type) {
+      case 'text':
+        desc += `文字: "${(p.text || '').slice(0, 100)}"`;
+        break;
+      case 'image':
+        desc += `发了图片：${formatImages()}`;
+        break;
+      case 'imageText':
+        desc += `图文: "${(p.text || '').slice(0, 80)}"${formatImages()}`;
+        break;
+      case 'music':
+        desc += `分享音乐:《${p.music?.songName || '未知'}》— ${p.music?.artists || '未知歌手'}`;
+        if (p.text?.trim()) desc += `，配文: "${p.text.trim().slice(0, 60)}"`;
+        break;
+      case 'article':
+        desc += `分享文章:《${p.article?.title || '未知'}》`;
+        if (p.article?.body?.trim()) desc += `\n  摘要: ${p.article.body.trim().slice(0, 150)}`;
+        if (p.text?.trim()) desc += `\n  配文: "${p.text.trim().slice(0, 60)}"`;
+        break;
+    }
+    if (alreadyLiked) desc += ' (你已点赞)';
+    if (alreadyCommented) desc += ' (你已评论)';
+    return desc;
+  }).join('\n');
+}
 
-    // 重置
-    setComposeText('');
-    setComposeImages([]);
-    setComposeMusicName('');
-    setComposeMusicArtist('');
-    setComposeMusicCover('');
-    setComposeMusicSongId(null);
-    setComposeMusicLinkInput('');
-    setMusicParseError('');
-    setComposeArticleTitle('');
-    setComposeArticleUrl('');
-    setComposeArticleBody('');
-    setComposeArticleImage('');
-    setComposeArticleFullText('');
-    setComposeArticleLinkInput('');
-    setArticleParsed(false);
-    setArticleParseError('');
-    setComposeType(null);
-    setView('main');
-    addToast('已发布', 'success');
-  }, [charId, composeType, composeText, composeImages, composeMusicName, composeMusicArtist, composeMusicCover, composeArticleTitle, composeArticleUrl, composeArticleBody, composeArticleImage, composeArticleFullText, userProfile, addToast]);
+/**
+ * 格式化 TA 最近发过的动态（防止重复）
+ */
+function formatTaRecentPosts(posts: MomentPost[], charId: string): string {
+  const taPosts = posts
+    .filter(p => p.author === charId)
+    .slice(0, 5);
+  if (taPosts.length === 0) return '(还没发过朋友圈)';
+  return taPosts.map(p => {
+    const time = new Date(p.createdAt);
+    const timeStr = `${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}`;
+    const pinnedTag = p.pinned ? ' (已置顶)' : '';
+    return `[id=${p.id}] ${timeStr} "${(p.text || '').slice(0, 80)}"${pinnedTag}`;
+  }).join('\n');
+}
 
-  // ==================== 图片上传 ====================
+/**
+ * 扫描出「TA 自己发的动态里，评论区最后一条是用户发的」这些——也就是轮到 TA 接话的动态。
+ * 只看最后一条评论的作者：如果最后一条已经是 TA 自己回的，说明这一串对话已经回复完了，
+ * 不需要再扫到它，避免同一条动态被反复追问。
+ */
+function findPendingReplies(posts: MomentPost[], charId: string): MomentPost[] {
+  return posts.filter(p => {
+    if (p.author !== charId) return false;
+    if (p.comments.length === 0) return false;
+    const last = [...p.comments].sort((a, b) => a.createdAt - b.createdAt)[p.comments.length - 1];
+    return last.author === 'user';
+  });
+}
 
-  const handleImageUpload = useCallback(() => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'image/*';
-    input.multiple = true;
-    input.onchange = async () => {
-      const files = Array.from(input.files || []);
-      const results: string[] = [];
-      for (const file of files.slice(0, 9)) {
-        const reader = new FileReader();
-        const dataUrl = await new Promise<string>((res) => {
-          reader.onload = () => res(reader.result as string);
-          reader.readAsDataURL(file);
-        });
-        results.push(dataUrl);
-      }
-      setComposeImages(prev => [...prev, ...results].slice(0, 9));
-    };
-    input.click();
-  }, []);
+/**
+ * 格式化「待回复列表」喂给 prompt：每条动态本身的内容 + 完整评论串（谁说了什么，按时间顺序），
+ * 让 AI 能看懂这段对话聊到哪、该接谁的话。
+ */
+function formatPendingReplies(pendingPosts: MomentPost[], charName: string): string {
+  if (pendingPosts.length === 0) return '(没有需要你回复的评论)';
+  return pendingPosts.map(p => {
+    const sortedComments = [...p.comments].sort((a, b) => a.createdAt - b.createdAt);
+    const commentsText = sortedComments.map(c => {
+      const speaker = c.author === 'user' ? '用户' : charName;
+      const replyPart = c.replyToName ? `回复${c.replyToName}` : '';
+      return `  [commentId=${c.id}] ${speaker}${replyPart}: "${c.content}"`;
+    }).join('\n');
+    return `[postId=${p.id}] 你发的动态: "${(p.text || '').slice(0, 60)}"\n${commentsText}`;
+  }).join('\n\n');
+}
 
-  /** 文章发布表单里"图片（可选）"的单图上传，不走链接识别，纯本地图片。 */
-  const handleArticleImageUpload = useCallback(() => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'image/*';
-    input.onchange = async () => {
-      const file = input.files?.[0];
-      if (!file) return;
-      const reader = new FileReader();
-      const dataUrl = await new Promise<string>((res) => {
-        reader.onload = () => res(reader.result as string);
-        reader.readAsDataURL(file);
-      });
-      setComposeArticleImage(dataUrl);
-    };
-    input.click();
-  }, []);
+/**
+ * 格式化「可分享的候选歌曲」列表：只报 id/歌名/歌手/来源，不让 AI 编造歌单里没有的歌。
+ * 最多各取 8 首（TA 自己的 + 用户的），避免 prompt 太长。
+ */
+function formatMusicCandidates(candidates: MusicShareCandidate[]): string {
+  if (candidates.length === 0) return '(没有可分享的歌)';
+  const taSongs = candidates.filter(c => c.source === 'ta').slice(0, 8);
+  const userSongs = candidates.filter(c => c.source === 'user').slice(0, 8);
+  const lines: string[] = [];
+  if (taSongs.length > 0) {
+    lines.push('你自己歌单里的歌：');
+    lines.push(...taSongs.map(s => `  [id=${s.id}] ${s.name} - ${s.artists}`));
+  }
+  if (userSongs.length > 0) {
+    lines.push('用户网易云歌单里的歌（你能看到，因为对方允许你读取）：');
+    lines.push(...userSongs.map(s => `  [id=${s.id}] ${s.name} - ${s.artists}`));
+  }
+  return lines.join('\n');
+}
 
-  // ==================== 分享音乐：粘贴网易云链接自动识别 ====================
+/**
+ * 组装完整的 system prompt
+ */
+function buildMomentsPrompt(
+  char: CharacterProfile,
+  userProfile: UserProfile,
+  settings: MomentSettings,
+  scheduleText: string,
+  chatSummary: string,
+  userPostsText: string,
+  taRecentText: string,
+  pendingRepliesText: string,
+  musicCandidatesText: string,
+  hasMusicCandidates: boolean,
+  musicSearchAvailable: boolean,
+  maxPosts: number,
+  imageGenAvailable: boolean,
+  skipInteractions: boolean,
+): string {
+  // 角色核心人设
+  const coreContext = ContextBuilder.buildCoreContext(char, userProfile, false, undefined, {
+    skipUserProfile: true,
+    headerOverride: '[角色档案]',
+  });
 
-  /** 从网易云链接（长链接或 163cn.tv 短链展开后）里提取 songId。 */
-  const extractNeteaseSongId = (url: string): number | null => {
-    const match = /[?&#]id=(\d+)/.exec(url) || /\/song\/(\d+)/.exec(url);
-    return match ? Number(match[1]) : null;
+  const now = new Date();
+  const currentTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  const currentDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+  const contextSections = skipInteractions ? '' : `
+【用户最近发的朋友圈】
+${userPostsText}
+
+【你最近发的朋友圈（不要重复类似内容）】
+${taRecentText}
+
+【你自己动态下面，用户刚追评、还等你回话的】
+${pendingRepliesText}
+${hasMusicCandidates ? `
+【可以分享的歌（只能从这里面选，不能编造）】
+${musicCandidatesText}
+` : ''}`;
+
+  const musicHintParts: string[] = [];
+  if (!skipInteractions && hasMusicCandidates) {
+    musicHintParts.push(
+      `想分享上面歌曲列表里的歌，就加 "shareMusicId" 字段，填对应的 id（纯数字，不要加引号，比如 2158159412）`,
+    );
+  }
+  if (!skipInteractions && musicSearchAvailable) {
+    musicHintParts.push(
+      `想分享一首不在列表里的歌（比如聊天里刚提到的、你自己想到的），就加 "shareMusicQuery" 字段，`
+      + `填"歌名"或"歌名 - 歌手"（比如 "晴天 - 周杰伦"），前端会去搜这首歌`,
+    );
+  }
+  const musicTaskHint = musicHintParts.length > 0 ? `
+   - 这条动态也可以是分享一首歌：${musicHintParts.join('；或者')}；
+     不想分享音乐就都不要写（分享音乐这条通常不需要再配图或写很长的文字，写不写 text 都行）
+     两个字段最多写一个，都写了以 shareMusicId 为准` : '';
+
+  const tasksSection = skipInteractions
+    ? `现在你只需要做一件事：
+
+1. 发 1 到 ${maxPosts} 条朋友圈动态
+   - 内容要符合你的人设、当前时间和日程
+   - postTime 填你"发"这条的时间（必须是今天且早于 ${currentTime}），格式 "HH:MM"
+   - 文字风格要像真人发朋友圈：简短、口语化、可以带 emoji、不要太正式
+   - 可以分享日常、感想、吐槽、自拍描述、转发感悟等${imageGenAvailable ? `
+   - 这条动态要不要配图，由你自己判断：想配图就在这条里加一个 "imagePrompt" 字段，
+     写一句简短的英文图片描述（场景/动作/穿着等细节）；不想配图就不要写这个字段` : ''}`
+    : `现在你要做三件事：
+
+1. 发 1 到 ${maxPosts} 条朋友圈动态
+   - 内容要符合你的人设、当前时间和日程
+   - postTime 填你"发"这条的时间（必须是今天且早于 ${currentTime}），格式 "HH:MM"
+   - 不要和你之前发过的动态内容重复
+   - 文字风格要像真人发朋友圈：简短、口语化、可以带 emoji、不要太正式
+   - 可以分享日常、感想、吐槽、自拍描述、转发感悟等${imageGenAvailable ? `
+   - 这条动态要不要配图，由你自己判断（结合人设/日程/最近聊天语境，不是每条都要配）：想配图就在这条里加一个
+     "imagePrompt" 字段，写一句简短的英文图片描述（场景/动作/穿着等细节）；不想配图就不要写这个字段` : ''}${musicTaskHint}
+
+2. 看用户的朋友圈，像刷到朋友的动态一样，决定是否点赞/评论
+   - 对标了"(你已点赞)"或"(你已评论)"的动态不要重复互动
+   - 不是每条都要互动，根据内容和你的性格决定；真人也不会条条都评论
+   - 评论要基于这条动态的具体内容，不要写成一句放在哪条动态下面都成立的空泛客套话
+   - 不同内容类型，反应方式不一样：
+     · 发了图片/图文的：图片后面 [图 N] 是这张图实际拍到了什么，当真看懂了再接话——
+       可以调侃画面里的细节、问一句相关的话、或者单纯说说这张图给你的感觉，别提"图片"这个词本身
+       （真人不会说"我看到你发的图片里有..."，而是直接聊图里的东西，像亲眼看见一样自然）
+     · 分享文章的：如果给了摘要，说明你真的看了内容再评论——针对文章讲了什么发表一两句真实感想
+       或者提个问题，而不是"这篇文章不错"这种没读过也能说的话；没给摘要就别装作看过全文
+     · 分享音乐的：可以联想这首歌的氛围、歌词大意、或者这首歌让你想起什么，
+       不确定的信息不要瞎编（比如没听过就别说"这段歌词太戳了"）
+   - 评论要简短自然、符合你和用户的关系，别写成小作文
+
+3. 看"用户刚追评、还等你回话的"这部分，逐条决定要不要接话
+   - 每条动态下面列出的评论是完整对话串（谁在什么时候说了什么），最后一条一定是用户发的
+   - 你可以回复也可以不回复（觉得没必要接就跳过），符合你的性格和当下语境即可
+   - 如果要回复，commentReplies 里加一项：postId 填对应动态的 id，replyToCommentId 填你要回复的
+     那条用户评论的 commentId（通常是列表里最后一条，除非你想回应更早的某句话），comment 填回复内容
+   - 回复要像真人聊天接话，别写成一段客套的官方回应
+
+4. 看"你最近发的朋友圈"列表，判断自己有没有想置顶的
+   - 通常是对你来说意义特别、值得放在最上面的一条（大部分时候不需要置顶任何东西）
+   - 如果想置顶，pinnedPostIds 填你想置顶的动态 id（可以是新的，也可以是标了"(已置顶)"、你想继续保留的）
+   - 不写这个字段，或者不把某条"(已置顶)"的 id 写进去，就代表它不再置顶
+   - 完全不需要变动现状（不新增也不取消）就整个不写这个字段`;
+
+  const jsonFormat = skipInteractions
+    ? `{
+  "newPosts": [
+    {
+      "text": "朋友圈文字内容",
+      "postTime": "HH:MM"${imageGenAvailable ? `,
+      "imagePrompt": "可选：想配图就写一句简短的英文图片描述；不配图就不要写这个字段"` : ''}
+    }
+  ]
+}`
+    : `{
+  "newPosts": [
+    {
+      "text": "朋友圈文字内容",
+      "postTime": "HH:MM"${imageGenAvailable ? `,
+      "imagePrompt": "可选：想配图就写一句简短的英文图片描述；不配图就不要写这个字段"` : ''}${hasMusicCandidates ? `,
+      "shareMusicId": 2158159412` : ''}${musicSearchAvailable ? `,
+      "shareMusicQuery": "可选：想分享列表之外的歌，就填歌名或「歌名 - 歌手」；不分享就不要写"` : ''}
+    }
+  ],
+  "interactions": [
+    {
+      "postId": "用户动态的 id",
+      "like": true,
+      "comment": "评论内容或 null"
+    }
+  ],
+  "commentReplies": [
+    {
+      "postId": "你自己动态的 id（来自「用户刚追评」列表）",
+      "replyToCommentId": "要回复的那条用户评论的 commentId",
+      "comment": "回复内容"
+    }
+  ],
+  "pinnedPostIds": ["想置顶/继续置顶的动态 id，完全不写这个字段代表现状不变"]
+}`;
+
+  return `你是「${char.name}」，正在发朋友圈${skipInteractions ? '' : '和浏览朋友圈'}。
+
+${coreContext}
+
+【你和用户的关系】
+用户名: ${userProfile.name || '用户'}
+${userProfile.bio ? `用户简介: ${userProfile.bio}` : ''}
+
+【当前时间】${currentDate} ${currentTime}
+
+【你今天的日程】
+${scheduleText}
+
+【你和用户的近期聊天片段】
+${chatSummary}
+${contextSections}
+===
+
+${tasksSection}
+
+请严格按以下 JSON 格式返回，不要附加任何其他文字：
+
+${jsonFormat}`;
+}
+
+// ==================== API 调用 ====================
+
+/**
+ * 核心函数：生成 TA 的朋友圈动态 + 对用户动态的互动
+ */
+export async function generateMoments(input: GenerateMomentsInput): Promise<GenerateMomentsResult> {
+  const { char, userProfile, apiConfig, settings, existingPosts, musicCandidates, musicCfg, skipInteractions, signal } = input;
+  const charId = char.id;
+  const charName = char.name;
+  const userName = userProfile.name || '用户';
+  const maxPosts = settings.taPostFrequency || 3;
+  const hasMusicCandidates = !skipInteractions && !!musicCandidates && musicCandidates.length > 0;
+  // 自由搜歌不依赖候选池，只要有网易云代理配置就能搜——resolveMusicWorkerUrl 会在没配置时
+  // 自动 fallback 到公共代理地址，所以传了 musicCfg 基本等于"随时可用"。
+  const musicSearchAvailable = !skipInteractions && !!musicCfg;
+
+  // 1. 收集上下文（暂停营业模式跳过用户动态/待回复相关的收集，反正 prompt 不会用到）
+  const [chatSummary, scheduleText] = await Promise.all([
+    getRecentChatSummary(charId, charName, userName),
+    getTodayScheduleText(char),
+  ]);
+
+  // 1.5 给用户最近动态里没识别过的图片补齐识图描述（供 TA 像真人一样"看懂"再评论）。
+  // 识图 API 没开就静默跳过，不影响主流程；识别出来的这批用来更新 formatUserPosts 的文本，
+  // 也会在最后合并进 updatedUserPosts 让调用方落库缓存，下次不用重新识别。
+  const imageDescribedPosts = skipInteractions ? [] : await describeUserPostImages(existingPosts, apiConfig.visionApi);
+  const imageDescriptionOverrides = new Map<string, string[]>();
+  for (const p of imageDescribedPosts) {
+    if (p.imageDescriptions) imageDescriptionOverrides.set(p.id, p.imageDescriptions);
+  }
+
+  const userPostsText = skipInteractions ? '' : formatUserPosts(existingPosts, imageDescriptionOverrides);
+  const taRecentText = formatTaRecentPosts(existingPosts, charId);
+  const pendingReplyPosts = skipInteractions ? [] : findPendingReplies(existingPosts, charId);
+  const pendingRepliesText = skipInteractions ? '' : formatPendingReplies(pendingReplyPosts, charName);
+  const musicCandidatesText = hasMusicCandidates ? formatMusicCandidates(musicCandidates!) : '';
+
+  // 2. 构建 prompt
+  const imageGenAvailable = isImageGenApiReady(apiConfig.imageGenApi);
+  const systemPrompt = buildMomentsPrompt(
+    char, userProfile, settings,
+    scheduleText, chatSummary, userPostsText, taRecentText, pendingRepliesText,
+    musicCandidatesText, hasMusicCandidates, musicSearchAvailable,
+    maxPosts, imageGenAvailable, !!skipInteractions,
+  );
+
+  // 3. 调用 API
+  const url = `${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+  const body = {
+    model: apiConfig.model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: skipInteractions ? '请根据当前时间和日程，发你的朋友圈。只返回 JSON。' : '请根据当前时间和日程，发你的朋友圈，并看看我发的朋友圈。只返回 JSON。' },
+    ],
+    temperature: 0.85,
+    max_tokens: 2600,
   };
 
-  /**
-   * 粘贴框里的文本一旦看起来像网易云链接就自动识别：短链先展开，提取 songId 后
-   * 调用网易云代理的 song/detail（和网易云音乐 App 走同一个 worker + cfg），
-   * 拿真实歌名/歌手/封面，而不是把链接本身当封面 URL 硬塞进 <img>。
-   */
-  const handleMusicCoverInputChange = useCallback(async (rawInput: string) => {
-    setMusicParseError('');
-    const trimmed = rawInput.trim();
-    if (!trimmed) { setComposeMusicSongId(null); return; }
+  const data = await safeFetchJson(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiConfig.apiKey}`,
+    },
+    body: JSON.stringify(body),
+    signal,
+  } as RequestInit, 1, 30_000, {
+    appId: 'moments',
+    appName: '朋友圈',
+    purpose: '生成 TA 的动态',
+  });
 
-    // 不像链接（不含 http 也不含常见网易云域名关键字）就当成普通 URL 输入，不触发识别。
-    const looksLikeLink = /^https?:\/\//i.test(trimmed) || /music\.163\.com|163cn\.tv/i.test(trimmed);
-    if (!looksLikeLink) { setComposeMusicSongId(null); return; }
+  // 4. 解析返回
+  const content = data?.choices?.[0]?.message?.content || '';
+  const parsed = extractJson(content) as AiMomentsResponse | null;
+  if (!parsed) {
+    console.warn('[Moments] JSON 解析失败，原始返回内容:', content);
+    throw new Error('AI 返回的内容无法解析为 JSON');
+  }
+  // 诊断日志：一眼看出这一轮 AI 到底给没给 imagePrompt/分享意图，不用等配图失败才排查。
+  console.info(
+    '[Moments] AI 返回的 newPosts 原始内容:',
+    (parsed.newPosts || []).map(p => ({
+      text: p.text?.slice(0, 30), imagePrompt: p.imagePrompt,
+      shareMusicId: p.shareMusicId, shareMusicQuery: p.shareMusicQuery,
+    })),
+  );
 
-    setMusicParsing(true);
-    try {
-      let resolvedUrl = trimmed;
-      // 163cn.tv 等短链不含 songId，需要先跟随重定向展开成真实长链接。
-      if (/163cn\.tv/i.test(trimmed) && !/music\.163\.com/i.test(trimmed)) {
-        resolvedUrl = await expandShortUrl(trimmed);
-      }
-      const songId = extractNeteaseSongId(resolvedUrl);
-      if (!songId) {
-        setMusicParseError('没能从链接里识别出歌曲，换个链接试试，或者手动填歌名/歌手');
-        setComposeMusicSongId(null);
+  // 5. 构造 MomentPost[]
+  const now = new Date();
+  const newPosts: MomentPost[] = (
+    await Promise.all(
+      (parsed.newPosts || [])
+        .filter(p => p.text?.trim() || p.shareMusicId != null || p.shareMusicQuery?.trim())
+        .slice(0, maxPosts)
+        .map(async (p) => {
+          // 解析 postTime → 时间戳
+          let timestamp = now.getTime() - Math.floor(Math.random() * 3600_000); // 默认：过去 1 小时内
+          if (p.postTime && /^\d{1,2}:\d{2}$/.test(p.postTime)) {
+            const [h, m] = p.postTime.split(':').map(Number);
+            const d = new Date(now);
+            d.setHours(h, m, Math.floor(Math.random() * 60), 0);
+            // 确保在过去
+            if (d.getTime() > now.getTime()) {
+              d.setTime(now.getTime() - Math.floor(Math.random() * 600_000));
+            }
+            timestamp = d.getTime();
+          }
+
+          const imagePrompt = imageGenAvailable ? p.imagePrompt?.trim() : undefined;
+
+          // 音乐分享，两种来源二选一（shareMusicId 优先）：
+          // A) 候选池里的确定歌——只认真实存在的 id（防止 AI 编造），
+          // B) 候选池之外、AI 给关键词临时搜索的歌（"自由搜歌"）。
+          // 不管哪种，最后都要 song/url 验证能播放才发出去，不能播/搜不到就整条退化成
+          // 普通文字/图文动态（不占用另一次主 API 调用去重新问 AI）。
+          let musicCard: MomentMusicCard | undefined;
+          const shareMusicIdNum = p.shareMusicId != null ? Number(p.shareMusicId) : null;
+          const hasValidId = shareMusicIdNum != null && !Number.isNaN(shareMusicIdNum);
+
+          if (hasValidId && musicCfg) {
+            // A) 候选池里的确定 id。AI 返回的 shareMusicId 有时是字符串形式的数字
+            // （比如 "2158159412"），用 Number() 统一转换后再比较，避免因为类型不同
+            // （'123' !== 123）而误判成"编造的 id"。
+            const candidate = musicCandidates?.find(c => c.id === shareMusicIdNum);
+            if (candidate) {
+              try {
+                const urlRes = await musicApi.songUrl(musicCfg, candidate.id);
+                const playable = !!urlRes?.data?.[0]?.url;
+                if (playable) {
+                  musicCard = {
+                    songId: candidate.id,
+                    songName: candidate.name,
+                    artists: candidate.artists,
+                    albumPic: candidate.albumPic,
+                  };
+                } else {
+                  console.info('[Moments] TA 想分享的歌暂不可播放，退化成普通动态:', candidate.name);
+                }
+              } catch (e: any) {
+                console.warn('[Moments] 验证分享歌曲能否播放时出错，退化成普通动态:', e?.message || String(e));
+              }
+            } else {
+              console.info('[Moments] shareMusicId 不在候选池里（可能是 AI 编造的），忽略:', p.shareMusicId);
+            }
+          } else if (musicSearchAvailable && p.shareMusicQuery?.trim() && musicCfg) {
+            // B) 自由搜歌：拿关键词去网易云搜，取第一条结果再验证能不能播。
+            const query = p.shareMusicQuery.trim();
+            try {
+              const searchRes = await musicApi.search(musicCfg, query);
+              const first = searchRes?.result?.songs?.[0];
+              if (!first) {
+                console.info('[Moments] 自由搜歌没搜到结果，退化成普通动态:', query);
+              } else {
+                const urlRes = await musicApi.songUrl(musicCfg, first.id);
+                const playable = !!urlRes?.data?.[0]?.url;
+                if (playable) {
+                  const artists = (first.ar || first.artists || []).map((a: any) => a.name).filter(Boolean).join(' / ');
+                  musicCard = {
+                    songId: first.id,
+                    songName: first.name || query,
+                    artists: artists || '未知歌手',
+                    albumPic: toHttps(first.al?.picUrl || first.album?.picUrl || ''),
+                  };
+                } else {
+                  console.info('[Moments] 自由搜到的歌暂不可播放，退化成普通动态:', query);
+                }
+              }
+            } catch (e: any) {
+              console.warn('[Moments] 自由搜歌时出错，退化成普通动态:', e?.message || String(e));
+            }
+          }
+
+          const post: MomentPost = {
+            id: createPostId(),
+            charId,
+            author: charId,
+            authorName: charName,
+            authorAvatar: char.avatar || '',
+            // 前端根据 imagePrompt/musicCard 是否存在决定 type，不需要 AI 自己在
+            // text/image/imageText/music 里选，减少格式出错的空间。
+            type: musicCard ? 'music' : (imagePrompt ? 'imageText' : 'text'),
+            text: p.text?.trim() || '',
+            imagePrompt: musicCard ? undefined : imagePrompt,
+            music: musicCard,
+            likes: [],
+            likeNames: [],
+            comments: [],
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          };
+          return post;
+        })
+    )
+  );
+
+  // 5.5 并发给需要配图的动态生图。单条失败只退化成纯文字发布（type 改回 text，但保留
+  // imagePrompt——用户在朋友圈里点裂图上的 🔄 时，还能用同一句描述再试一次，不用重新
+  // 问 AI「这条要不要配图、配什么」。
+  if (imageGenAvailable && apiConfig.imageGenApi) {
+    const imageGenApiConfig = apiConfig.imageGenApi;
+    await Promise.all(newPosts.map(async (post) => {
+      const imagePrompt = post.imagePrompt;
+      if (!imagePrompt) {
+        // AI 这条没写 imagePrompt，属于它自己判断"不配图"，不是故障。
+        console.info('[Moments] 这条动态 AI 没有给 imagePrompt，按纯文字发布:', post.id);
         return;
       }
-      const detail = await musicApi.call(musicCfg, 'song/detail', { ids: [songId] });
-      const song = detail?.songs?.[0];
-      if (!song) {
-        setMusicParseError('没查到这首歌的信息，可能已下架，换一首或手动填写');
-        setComposeMusicSongId(null);
-        return;
+      console.info('[Moments] 开始为动态配图:', post.id, 'prompt =', imagePrompt);
+      try {
+        const results = await generateImage(imageGenApiConfig, imagePrompt, {
+          meta: { appId: 'moments', appName: '朋友圈', purpose: '朋友圈自动配图', charId, charName } as any,
+        });
+        const first = results[0];
+        if (!first?.src) throw new Error('生图 API 没有返回图片（results 为空或缺少 src）');
+        console.info('[Moments] 生图成功，开始转存本地引用:', post.id);
+        const storedContent = first.src.startsWith('data:') ? await migrateDataUrlToRef(first.src) : first.src;
+        post.images = [storedContent];
+        console.info('[Moments] 配图完成:', post.id);
+      } catch (e: any) {
+        // 显式打印 message + stack，而不是让 console.warn 自己决定怎么展开 Error 对象，
+        // 方便直接从控制台文本里看出是网络错误、格式错误还是 migrateDataUrlToRef 失败。
+        console.warn(
+          '[Moments] 这条动态配图失败，退化成纯文字:',
+          post.id,
+          '\nmessage:', e?.message || String(e),
+          '\nstack:', e?.stack || '(无堆栈)',
+        );
+        post.type = 'text';
       }
-      const name = song.name || '';
-      const artists = (song.ar || song.artists || []).map((a: any) => a.name).filter(Boolean).join(' / ');
-      const cover = toHttps(song.al?.picUrl || song.album?.picUrl || '');
-      setComposeMusicName(name);
-      setComposeMusicArtist(artists || '未知歌手');
-      setComposeMusicCover(cover);
-      setComposeMusicSongId(songId);
-    } catch (e: any) {
-      setMusicParseError(`识别失败: ${e?.message?.slice(0, 60) || '未知错误'}`);
-      setComposeMusicSongId(null);
-    } finally {
-      setMusicParsing(false);
-    }
-  }, [musicCfg]);
+    }));
+  }
 
-  // ==================== 分享文章：粘贴链接自动识别 ====================
+  // 6. 处理互动（更新用户的动态）。updatedUserPosts 以 imageDescribedPosts（1.5 步识图结果）
+  // 打底，点赞/评论在这份基础上叠加，避免两处改动互相覆盖同一条动态。
+  const updatedUserPosts: MomentPost[] = [...imageDescribedPosts];
+  for (const interaction of (parsed.interactions || [])) {
+    if (!interaction.postId) continue;
+    const alreadyInList = updatedUserPosts.find(p => p.id === interaction.postId);
+    const userPost = alreadyInList || existingPosts.find(p => p.id === interaction.postId && p.author === 'user');
+    if (!userPost) continue;
 
-  /**
-   * 粘贴框里的文本看起来像链接就自动抓取：标题/摘要/封面图直接填进下面的字段。
-   * 覆盖范围取决于 extractWebpageContent 本身的多级抓取兜底（结构化提取 → 无头渲染
-   * → 直接抓 HTML），公开可访问的网页大多能抓到；需要登录、反爬严格、纯 JS 渲染
-   * 又没有服务端兜底的站点可能会失败，这时候提示手动填。
-   */
-  const handleArticleLinkInputChange = useCallback(async (rawInput: string) => {
-    setArticleParseError('');
-    const trimmed = rawInput.trim();
-    if (!trimmed) { setArticleParsed(false); return; }
+    let updated = { ...userPost };
+    let changed = false;
 
-    const looksLikeLink = /^https?:\/\//i.test(trimmed) || !!detectFirstUrl(trimmed);
-    if (!looksLikeLink) { setArticleParsed(false); return; }
-
-    const url = detectFirstUrl(trimmed) || trimmed;
-    setArticleParsing(true);
-    try {
-      const webpage = await extractWebpageContent(url);
-      setComposeArticleTitle(webpage.title || '');
-      setComposeArticleBody(webpage.excerpt || '');
-      setComposeArticleImage(webpage.image || '');
-      setComposeArticleFullText(webpage.content || '');
-      setComposeArticleUrl(webpage.finalUrl || url);
-      setArticleParsed(true);
-    } catch (e: any) {
-      setArticleParseError(`识别失败: ${e?.message?.slice(0, 60) || '这个链接抓不到内容，可以手动填写'}`);
-      setArticleParsed(false);
-      // 抓取失败也把链接本身存上，用户可能就想留个链接、自己手动补标题。
-      setComposeArticleUrl(trimmed);
-    } finally {
-      setArticleParsing(false);
-    }
-  }, []);
-
-
-
-  const handleCoverUpload = useCallback((target: 'user' | 'ta' | 'secret') => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'image/*';
-    input.onchange = async () => {
-      const file = input.files?.[0];
-      if (!file || !settings) return;
-      const reader = new FileReader();
-      const dataUrl = await new Promise<string>((res) => {
-        reader.onload = () => res(reader.result as string);
-        reader.readAsDataURL(file);
-      });
-      const updated = {
-        ...settings,
-        ...(target === 'user' ? { userCoverImage: dataUrl }
-          : target === 'ta' ? { taCoverImage: dataUrl }
-          : { secretSpaceCoverImage: dataUrl }),
+    // 点赞
+    if (interaction.like && !updated.likes.includes(charId)) {
+      updated = {
+        ...updated,
+        likes: [...updated.likes, charId],
+        likeNames: [...updated.likeNames, charName],
       };
-      await saveMomentSettings(updated);
-      setSettings(updated);
-      addToast('封面已更新', 'success');
-    };
-    input.click();
-  }, [settings, addToast]);
+      changed = true;
+    }
 
-  // ==================== 互动逻辑 ====================
+    // 评论
+    if (interaction.comment?.trim()) {
+      const alreadyCommented = updated.comments.some(c => c.author === charId);
+      if (!alreadyCommented) {
+        const comment: MomentComment = {
+          id: createCommentId(),
+          author: charId,
+          authorName: charName,
+          content: interaction.comment.trim(),
+          createdAt: Date.now() - Math.floor(Math.random() * 300_000), // 过去几分钟
+        };
+        updated = {
+          ...updated,
+          comments: [...updated.comments, comment],
+        };
+        changed = true;
+      }
+    }
 
-  const toggleLike = useCallback(async (postId: string) => {
-    const post = posts.find(p => p.id === postId);
-    if (!post) return;
+    if (changed) {
+      updated.updatedAt = Date.now();
+      if (alreadyInList) {
+        const idx = updatedUserPosts.findIndex(p => p.id === interaction.postId);
+        updatedUserPosts[idx] = updated;
+      } else {
+        updatedUserPosts.push(updated);
+      }
+    }
+  }
 
-    const isLiked = post.likes.includes('user');
-    const updated: MomentPost = {
-      ...post,
-      likes: isLiked
-        ? post.likes.filter(l => l !== 'user')
-        : [...post.likes, 'user'],
-      likeNames: isLiked
-        ? post.likeNames.filter((_, i) => post.likes[i] !== 'user')
-        : [...post.likeNames, userProfile.name || '我'],
-      updatedAt: Date.now(),
-    };
+  // 7. 处理 commentReplies（TA 回复自己动态下面、用户刚追评的那些）
+  const updatedTaPosts: MomentPost[] = [];
+  for (const reply of (parsed.commentReplies || [])) {
+    if (!reply.postId || !reply.replyToCommentId || !reply.comment?.trim()) continue;
+    // 只允许回复"确实在待回复列表里"的动态，防止 AI 瞎编 postId/commentId 造成脏数据。
+    const taPost = pendingReplyPosts.find(p => p.id === reply.postId);
+    if (!taPost) continue;
+    const targetComment = taPost.comments.find(c => c.id === reply.replyToCommentId);
+    if (!targetComment) continue;
 
-    await savePost(updated);
-    setPosts(prev => prev.map(p => p.id === postId ? updated : p));
-  }, [posts, userProfile]);
-
-  const submitComment = useCallback(async () => {
-    if (!activeCommentPostId || !commentText.trim()) return;
-    const post = posts.find(p => p.id === activeCommentPostId);
-    if (!post) return;
-
-    const replyToComment = replyTarget ? post.comments.find(c => c.id === replyTarget.id) : undefined;
+    const alreadyUpdated = updatedTaPosts.find(p => p.id === taPost.id);
+    const base = alreadyUpdated || taPost;
     const comment: MomentComment = {
       id: createCommentId(),
-      author: 'user',
-      authorName: settings?.userNickname || userProfile.name || '我',
-      replyTo: replyTarget?.id,
-      replyToName: replyTarget?.name,
-      replyToAuthor: replyToComment?.author,
-      content: commentText.trim(),
-      createdAt: Date.now(),
+      author: charId,
+      authorName: charName,
+      replyTo: targetComment.id,
+      replyToName: targetComment.authorName,
+      replyToAuthor: targetComment.author,
+      content: reply.comment.trim(),
+      createdAt: Date.now() - Math.floor(Math.random() * 300_000), // 过去几分钟
     };
-
     const updated: MomentPost = {
-      ...post,
-      comments: [...post.comments, comment],
+      ...base,
+      comments: [...base.comments, comment],
       updatedAt: Date.now(),
     };
+    if (alreadyUpdated) {
+      const idx = updatedTaPosts.findIndex(p => p.id === taPost.id);
+      updatedTaPosts[idx] = updated;
+    } else {
+      updatedTaPosts.push(updated);
+    }
+  }
 
-    await savePost(updated);
-    setPosts(prev => prev.map(p => p.id === updated.id ? updated : p));
-    setCommentText('');
-    setReplyTarget(null);
-  }, [activeCommentPostId, commentText, replyTarget, posts, userProfile, settings]);
-
-  const handleDeletePost = useCallback(async (postId: string) => {
-    await deletePost(postId);
-    setPosts(prev => prev.filter(p => p.id !== postId));
-    setMenuPostId(null);
-    addToast('已删除', 'info');
-  }, [addToast]);
-
-  /** 左滑露出的垃圾桶点击：删除单条评论（不影响这条动态本身）。 */
-  const handleDeleteComment = useCallback(async (postId: string, commentId: string) => {
-    const post = posts.find(p => p.id === postId);
-    if (!post) return;
-    const updated: MomentPost = {
-      ...post,
-      comments: post.comments.filter(c => c.id !== commentId),
-      updatedAt: Date.now(),
-    };
-    await savePost(updated);
-    setPosts(prev => prev.map(p => p.id === postId ? updated : p));
-    setSwipedCommentKey(null);
-    addToast('评论已删除', 'info');
-  }, [posts, addToast]);
-
-  /** 转发这条动态到聊天框：生成一张卡片消息，内容=动态图文（不含评论），大小随内容走。 */
-  const handleForwardToChat = useCallback(async (post: MomentPost) => {
-    try {
-      // 音乐动态：分享成真能播放的 music_card（intent: 'shared'），不是纯展示的转发卡片。
-      if (post.type === 'music' && post.music) {
-        if (!post.music.songId) {
-          addToast('这首歌没有可播放的信息，没法分享成播放卡片', 'error');
-          return;
-        }
-        await DB.saveMessage({
-          charId,
-          role: 'user',
-          type: 'music_card' as any,
-          content: '[分享音乐]',
-          metadata: {
-            intent: 'shared',
-            song: {
-              songId: post.music.songId,
-              name: post.music.songName,
-              artists: post.music.artists,
-              albumPic: post.music.albumPic,
-            },
-          } as any,
-        });
-        addToast('已分享到聊天框（点击跳转）', 'success', () => {
-          closeApp();
-          openApp(AppID.Chat);
-        });
-        return;
+  // 8. 处理置顶（只在完整模式下生效；暂停营业模式的 prompt 不会教这个字段，AI 也不会返回它，
+  // 这里的 skipInteractions 判断是双重保险，防止未来改动误让暂停营业模式也生效）。
+  if (!skipInteractions && Array.isArray(parsed.pinnedPostIds)) {
+    const nextPinnedIds = new Set(parsed.pinnedPostIds.filter((id): id is string => typeof id === 'string'));
+    const taOwnPosts = existingPosts.filter(p => p.author === charId);
+    for (const taPost of taOwnPosts) {
+      const shouldBePinned = nextPinnedIds.has(taPost.id);
+      if (!!taPost.pinned === shouldBePinned) continue; // 状态没变，跳过
+      const alreadyUpdated = updatedTaPosts.find(p => p.id === taPost.id);
+      const base = alreadyUpdated || taPost;
+      const updated: MomentPost = { ...base, pinned: shouldBePinned, updatedAt: Date.now() };
+      if (alreadyUpdated) {
+        const idx = updatedTaPosts.findIndex(p => p.id === taPost.id);
+        updatedTaPosts[idx] = updated;
+      } else {
+        updatedTaPosts.push(updated);
       }
-
-      const momentData = {
-        charId: post.charId,
-        charName: post.author === 'user' ? (settings?.userNickname || userProfile.name || '我') : charName,
-        charAvatar: post.author === 'user' ? (userProfile.perCharAvatars?.[charId] || userProfile.avatar) : charAvatar,
-        text: post.text || '',
-        images: post.images || [],
-        music: post.music || undefined,
-        article: post.article || undefined,
-        createdAt: post.createdAt,
-      };
-      await DB.saveMessage({
-        charId,
-        role: 'user',
-        type: 'moment_card' as any,
-        content: JSON.stringify(momentData),
-      });
-      addToast('已转发到聊天框', 'success');
-    } catch (e: any) {
-      addToast(`转发失败: ${e.message?.slice(0, 60) || '未知错误'}`, 'error');
     }
-  }, [settings, userProfile, charName, charAvatar, charId, addToast, closeApp, openApp]);
+  }
 
-  const togglePin = useCallback(async (postId: string) => {
-    const post = posts.find(p => p.id === postId);
-    if (!post) return;
-    const updated = { ...post, pinned: !post.pinned, updatedAt: Date.now() };
-    await savePost(updated);
-    setPosts(prev => {
-      const list = prev.map(p => p.id === postId ? updated : p);
-      list.sort((a, b) => {
-        if (a.pinned && !b.pinned) return -1;
-        if (!a.pinned && b.pinned) return 1;
-        return b.createdAt - a.createdAt;
-      });
-      return list;
-    });
-    setMenuPostId(null);
-    addToast(updated.pinned ? '已置顶' : '已取消置顶', 'info');
-  }, [posts, addToast]);
+  return { newPosts, updatedUserPosts, updatedTaPosts };
+}
 
-  /**
-   * 图裂了点中心的 🔄：用这条动态原本的 imagePrompt 重新调一次生图 API（不重新问 AI
-   * 要不要配图、配什么，避免多打一次聊天补全 API），成功就替换对应位置的图片。
-   */
-  const handleRetryImage = useCallback(async (postId: string, imageIndex: number) => {
-    const key = `${postId}:${imageIndex}`;
-    if (retryingImageKeys.has(key)) return;
-    const post = posts.find(p => p.id === postId);
-    if (!post?.imagePrompt) {
-      addToast('这条动态没有可用于重新生成的描述', 'error');
-      return;
-    }
-    if (!isImageGenApiReady(apiConfig.imageGenApi)) {
-      addToast('生图 API 未配置或未启用，去设置里检查一下', 'error');
-      return;
-    }
-    setRetryingImageKeys(prev => new Set(prev).add(key));
+// ==================== 冷却检查 ====================
+
+/** 更新频率档位 → 冷却毫秒数；'paused' 特殊处理，见 canGenerate。 */
+const FREQUENCY_COOLDOWN_MS: Record<Exclude<MomentUpdateFrequency, 'paused'>, number> = {
+  '5min': 5 * 60_000,
+  '30min': 30 * 60_000,
+  '1h': 60 * 60_000,
+  '2h': 2 * 60 * 60_000,
+};
+
+/**
+ * 距离上次生成是否已过冷却期。'paused'（暂停营业）下，自动触发（打开 App / 查手机跳转）
+ * 永远返回 false——那条路径完全不生成；🌼 秘密空间走的是独立的 generateSecretMemory，
+ * 不经过这个函数，所以暂停营业下🌼依然可用。
+ */
+export function canGenerate(settings: MomentSettings): boolean {
+  if (settings.updateFrequency === 'paused') return false;
+  if (!settings.lastGeneratedAt) return true;
+  const cooldownMs = FREQUENCY_COOLDOWN_MS[settings.updateFrequency] ?? FREQUENCY_COOLDOWN_MS['30min'];
+  return Date.now() - settings.lastGeneratedAt > cooldownMs;
+}
+
+// ==================== 秘密空间（🌼）====================
+
+/** generateSecretMemory 的入参 */
+export interface GenerateSecretMemoryInput {
+  char: CharacterProfile;
+  userProfile: UserProfile;
+  apiConfig: APIConfig;
+  settings: MomentSettings;
+  /** 当前已有的全部动态（用于算"最早时间点"和防重复） */
+  existingPosts: MomentPost[];
+  signal?: AbortSignal;
+}
+
+/**
+ * "暂停营业"状态下，TA 朋友圈页面的🌼按钮触发：生成一条更早于 TA 当前最早动态时间的
+ * "秘密心事"——不读最近聊天上下文（这是过去的事，跟当下语境无关），依据人设 + 记忆宫殿
+ * 生成。这批动态只进 TA 的秘密空间列表，不进"我的朋友圈"混合时间线，也不进 TA 朋友圈
+ * 常规列表（调用方要用 isSecretMemory 过滤）。
+ */
+export async function generateSecretMemory(input: GenerateSecretMemoryInput): Promise<MomentPost> {
+  const { char, userProfile, apiConfig, existingPosts, signal } = input;
+  const charId = char.id;
+  const charName = char.name;
+
+  // 找出整条历史线（含之前已生成的秘密动态）里最早的时间点，新的一条必须比它更早，
+  // 避免多次点🌼之间互相穿插、时间线乱掉。
+  const taPosts = existingPosts.filter(p => p.author === charId);
+  const earliestTs = taPosts.length > 0
+    ? Math.min(...taPosts.map(p => p.createdAt))
+    : Date.now();
+  const earliestDate = new Date(earliestTs);
+  const earliestDateStr = `${earliestDate.getFullYear()}-${String(earliestDate.getMonth() + 1).padStart(2, '0')}-${String(earliestDate.getDate()).padStart(2, '0')}`;
+
+  const coreContext = ContextBuilder.buildCoreContext(char, userProfile, false, undefined, {
+    skipUserProfile: true,
+    headerOverride: '[角色档案]',
+  });
+  const memorySnippet = char.memoryPalaceEnabled && char.memoryPalaceInjection?.trim()
+    ? char.memoryPalaceInjection.trim()
+    : '(暂无记忆宫殿内容，凭人设自行想象一段合理的过去经历)';
+  const imageGenAvailable = isImageGenApiReady(apiConfig.imageGenApi);
+
+  const systemPrompt = `你是「${char.name}」。现在要写一条你自己都没对任何人说过的朋友圈——一条秘密心事，
+只有你自己能看到，用户和其他任何人都看不到、也不知道这条动态存在。
+
+${coreContext}
+
+【你的部分记忆片段（可作为这条秘密心事的素材）】
+${memorySnippet}
+
+【时间限制】这条动态必须发生在 ${earliestDateStr} 之前（可以是具体某一年、几个月前、几周前、几天前、
+甚至几小时前，只要早于这个日期即可）。必须写清楚具体的年月日，禁止使用"多年前""很久以前"这种模糊表达。
+
+【写作要求】
+- 内容是一段没对用户或任何人说出口的心事、隐秘的感受、独自藏着的小事——不是日常流水账
+- 完全不用考虑当下的聊天语境或日程，这是纯粹的过去
+- 文字风格自然、私密，像写给自己看的${imageGenAvailable ? `
+- 想配图就加一个 "imagePrompt" 字段，写一句简短的英文图片描述；不想配图就不要写这个字段` : ''}
+
+请严格按以下 JSON 格式返回，不要附加任何其他文字：
+
+{
+  "text": "这条秘密心事的内容",
+  "date": "YYYY-MM-DD"${imageGenAvailable ? `,
+  "imagePrompt": "可选：想配图就写一句简短的英文图片描述"` : ''}
+}`;
+
+  const url = `${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+  const body = {
+    model: apiConfig.model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: '写一条你的秘密心事。只返回 JSON。' },
+    ],
+    temperature: 0.95,
+    max_tokens: 800,
+  };
+
+  const data = await safeFetchJson(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiConfig.apiKey}`,
+    },
+    body: JSON.stringify(body),
+    signal,
+  } as RequestInit, 1, 30_000, {
+    appId: 'moments',
+    appName: '朋友圈',
+    purpose: '生成秘密空间历史动态',
+  });
+
+  const content = data?.choices?.[0]?.message?.content || '';
+  const parsed = extractJson(content) as { text?: string; date?: string; imagePrompt?: string } | null;
+  if (!parsed?.text?.trim()) {
+    console.warn('[Moments/Secret] JSON 解析失败或缺少 text，原始返回内容:', content);
+    throw new Error('AI 没有返回有效的秘密动态内容');
+  }
+
+  // 解析日期 → 时间戳，必须早于 earliestTs；解析失败或晚于下限就兜底成"最早时间点再往前随机 1~90 天"。
+  let timestamp: number;
+  const dateMatch = parsed.date && /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(parsed.date.trim());
+  if (dateMatch) {
+    const [, y, m, d] = dateMatch;
+    const candidate = new Date(Number(y), Number(m) - 1, Number(d), Math.floor(Math.random() * 24), Math.floor(Math.random() * 60));
+    timestamp = candidate.getTime() < earliestTs ? candidate.getTime() : earliestTs - (1 + Math.floor(Math.random() * 90)) * 86_400_000;
+  } else {
+    timestamp = earliestTs - (1 + Math.floor(Math.random() * 90)) * 86_400_000;
+  }
+
+  const imagePrompt = imageGenAvailable ? parsed.imagePrompt?.trim() : undefined;
+  const post: MomentPost = {
+    id: createPostId(),
+    charId,
+    author: charId,
+    authorName: charName,
+    authorAvatar: char.avatar || '',
+    type: imagePrompt ? 'imageText' : 'text',
+    text: parsed.text.trim(),
+    imagePrompt,
+    isSecretMemory: true,
+    likes: [],
+    likeNames: [],
+    comments: [],
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+
+  if (imagePrompt && apiConfig.imageGenApi) {
     try {
-      const results = await generateImage(apiConfig.imageGenApi, post.imagePrompt, {
-        meta: { appId: 'moments', appName: '朋友圈', purpose: '朋友圈配图重新生成', charId, charName },
+      const results = await generateImage(apiConfig.imageGenApi, imagePrompt, {
+        meta: { appId: 'moments', appName: '朋友圈', purpose: '秘密空间动态配图', charId, charName } as any,
       });
       const first = results[0];
       if (!first?.src) throw new Error('生图 API 没有返回图片');
       const storedContent = first.src.startsWith('data:') ? await migrateDataUrlToRef(first.src) : first.src;
-      const nextImages = [...(post.images || [])];
-      nextImages[imageIndex] = storedContent;
-      const updated: MomentPost = { ...post, images: nextImages, updatedAt: Date.now() };
-      await savePost(updated);
-      setPosts(prev => prev.map(p => p.id === postId ? updated : p));
-      addToast('已重新生成', 'success');
+      post.images = [storedContent];
     } catch (e: any) {
-      addToast(`重新生成失败: ${e?.message?.slice(0, 60) || '未知错误'}`, 'error');
-    } finally {
-      setRetryingImageKeys(prev => {
-        const next = new Set(prev);
-        next.delete(key);
-        return next;
-      });
+      console.warn('[Moments/Secret] 配图失败，退化成纯文字:', e?.message || String(e));
+      post.type = 'text';
     }
-  }, [posts, apiConfig.imageGenApi, charId, charName, addToast, retryingImageKeys]);
-
-  // ==================== 双击编辑（原长按编辑，因容易误触已改为快速双击两下触发） ====================
-
-  const handleEditTrigger = useCallback((postId: string, commentId?: string) => {
-    const post = posts.find(p => p.id === postId);
-    if (!post) return;
-    if (commentId) {
-      const comment = post.comments.find(c => c.id === commentId);
-      if (comment) {
-        setEditingField({ postId, commentId });
-        setEditText(comment.content);
-      }
-    } else {
-      setEditingField({ postId });
-      setEditText(post.text || '');
-    }
-  }, [posts]);
-
-  // 正文双击判定：无其他单击行为竞争，直接按 key（postId）判断两次点击间隔。
-  const handleTextDoubleTap = useCallback((postId: string) => {
-    const key = postId;
-    const now = Date.now();
-    const last = lastEditTapRef.current;
-    if (last && last.key === key && now - last.time < DOUBLE_TAP_EDIT_DELAY) {
-      lastEditTapRef.current = null;
-      handleEditTrigger(postId);
-    } else {
-      lastEditTapRef.current = { key, time: now };
-    }
-  }, [handleEditTrigger]);
-
-  // 评论双击判定：单击本身要用来"回复"，所以第一下先延迟执行单击动作，
-  // 若在阈值内等到第二下则取消单击动作、改为触发编辑。
-  const handleCommentTap = useCallback((postId: string, commentId: string, onSingleTap: () => void) => {
-    const key = `${postId}:${commentId}`;
-    const now = Date.now();
-    const last = lastEditTapRef.current;
-    if (last && last.key === key && now - last.time < DOUBLE_TAP_EDIT_DELAY) {
-      lastEditTapRef.current = null;
-      if (commentTapTimerRef.current) {
-        clearTimeout(commentTapTimerRef.current);
-        commentTapTimerRef.current = null;
-      }
-      handleEditTrigger(postId, commentId);
-    } else {
-      lastEditTapRef.current = { key, time: now };
-      if (commentTapTimerRef.current) clearTimeout(commentTapTimerRef.current);
-      commentTapTimerRef.current = setTimeout(() => {
-        commentTapTimerRef.current = null;
-        onSingleTap();
-      }, DOUBLE_TAP_EDIT_DELAY);
-    }
-  }, [handleEditTrigger]);
-
-  const saveEdit = useCallback(async () => {
-    if (!editingField) return;
-    const post = posts.find(p => p.id === editingField.postId);
-    if (!post) return;
-
-    let updated: MomentPost;
-    if (editingField.commentId) {
-      updated = {
-        ...post,
-        comments: post.comments.map(c =>
-          c.id === editingField.commentId ? { ...c, content: editText } : c
-        ),
-        updatedAt: Date.now(),
-      };
-    } else {
-      updated = { ...post, text: editText, updatedAt: Date.now() };
-    }
-
-    await savePost(updated);
-    setPosts(prev => prev.map(p => p.id === updated.id ? updated : p));
-    setEditingField(null);
-    setEditText('');
-  }, [editingField, editText, posts]);
-
-  // ==================== 时间格式化 ====================
-
-  const formatTime = (ts: number) => {
-    const now = Date.now();
-    const diff = now - ts;
-    if (diff < 60_000) return '刚刚';
-    if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
-    if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
-    const d = new Date(ts);
-    const thisYear = new Date().getFullYear() === d.getFullYear();
-    if (thisYear) return `${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-    return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-  };
-
-  // ==================== 筛选 ====================
-
-  // 秘密空间（🌼）动态：只在秘密空间页面展示，"我的朋友圈"混合线和 TA 朋友圈常规列表都要排除。
-  const visiblePosts = useMemo(() =>
-    posts.filter(p => !p.isSecretMemory),
-    [posts],
-  );
-
-  const taPosts = useMemo(() =>
-    visiblePosts.filter(p => p.author !== 'user'),
-    [visiblePosts],
-  );
-
-  const secretMemoryPosts = useMemo(() =>
-    posts.filter(p => p.isSecretMemory).sort((a, b) => a.createdAt - b.createdAt),
-    [posts],
-  );
-
-  // ==================== 渲染：封面区 ====================
-
-  const renderCover = (mode: 'user' | 'ta') => {
-    const coverImage = mode === 'user'
-      ? settings?.userCoverImage
-      : settings?.taCoverImage;
-    const name = mode === 'user'
-      ? (settings?.userNickname || userProfile.name || '我')
-      : charName;
-    const signature = mode === 'user'
-      ? (settings?.userSignature || '')
-      : (settings?.taSignature || '');
-    const avatar = mode === 'user'
-      ? (userProfile.perCharAvatars?.[charId] || userProfile.avatar)
-      : charAvatar;
-
-    return (
-      <div className="relative w-full shrink-0" style={{ marginBottom: signature ? 28 : 16 }}>
-        {/* 背景图区域 */}
-        <div
-          className="relative w-full cursor-pointer"
-          style={{ height: COVER_HEIGHT }}
-          onClick={() => handleCoverUpload(mode)}
-        >
-          <div
-            className="absolute inset-0 bg-gradient-to-b from-slate-700 to-slate-900"
-            style={coverImage ? {
-              backgroundImage: `url(${coverImage})`,
-              backgroundSize: 'cover',
-              backgroundPosition: 'center',
-            } : {}}
-          />
-          <div className="absolute inset-0 bg-gradient-to-t from-black/50 via-transparent to-black/10 pointer-events-none" />
-        </div>
-
-        {/* 头像 + ID：ID 在头像左边，底部对齐；头像底部相对背景图探出（露出比例由 AVATAR_BOTTOM 控制） */}
-        <div className="absolute right-4 flex items-end gap-3" style={{ bottom: AVATAR_BOTTOM }}>
-          <div className="text-right self-center pb-1">
-            <div className="text-white font-bold text-[16px] drop-shadow-lg">{name}</div>
-          </div>
-          <div
-            className="shrink-0 overflow-hidden shadow-lg"
-            style={{
-              width: 60,
-              height: 60,
-              borderRadius: 12,
-              border: '2px solid rgba(255,255,255,0.3)',
-            }}
-          >
-            {avatar
-              ? <TokenImg value={avatar} className="w-full h-full object-cover" />
-              : <div className="w-full h-full bg-slate-600" />
-            }
-          </div>
-        </div>
-
-        {/* 个性签名：在头像下方 */}
-        {signature && (
-          <div
-            className="absolute right-5 text-xs text-white/50 drop-shadow"
-            style={{ bottom: SIGNATURE_BOTTOM }}
-          >
-            {signature}
-          </div>
-        )}
-      </div>
-    );
-  };
-
-  // ==================== 渲染：音乐卡片 ====================
-
-  /**
-   * 点朋友圈里的音乐卡片：关掉朋友圈、打开音乐 App 并自动播放这首歌（不在原地出声）。
-   * 用 localStorage 存一个一次性的"待播放"标记，音乐 App 挂载时读到就播放、随即清掉，
-   * 这是项目里"跨 App 传参"的既有模式（参考查手机跳转 TA 朋友圈那个 moments_open_ta）。
-   */
-  const handlePlayMusicCard = useCallback((music: MomentMusicCard) => {
-    if (!music.songId) {
-      addToast('这首歌没有可播放的信息', 'info');
-      return;
-    }
-    localStorage.setItem('music_autoplay_song', JSON.stringify({
-      id: music.songId,
-      name: music.songName || '未知歌曲',
-      artists: music.artists || '未知歌手',
-      albumPic: music.albumPic || '',
-    }));
-    closeApp();
-    openApp(AppID.Music);
-  }, [addToast, closeApp, openApp]);
-
-  const renderMusicCard = (music: MomentMusicCard) => (
-    <div
-      className="flex items-center gap-3 rounded-xl p-3 mt-2 cursor-pointer active:scale-[0.98] transition-transform"
-      style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)' }}
-      onClick={() => handlePlayMusicCard(music)}
-    >      {music.albumPic
-        ? <img src={music.albumPic} alt="" className="w-14 h-14 rounded-lg object-cover shrink-0" />
-        : <div className="w-14 h-14 rounded-lg bg-slate-700 flex items-center justify-center shrink-0">
-            <MusicNote size={24} className="text-white/40" />
-          </div>
-      }
-      <div className="flex-1 min-w-0">
-        <div className="text-sm font-medium truncate" style={{ color: 'var(--moments-text, #e2e8f0)' }}>
-          {music.songName || '未知歌曲'}
-        </div>
-        <div className="text-xs mt-0.5 truncate" style={{ color: 'var(--moments-text-secondary, #94a3b8)' }}>
-          {music.artists || '未知歌手'}
-        </div>
-      </div>
-      <MusicNote size={20} weight="fill" className="text-white/30 shrink-0" />
-    </div>
-  );
-
-  // ==================== 渲染：文章卡片 ====================
-
-  const renderArticleCard = (article: MomentArticleCard, postId?: string) => {
-    const excerpt = article.body
-      ? (article.body.length > 20 ? `${article.body.slice(0, 20)}...` : article.body)
-      : '';
-    return (
-      <div
-        className="flex items-center gap-3 rounded-xl p-3 mt-2 cursor-pointer active:opacity-90 transition-opacity"
-        style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)' }}
-        onClick={() => { if (postId) setReadingArticle({ postId, article }); }}
-      >
-        <div className="w-14 h-14 rounded-lg overflow-hidden shrink-0">
-          {article.image ? (
-            <img src={article.image} alt="" className="w-full h-full object-cover" />
-          ) : (
-            <div className="w-full h-full flex items-center justify-center bg-slate-700">
-              <Article size={22} className="text-white/40" />
-            </div>
-          )}
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="text-sm font-medium line-clamp-1" style={{ color: 'var(--moments-text, #e2e8f0)' }}>
-            {article.title || '未命名文章'}
-          </div>
-          {excerpt && (
-            <div className="text-xs mt-0.5 line-clamp-1" style={{ color: 'var(--moments-text-secondary, #94a3b8)' }}>
-              {excerpt}
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  };
-
-  // ==================== 渲染：文章全文阅读层 ====================
-
-  /**
-   * 点评论区中间那个不明显的"网络不好，刷新试试..."按钮：生成一次虚拟评论区并
-   * 写回这篇文章所属动态的 article.fakeComments 缓存，之后重复打开不用再生成。
-   */
-  const handleGenerateArticleComments = useCallback(async () => {
-    if (!readingArticle || !char) return;
-    if (!apiConfig.apiKey || !apiConfig.baseUrl) {
-      addToast('请先配置 API', 'info');
-      return;
-    }
-    setArticleCommentsGenerating(true);
-    try {
-      const threads = await generateFakeArticleComments({
-        char, userProfile, apiConfig, article: readingArticle.article,
-      });
-      const post = posts.find(p => p.id === readingArticle.postId);
-      if (!post || !post.article) return;
-      const updatedArticle: MomentArticleCard = { ...post.article, fakeComments: threads };
-      const updatedPost: MomentPost = { ...post, article: updatedArticle, updatedAt: Date.now() };
-      await savePost(updatedPost);
-      setPosts(prev => prev.map(p => p.id === updatedPost.id ? updatedPost : p));
-      setReadingArticle({ postId: readingArticle.postId, article: updatedArticle });
-    } catch (e: any) {
-      addToast(`评论加载失败: ${e?.message?.slice(0, 60) || '未知错误'}`, 'error');
-    } finally {
-      setArticleCommentsGenerating(false);
-    }
-  }, [readingArticle, char, apiConfig, userProfile, posts, addToast]);
-
-  const renderArticleReader = () => {
-    if (!readingArticle) return null;
-    const { article } = readingArticle;
-    const text = article.fullText?.trim() || article.body?.trim() || '（这篇文章没有留下更多内容）';
-    const threads = article.fakeComments;
-
-    return (
-      <div className="fixed inset-0 z-50 flex flex-col" style={{ background: '#f5f5f7' }}>
-        <div className="flex items-center gap-3 px-4 py-3 border-b border-black/5 shrink-0 bg-white">
-          <button onClick={() => setReadingArticle(null)} className="text-slate-500 active:scale-90">
-            <CaretLeft size={22} />
-          </button>
-          <div className="text-sm font-medium truncate flex-1 text-slate-800">{article.title || '未命名文章'}</div>
-          {article.url && (
-            <button
-              onClick={() => window.open(article.url, '_blank', 'noopener,noreferrer')}
-              className="text-[11px] text-blue-500 active:scale-95 shrink-0 flex items-center gap-0.5"
-            >
-              查看原网页
-            </button>
-          )}
-        </div>
-
-        <div className="flex-1 overflow-y-auto">
-          {/* 正文区：仿公众号推送排版 */}
-          <div className="bg-white px-5 pt-6 pb-5">
-            <div className="text-xl font-bold mb-4 leading-snug text-slate-900">
-              {article.title || '未命名文章'}
-            </div>
-            {article.image && (
-              <img src={article.image} alt="" className="w-full rounded-lg mb-4 object-cover max-h-56" />
-            )}
-            {article.body && (
-              <div className="text-sm mb-3 text-slate-500">
-                {article.body}
-              </div>
-            )}
-            <div className="text-[15px] leading-[1.9] whitespace-pre-wrap text-slate-700">
-              {text}
-            </div>
-          </div>
-
-          {/* 虚拟评论区 */}
-          <div className="mt-2 bg-white px-4 py-4">
-            <div className="text-sm font-medium text-slate-800 mb-3">精选留言</div>
-            {!threads || threads.length === 0 ? (
-              <button
-                onClick={handleGenerateArticleComments}
-                disabled={articleCommentsGenerating}
-                className="w-full py-8 text-center text-xs text-slate-300 active:scale-[0.99] transition-transform disabled:opacity-60"
-              >
-                {articleCommentsGenerating ? '加载中…' : '网络不好，刷新试试...'}
-              </button>
-            ) : (
-              <div className="space-y-4">
-                {threads.map((thread, i) => (
-                  <div key={i}>
-                    <div className="flex items-start gap-2">
-                      <div
-                        className="w-7 h-7 rounded-full shrink-0 flex items-center justify-center text-[11px] font-medium text-white"
-                        style={{ background: thread.isChar ? '#807c9d' : '#c2c2c8' }}
-                      >
-                        {thread.authorName.slice(0, 1)}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-xs font-medium" style={{ color: thread.isChar ? '#5a49a8' : '#64748b' }}>
-                          {thread.authorName}
-                        </div>
-                        <div className="text-sm text-slate-700 mt-0.5">{thread.content}</div>
-                      </div>
-                    </div>
-                    {thread.replies.length > 0 && (
-                      <div className="ml-9 mt-2 pl-3 border-l border-slate-100 space-y-2">
-                        {thread.replies.map((reply, j) => (
-                          <div key={j} className="text-xs">
-                            <span className="font-medium" style={{ color: reply.isChar ? '#5a49a8' : '#64748b' }}>
-                              {reply.authorName}
-                            </span>
-                            <span className="text-slate-500">：{reply.content}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    );
-  };
-
-  // ==================== 渲染：图片网格 ====================
-
-  const renderImageGrid = (images: string[], postId: string) => {
-    const count = images.length;
-    const cols = count === 1 ? 1 : count <= 4 ? 2 : 3;
-    return (
-      <div className={`grid gap-1 mt-2`} style={{ gridTemplateColumns: `repeat(${cols}, 1fr)` }}>
-        {images.map((img, i) => {
-          const key = `${postId}:${i}`;
-          const broken = brokenImageKeys.has(key);
-          const retrying = retryingImageKeys.has(key);
-          return (
-            <div key={i} className="relative aspect-square rounded-lg overflow-hidden bg-slate-800">
-              <TokenImg
-                value={img}
-                className="w-full h-full object-cover"
-                style={broken ? { visibility: 'hidden' } : undefined}
-                onError={() => setBrokenImageKeys(prev => new Set(prev).add(key))}
-                onLoad={() => setBrokenImageKeys(prev => {
-                  if (!prev.has(key)) return prev;
-                  const next = new Set(prev);
-                  next.delete(key);
-                  return next;
-                })}
-              />
-              {broken && (
-                <button
-                  onClick={() => handleRetryImage(postId, i)}
-                  disabled={retrying}
-                  className="absolute inset-0 flex items-center justify-center bg-black/40 active:scale-90 transition disabled:opacity-60"
-                >
-                  <ArrowsClockwise size={24} className="text-white" style={retrying ? { animation: 'spin 1s linear infinite' } : undefined} />
-                </button>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    );
-  };
-
-  // ==================== 渲染：单条动态 ====================
-
-  const renderPost = (post: MomentPost) => {
-    const isMe = post.author === 'user';
-    const isLiked = post.likes.includes('user');
-    const showMenu = menuPostId === post.id;
-    const showComments = activeCommentPostId === post.id;
-    const isEditing = editingField?.postId === post.id && !editingField.commentId;
-
-    return (
-      <div key={post.id} className="px-4 py-4 border-b" style={{ borderColor: 'rgba(255,255,255,0.06)' }}>
-        {/* 置顶标识 */}
-        {post.pinned && (
-          <div className="flex items-center gap-1 text-xs mb-2" style={{ color: '#f59e0b' }}>
-            <PushPin size={12} weight="fill" /> 置顶
-          </div>
-        )}
-
-        {/* 头部：头像 + 名字 */}
-        <div className="flex items-start gap-3">
-          <div
-            className="w-10 h-10 rounded-lg overflow-hidden shrink-0 cursor-pointer"
-            onClick={() => { if (!isMe) setView('taPage'); }}
-          >
-            {post.authorAvatar
-              ? <TokenImg value={post.authorAvatar} className="w-full h-full object-cover" />
-              : <div className="w-full h-full bg-slate-600" />
-            }
-          </div>
-
-          <div className="flex-1 min-w-0">
-            <div
-              className="text-sm font-bold cursor-pointer"
-              style={{ color: isMe ? '#60a5fa' : '#c084fc' }}
-              onClick={() => { if (!isMe) setView('taPage'); }}
-            >
-              {post.authorName}
-            </div>
-
-            {/* 正文（长按编辑） */}
-            {post.text && (
-              isEditing ? (
-                <div className="mt-1">
-                  <textarea
-                    value={editText}
-                    onChange={e => setEditText(e.target.value)}
-                    className="w-full rounded-lg p-2 text-sm bg-white/10 text-white/90 border border-white/10 resize-none"
-                    rows={3}
-                    autoFocus
-                  />
-                  <div className="flex gap-2 mt-1">
-                    <button onClick={saveEdit} className="text-xs text-blue-400">保存</button>
-                    <button onClick={() => setEditingField(null)} className="text-xs text-white/40">取消</button>
-                  </div>
-                </div>
-              ) : (
-                <div
-                  className="text-sm mt-1 whitespace-pre-wrap leading-relaxed cursor-pointer"
-                  style={{ color: 'var(--moments-text, #e2e8f0)' }}
-                  onClick={() => handleTextDoubleTap(post.id)}
-                >
-                  {post.text}
-                </div>
-              )
-            )}
-
-            {/* 图片 */}
-            {post.images && post.images.length > 0 && renderImageGrid(post.images, post.id)}
-
-            {/* 音乐卡片 */}
-            {post.music && renderMusicCard(post.music)}
-
-            {/* 文章卡片 */}
-            {post.article && renderArticleCard(post.article, post.id)}
-
-            {/* 时间 + 操作栏 */}
-            <div className="flex items-center justify-between mt-3">
-              <div className="text-xs" style={{ color: 'var(--moments-text-secondary, #64748b)' }}>
-                {formatTime(post.createdAt)}
-              </div>
-
-              <div className="flex items-center gap-4">
-                {/* 点赞 */}
-                <button
-                  onClick={() => toggleLike(post.id)}
-                  className="flex items-center gap-1 text-xs active:scale-90 transition"
-                  style={{ color: isLiked ? '#f43f5e' : 'var(--moments-text-secondary, #64748b)' }}
-                >
-                  <Heart size={16} weight={isLiked ? 'fill' : 'regular'} />
-                </button>
-
-                {/* 评论 */}
-                <button
-                  onClick={() => {
-                    setActiveCommentPostId(activeCommentPostId === post.id ? null : post.id);
-                    setReplyTarget(null);
-                    setTimeout(() => commentInputRef.current?.focus(), 100);
-                  }}
-                  className="flex items-center gap-1 text-xs active:scale-90 transition"
-                  style={{ color: 'var(--moments-text-secondary, #64748b)' }}
-                >
-                  <ChatCircle size={16} />
-                </button>
-
-                {/* 分享 */}
-                <button
-                  onClick={() => handleForwardToChat(post)}
-                  className="flex items-center gap-1 text-xs active:scale-90 transition"
-                  style={{ color: 'var(--moments-text-secondary, #64748b)' }}
-                >
-                  <ShareNetwork size={16} />
-                </button>
-
-                {/* 更多 */}
-                <button
-                  onClick={() => setMenuPostId(showMenu ? null : post.id)}
-                  className="active:scale-90 transition"
-                  style={{ color: 'var(--moments-text-secondary, #64748b)' }}
-                >
-                  <DotsThree size={16} weight="bold" />
-                </button>
-              </div>
-            </div>
-
-            {/* 更多菜单 */}
-            {showMenu && (
-              <div className="flex gap-2 mt-2 animate-slide-up">
-                {isMe && (
-                  <button
-                    onClick={() => togglePin(post.id)}
-                    className="flex items-center gap-1 text-xs px-3 py-1.5 rounded-full bg-white/10 text-white/70 active:scale-95 transition"
-                  >
-                    <PushPin size={12} /> {post.pinned ? '取消置顶' : '置顶'}
-                  </button>
-                )}
-                <button
-                  onClick={() => handleDeletePost(post.id)}
-                  className="flex items-center gap-1 text-xs px-3 py-1.5 rounded-full bg-red-500/15 text-red-400 active:scale-95 transition"
-                >
-                  <Trash size={12} /> 删除
-                </button>
-              </div>
-            )}
-
-            {/* 点赞列表 */}
-            {post.likeNames.length > 0 && (
-              <div className="flex items-center gap-1.5 mt-2.5 px-2.5 py-1.5 rounded-lg"
-                style={{ background: 'rgba(255,255,255,0.04)' }}>
-                <Heart size={12} weight="fill" className="text-rose-400 shrink-0" />
-                <div className="text-xs" style={{ color: '#93c5fd' }}>
-                  {post.likeNames.join('，')}
-                </div>
-              </div>
-            )}
-
-            {/* 评论区 */}
-            {post.comments.length > 0 && (
-              <div className="mt-1 px-2.5 py-2 rounded-lg space-y-1.5"
-                style={{ background: 'rgba(255,255,255,0.04)' }}>
-                {post.comments.map(c => {
-                  const isEditingThis = editingField?.postId === post.id && editingField?.commentId === c.id;
-                  const swipeKey = `${post.id}:${c.id}`;
-                  const isSwipedOpen = swipedCommentKey === swipeKey;
-                  // ID 实时读取：不用评论创建那一刻存的快照名字，改朋友圈昵称/角色名后旧评论也跟着变。
-                  const liveAuthorName = c.author === 'user'
-                    ? (settings?.userNickname || userProfile.name || '我')
-                    : (char?.name || c.authorName);
-                  const liveReplyToName = !c.replyTo ? undefined
-                    : c.replyToAuthor === 'user'
-                      ? (settings?.userNickname || userProfile.name || '我')
-                      : c.replyToAuthor
-                        ? (char?.name || c.replyToName)
-                        : c.replyToName;
-                  return (
-                    <div key={c.id} className="text-xs leading-relaxed relative overflow-hidden">
-                      {isEditingThis ? (
-                        <div>
-                          <input
-                            value={editText}
-                            onChange={e => setEditText(e.target.value)}
-                            className="w-full rounded p-1 text-xs bg-white/10 text-white/90 border border-white/10"
-                            autoFocus
-                            onKeyDown={e => { if (e.key === 'Enter') saveEdit(); }}
-                          />
-                          <div className="flex gap-2 mt-0.5">
-                            <button onClick={saveEdit} className="text-[10px] text-blue-400">保存</button>
-                            <button onClick={() => setEditingField(null)} className="text-[10px] text-white/40">取消</button>
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="relative">
-                          {/* 左滑露出的垃圾桶：常驻在内容层下方，滑开后才可见/可点 */}
-                          <button
-                            onClick={() => handleDeleteComment(post.id, c.id)}
-                            className="absolute right-0 top-0 bottom-0 flex items-center justify-center px-3 bg-red-500/90 rounded-r"
-                            style={{
-                              opacity: isSwipedOpen ? 1 : 0,
-                              pointerEvents: isSwipedOpen ? 'auto' : 'none',
-                              transition: 'opacity 0.15s',
-                            }}
-                          >
-                            <Trash size={14} weight="fill" className="text-white" />
-                          </button>
-                          <div
-                            className="cursor-pointer relative"
-                            style={{
-                              transform: isSwipedOpen ? 'translateX(-52px)' : 'translateX(0)',
-                              transition: 'transform 0.2s ease-out',
-                              background: 'inherit',
-                            }}
-                            onTouchStart={(e) => {
-                              const startX = e.touches[0].clientX;
-                              const startY = e.touches[0].clientY;
-                              const handleMove = (moveEvent: TouchEvent) => {
-                                const dx = moveEvent.touches[0].clientX - startX;
-                                const dy = moveEvent.touches[0].clientY - startY;
-                                // 只处理左滑（dx < 0），且横向位移明显大于纵向，避免和纵向滚动打架
-                                if (dx < -16 && Math.abs(dx) > Math.abs(dy)) {
-                                  setSwipedCommentKey(swipeKey);
-                                } else if (dx > 16) {
-                                  setSwipedCommentKey(prev => prev === swipeKey ? null : prev);
-                                }
-                              };
-                              const handleEnd = () => {
-                                document.removeEventListener('touchmove', handleMove);
-                                document.removeEventListener('touchend', handleEnd);
-                              };
-                              document.addEventListener('touchmove', handleMove, { passive: true });
-                              document.addEventListener('touchend', handleEnd, { once: true });
-                            }}
-                            onClick={() => {
-                              if (isSwipedOpen) { setSwipedCommentKey(null); return; }
-                              // 单击先延迟触发"回复"，若阈值内等到第二下则改为触发"编辑"（双击两下才编辑，避免误触）。
-                              handleCommentTap(post.id, c.id, () => {
-                                setActiveCommentPostId(post.id);
-                                setReplyTarget({ id: c.id, name: liveAuthorName });
-                                setTimeout(() => commentInputRef.current?.focus(), 100);
-                              });
-                            }}
-                          >
-                            <div>
-                              <span style={{ color: '#93c5fd' }} className="font-medium">{liveAuthorName}</span>
-                              {liveReplyToName && (
-                                <>
-                                  <span style={{ color: 'var(--moments-text-secondary, #64748b)' }}> 回复 </span>
-                                  <span style={{ color: '#93c5fd' }} className="font-medium">{liveReplyToName}</span>
-                                </>
-                              )}
-                              <span style={{ color: 'var(--moments-text-secondary, #64748b)' }}>：</span>
-                              <span style={{ color: 'var(--moments-text, #cbd5e1)' }}>{c.content}</span>
-                            </div>
-                            <div className="text-[10px] mt-0.5" style={{ color: 'var(--moments-text-secondary, #64748b)' }}>
-                              {formatTime(c.createdAt)}
-                            </div>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            {/* 评论输入框 */}
-            {showComments && (
-              <div className="flex items-center gap-2 mt-2 animate-slide-up">
-                <input
-                  ref={commentInputRef}
-                  value={commentText}
-                  onChange={e => setCommentText(e.target.value)}
-                  onKeyDown={e => { if (e.key === 'Enter') submitComment(); }}
-                  placeholder={replyTarget ? `回复 ${replyTarget.name}...` : '写评论...'}
-                  className="flex-1 rounded-full px-3 py-1.5 text-xs bg-white/10 text-white/90 border border-white/10 placeholder:text-white/30"
-                />
-                <button
-                  onClick={submitComment}
-                  disabled={!commentText.trim()}
-                  className="p-1.5 rounded-full disabled:opacity-30 active:scale-90 transition"
-                  style={{ color: '#60a5fa' }}
-                >
-                  <PaperPlaneTilt size={16} weight="fill" />
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    );
-  };
-
-  // ==================== 渲染：发布菜单 ====================
-
-  const renderComposeMenu = () => {
-    const items: { type: MomentPostType; icon: React.ReactNode; label: string; sub: string }[] = [
-      { type: 'image', icon: <ImageSquare size={22} weight="light" />, label: '发图片', sub: '只发图，不配文字' },
-      { type: 'imageText', icon: <ImageIcon size={22} weight="light" />, label: '发图文', sub: '图片 + 一段文字' },
-      { type: 'text', icon: <TextAa size={22} weight="light" />, label: '发文字', sub: '纯文字动态' },
-      { type: 'music', icon: <MusicNote size={22} weight="light" />, label: '分享音乐', sub: '渲染成音乐卡片' },
-      { type: 'article', icon: <Article size={22} weight="light" />, label: '分享文章', sub: '链接或标题+正文' },
-    ];
-
-    return (
-      <div
-        className="fixed inset-0 z-50 flex items-end justify-center"
-        onClick={() => setShowComposeMenu(false)}
-      >
-        <div className="absolute inset-0 bg-black/50" />
-        <div
-          className="relative w-full max-w-md rounded-t-2xl p-6 pb-8 animate-slide-up"
-          style={{ background: '#1a1a2e' }}
-          onClick={e => e.stopPropagation()}
-        >
-          <div className="w-10 h-1 rounded-full bg-white/20 mx-auto mb-6" />
-          <div className="space-y-4">
-            {items.map(item => (
-              <button
-                key={item.type}
-                onClick={() => {
-                  setComposeType(item.type);
-                  setShowComposeMenu(false);
-                  setView('compose');
-                }}
-                className="w-full flex items-center gap-4 text-left active:scale-[0.98] transition"
-              >
-                <div className="text-blue-400">{item.icon}</div>
-                <div>
-                  <div className="text-sm font-medium text-white/90">{item.label}</div>
-                  <div className="text-xs text-white/40">{item.sub}</div>
-                </div>
-              </button>
-            ))}
-          </div>
-          <button
-            onClick={() => setShowComposeMenu(false)}
-            className="w-full mt-6 py-3 text-center text-sm text-white/50 border-t border-white/10"
-          >
-            取消
-          </button>
-        </div>
-      </div>
-    );
-  };
-
-  // ==================== 渲染：发布页 ====================
-
-  const renderCompose = () => {
-    const canPublish = (() => {
-      switch (composeType) {
-        case 'text': return !!composeText.trim();
-        case 'image': return composeImages.length > 0;
-        case 'imageText': return composeImages.length > 0 || !!composeText.trim();
-        case 'music': return !!composeMusicName.trim();
-        case 'article': return !!composeArticleTitle.trim();
-        default: return false;
-      }
-    })();
-
-    return (
-      <div className="flex flex-col h-full" style={{ background: '#0f0f1a', color: '#e2e8f0' }}>
-        {/* 顶栏 */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-white/10 shrink-0">
-          <button onClick={() => {
-            setView('main');
-            setComposeType(null);
-            setComposeMusicName('');
-            setComposeMusicArtist('');
-            setComposeMusicCover('');
-            setComposeMusicSongId(null);
-            setComposeMusicLinkInput('');
-            setMusicParseError('');
-            setComposeArticleTitle('');
-            setComposeArticleUrl('');
-            setComposeArticleBody('');
-            setComposeArticleImage('');
-            setComposeArticleFullText('');
-            setComposeArticleLinkInput('');
-            setArticleParsed(false);
-            setArticleParseError('');
-          }} className="text-white/60 active:scale-90">
-            <X size={22} />
-          </button>
-          <div className="text-sm font-medium text-white/80">
-            {composeType === 'text' ? '发文字' : composeType === 'image' ? '发图片' : composeType === 'imageText' ? '发图文' : composeType === 'music' ? '分享音乐' : '分享文章'}
-          </div>
-          <button
-            onClick={handlePublish}
-            disabled={!canPublish}
-            className="px-4 py-1.5 rounded-full text-xs font-bold disabled:opacity-30 transition"
-            style={{ background: '#3b82f6', color: 'white' }}
-          >
-            发布
-          </button>
-        </div>
-
-        <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          {/* 文字输入 */}
-          {(composeType === 'text' || composeType === 'imageText') && (
-            <textarea
-              value={composeText}
-              onChange={e => setComposeText(e.target.value)}
-              placeholder="这一刻的想法..."
-              className="w-full min-h-[120px] bg-transparent text-sm text-white/90 placeholder:text-white/25 resize-none border-none outline-none"
-              autoFocus
-            />
-          )}
-
-          {/* 图片上传 */}
-          {(composeType === 'image' || composeType === 'imageText') && (
-            <div>
-              <div className="grid grid-cols-3 gap-2">
-                {composeImages.map((img, i) => (
-                  <div key={i} className="relative aspect-square rounded-lg overflow-hidden bg-slate-800">
-                    <img src={img} alt="" className="w-full h-full object-cover" />
-                    <button
-                      onClick={() => setComposeImages(prev => prev.filter((_, j) => j !== i))}
-                      className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 flex items-center justify-center"
-                    >
-                      <X size={12} className="text-white" />
-                    </button>
-                  </div>
-                ))}
-                {composeImages.length < 9 && (
-                  <button
-                    onClick={handleImageUpload}
-                    className="aspect-square rounded-lg border-2 border-dashed border-white/15 flex items-center justify-center active:scale-95 transition"
-                  >
-                    <Plus size={24} className="text-white/30" />
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* 音乐输入 */}
-          {composeType === 'music' && (
-            <div className="space-y-3">
-              <textarea
-                value={composeText}
-                onChange={e => setComposeText(e.target.value)}
-                placeholder="配一句话，留空就只发这首歌..."
-                className="w-full min-h-[60px] bg-transparent text-sm text-white/90 placeholder:text-white/25 resize-none border-none outline-none px-1"
-              />
-              <div>
-                <input
-                  value={composeMusicLinkInput}
-                  onChange={e => { setComposeMusicLinkInput(e.target.value); handleMusicCoverInputChange(e.target.value); }}
-                  placeholder="粘贴网易云歌曲链接（长链接或分享短链），自动识别歌名/歌手/封面"
-                  className="w-full px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10 placeholder:text-white/30"
-                  autoFocus
-                />
-                {musicParsing && <div className="text-[11px] text-white/40 mt-1">识别中…</div>}
-                {!musicParsing && musicParseError && <div className="text-[11px] text-rose-400 mt-1">{musicParseError}</div>}
-                {!musicParsing && !musicParseError && composeMusicSongId && (
-                  <div className="text-[11px] text-emerald-400 mt-1">已识别 ✓ 也可以在下面手动微调</div>
-                )}
-              </div>
-              <input
-                value={composeMusicName}
-                onChange={e => { setComposeMusicName(e.target.value); setComposeMusicSongId(null); }}
-                placeholder="歌名（识别后自动填入，也可手动输入）"
-                className="w-full px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10 placeholder:text-white/30"
-              />
-              <input
-                value={composeMusicArtist}
-                onChange={e => { setComposeMusicArtist(e.target.value); setComposeMusicSongId(null); }}
-                placeholder="歌手"
-                className="w-full px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10 placeholder:text-white/30"
-              />
-              {composeMusicCover && (
-                <div className="mt-2">{renderMusicCard({ songName: composeMusicName, artists: composeMusicArtist, albumPic: composeMusicCover })}</div>
-              )}
-            </div>
-          )}
-
-          {/* 文章输入 */}
-          {composeType === 'article' && (
-            <div className="space-y-3">
-              <div>
-                <input
-                  value={composeArticleLinkInput}
-                  onChange={e => { setComposeArticleLinkInput(e.target.value); handleArticleLinkInputChange(e.target.value); }}
-                  placeholder="粘贴文章链接，自动识别标题/摘要/封面（没有链接可直接手动填写）"
-                  className="w-full px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10 placeholder:text-white/30"
-                  autoFocus
-                />
-                {articleParsing && <div className="text-[11px] text-white/40 mt-1">识别中…</div>}
-                {!articleParsing && articleParseError && <div className="text-[11px] text-rose-400 mt-1">{articleParseError}</div>}
-                {!articleParsing && !articleParseError && articleParsed && (
-                  <div className="text-[11px] text-emerald-400 mt-1">已识别 ✓ 也可以在下面手动微调</div>
-                )}
-              </div>
-              <input
-                value={composeArticleTitle}
-                onChange={e => { setComposeArticleTitle(e.target.value); setArticleParsed(false); }}
-                placeholder="文章标题（识别后自动填入，也可手动输入）"
-                className="w-full px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10 placeholder:text-white/30"
-              />
-              <input
-                value={composeArticleBody}
-                onChange={e => { setComposeArticleBody(e.target.value); setArticleParsed(false); }}
-                placeholder="作者/摘要（走链接会自动填入识别到的信息）"
-                className="w-full px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10 placeholder:text-white/30"
-              />
-              <textarea
-                value={composeArticleFullText}
-                onChange={e => setComposeArticleFullText(e.target.value)}
-                placeholder="正文全文（可选，不在动态卡片上显示；用于点开卡片看全文，也会作为角色能读到的完整内容）"
-                className="w-full min-h-[100px] px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10 placeholder:text-white/30 resize-none"
-              />
-              <div>
-                <label className="text-xs text-white/40 mb-1 block">图片（可选）</label>
-                {composeArticleImage ? (
-                  <div className="relative w-20 h-20">
-                    <img src={composeArticleImage} alt="" className="w-full h-full object-cover rounded-lg" />
-                    <button
-                      onClick={() => setComposeArticleImage('')}
-                      className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-black/60 text-white text-[10px] flex items-center justify-center"
-                    >
-                      ✕
-                    </button>
-                  </div>
-                ) : (
-                  <button
-                    onClick={handleArticleImageUpload}
-                    className="w-20 h-20 rounded-lg border border-dashed border-white/20 flex items-center justify-center text-white/30 active:scale-95 transition"
-                  >
-                    <Plus size={18} />
-                  </button>
-                )}
-              </div>
-              {composeArticleTitle && (
-                <div className="mt-2">
-                  {renderArticleCard({ title: composeArticleTitle, body: composeArticleBody, url: composeArticleUrl, image: composeArticleImage, fullText: composeArticleFullText })}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  };
-
-  // ==================== 渲染：设置页 ====================
-
-  const renderSettings = () => {
-    if (!settings) return null;
-    return (
-      <div className="flex flex-col h-full" style={{ background: '#0f0f1a', color: '#e2e8f0' }}>
-        <div className="flex items-center gap-3 px-4 py-3 border-b border-white/10 shrink-0">
-          <button onClick={() => setView('main')} className="text-white/60 active:scale-90"><CaretLeft size={22} /></button>
-          <div className="text-sm font-medium">朋友圈设置</div>
-        </div>
-
-        <div className="flex-1 overflow-y-auto p-4 space-y-5">
-          {/* 昵称 */}
-          <div>
-            <label className="text-xs text-white/50 mb-1 block">我的昵称</label>
-            <input
-              value={settings.userNickname || ''}
-              onChange={e => setSettings({ ...settings, userNickname: e.target.value })}
-              placeholder={userProfile.name}
-              className="w-full px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10"
-            />
-          </div>
-
-          {/* 签名 */}
-          <div>
-            <label className="text-xs text-white/50 mb-1 block">我的个性签名（最多 30 字）</label>
-            <input
-              value={settings.userSignature || ''}
-              onChange={e => setSettings({ ...settings, userSignature: e.target.value.slice(0, 30) })}
-              placeholder="写点什么..."
-              maxLength={30}
-              className="w-full px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10"
-            />
-            <div className="text-[10px] text-white/30 text-right mt-0.5">{(settings.userSignature || '').length}/30</div>
-          </div>
-
-          {/* TA 的个性签名 */}
-          <div>
-            <label className="text-xs text-white/50 mb-1 block">TA 的个性签名（最多 30 字）</label>
-            <input
-              value={settings.taSignature || ''}
-              onChange={e => setSettings({ ...settings, taSignature: e.target.value.slice(0, 30) })}
-              placeholder="写点什么..."
-              maxLength={30}
-              className="w-full px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10"
-            />
-            <div className="text-[10px] text-white/30 text-right mt-0.5">{(settings.taSignature || '').length}/30</div>
-          </div>
-
-          {/* TA 发布频率 */}
-          <div>
-            <label className="text-xs text-white/50 mb-1 block">TA 每次最多发几条</label>
-            <div className="flex items-center gap-3">
-              {[1, 2, 3].map(n => (
-                <button
-                  key={n}
-                  onClick={() => setSettings({ ...settings, taPostFrequency: n })}
-                  className="px-4 py-2 rounded-lg text-sm transition"
-                  style={{
-                    background: settings.taPostFrequency === n ? '#3b82f6' : 'rgba(255,255,255,0.08)',
-                    color: settings.taPostFrequency === n ? 'white' : '#94a3b8',
-                  }}
-                >
-                  {n}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* TA 更新朋友圈的频率 */}
-          <div>
-            <label className="text-xs text-white/50 mb-1 block">TA 更新朋友圈的频率</label>
-            <div className="flex flex-wrap items-center gap-2">
-              {([
-                { value: '5min', label: '5mins' },
-                { value: '30min', label: '30mins' },
-                { value: '1h', label: '1h' },
-                { value: '2h', label: '2h' },
-                { value: 'paused', label: '暂停营业' },
-              ] as { value: MomentUpdateFrequency; label: string }[]).map(({ value, label }) => (
-                <button
-                  key={value}
-                  onClick={() => setSettings({ ...settings, updateFrequency: value })}
-                  className="px-3.5 py-2 rounded-lg text-xs transition"
-                  style={{
-                    background: settings.updateFrequency === value ? (value === 'paused' ? '#ef4444' : '#3b82f6') : 'rgba(255,255,255,0.08)',
-                    color: settings.updateFrequency === value ? 'white' : '#94a3b8',
-                  }}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-            {settings.updateFrequency === 'paused' && (
-              <div className="text-[11px] text-white/40 mt-1.5 leading-relaxed">
-                暂停营业期间，打开朋友圈 / 从查手机跳转都不会触发 TA 更新动态或回复评论。
-                TA 朋友圈页面的🔄按钮也会禁用；但🌼秘密空间依然可以查看 TA 更早以前的心事。
-              </div>
-            )}
-          </div>
-
-          {/* 异步延时互动 */}
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="text-sm text-white/80">异步延时互动</div>
-              <div className="text-xs text-white/40 mt-0.5">TA 的点赞和评论会延迟随机触发</div>
-            </div>
-            <button
-              onClick={() => setSettings({ ...settings, asyncInteraction: !settings.asyncInteraction })}
-              className="relative w-10 h-5 rounded-full transition"
-              style={{ background: settings.asyncInteraction ? '#3b82f6' : 'rgba(255,255,255,0.15)' }}
-            >
-              <span
-                className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all"
-                style={{ left: settings.asyncInteraction ? '22px' : '2px' }}
-              />
-            </button>
-          </div>
-
-          {/* 保存按钮 */}
-          <button
-            onClick={async () => {
-              await saveMomentSettings(settings);
-              addToast('设置已保存', 'success');
-              setView('main');
-            }}
-            className="w-full py-2.5 rounded-xl text-sm font-medium transition active:scale-[0.98]"
-            style={{ background: '#3b82f6', color: 'white' }}
-          >
-            保存
-          </button>
-        </div>
-      </div>
-    );
-  };
-
-  // ==================== 渲染：🌼 秘密空间 ====================
-
-  const renderSecretSpace = () => {
-    const name = settings?.secretSpaceName || '对花说的事';
-    const signature = settings?.secretSpaceSignature || '';
-    const coverImage = settings?.secretSpaceCoverImage;
-
-    const handleStartEditSecretSpace = () => {
-      setSecretSpaceNameDraft(settings?.secretSpaceName || '');
-      setSecretSpaceSignatureDraft(settings?.secretSpaceSignature || '');
-      setSecretSpaceEditing(true);
-    };
-
-    const handleSaveSecretSpaceEdit = async () => {
-      if (!settings) return;
-      const updated = {
-        ...settings,
-        secretSpaceName: secretSpaceNameDraft.trim(),
-        secretSpaceSignature: secretSpaceSignatureDraft.trim().slice(0, 30),
-      };
-      await saveMomentSettings(updated);
-      setSettings(updated);
-      setSecretSpaceEditing(false);
-      addToast('已保存', 'success');
-    };
-
-    return (
-      <div className="flex flex-col h-full" style={{ background: '#0f0f1a', color: '#e2e8f0' }}>
-        <div className="relative flex items-center justify-between px-4 py-2 shrink-0" style={{ background: 'rgba(15,15,26,0.95)' }}>
-          <button onClick={() => setView('taPage')} className="text-white/60 active:scale-90 transition">
-            <CaretLeft size={22} />
-          </button>
-          <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-sm font-medium text-white/80 whitespace-nowrap">🌼 对花说的事</div>
-          <div className="flex items-center gap-3">
-            <button
-              onClick={handleStartEditSecretSpace}
-              className="text-xs text-white/60 active:scale-90 transition"
-            >
-              编辑
-            </button>
-            <button
-              onClick={handleRefreshSecretSpace}
-              disabled={secretSpaceRefreshing}
-              className="text-xs text-white/60 active:scale-90 transition disabled:opacity-40"
-            >
-              {secretSpaceRefreshing ? '生成中…' : '换个心情'}
-            </button>
-          </div>
-        </div>
-
-        {/* 内联编辑面板：名字 + 签名，手动改（换心情会整体覆盖，不锁字段） */}
-        {secretSpaceEditing && (
-          <div className="px-4 py-3 space-y-2 border-b border-white/10 shrink-0" style={{ background: 'rgba(255,255,255,0.03)' }}>
-            <input
-              value={secretSpaceNameDraft}
-              onChange={e => setSecretSpaceNameDraft(e.target.value)}
-              placeholder="这个空间里的称呼"
-              className="w-full px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10 placeholder:text-white/30"
-            />
-            <input
-              value={secretSpaceSignatureDraft}
-              onChange={e => setSecretSpaceSignatureDraft(e.target.value.slice(0, 30))}
-              placeholder="一句签名（最多 30 字）"
-              maxLength={30}
-              className="w-full px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10 placeholder:text-white/30"
-            />
-            <div className="text-[10px] text-white/30 text-right">{secretSpaceSignatureDraft.length}/30</div>
-            <div className="flex gap-2">
-              <button onClick={handleSaveSecretSpaceEdit} className="flex-1 py-2 rounded-lg text-sm font-medium bg-blue-500 text-white active:scale-95 transition">保存</button>
-              <button onClick={() => setSecretSpaceEditing(false)} className="flex-1 py-2 rounded-lg text-sm bg-white/10 text-white/60 active:scale-95 transition">取消</button>
-            </div>
-          </div>
-        )}
-
-        <div ref={scrollRef} className="flex-1 overflow-y-auto no-scrollbar overscroll-contain">
-          {/* 封面：背景可点击上传；名字/签名点上面"编辑"手动改，或"换个心情"整体重新生成 */}
-          <div className="relative w-full shrink-0" style={{ marginBottom: signature ? 28 : 16 }}>
-            <div
-              className="relative w-full cursor-pointer"
-              style={{ height: COVER_HEIGHT }}
-              onClick={() => handleCoverUpload('secret')}
-            >
-              <div
-                className="absolute inset-0 bg-gradient-to-b from-purple-900/60 to-slate-900"
-                style={coverImage ? {
-                  backgroundImage: `url(${coverImage})`,
-                  backgroundSize: 'cover',
-                  backgroundPosition: 'center',
-                } : {}}
-              />
-              <div className="absolute inset-0 bg-gradient-to-t from-black/50 via-transparent to-black/10 pointer-events-none" />
-            </div>
-            <div className="absolute right-4 flex items-end gap-3" style={{ bottom: AVATAR_BOTTOM }}>
-              <div className="text-right self-center pb-1">
-                <div className="text-white font-bold text-[16px] drop-shadow-lg">{name}</div>
-              </div>
-              <div
-                className="shrink-0 overflow-hidden shadow-lg"
-                style={{ width: 60, height: 60, borderRadius: 12, border: '2px solid rgba(255,255,255,0.3)' }}
-              >
-                {charAvatar
-                  ? <TokenImg value={charAvatar} className="w-full h-full object-cover" />
-                  : <div className="w-full h-full bg-slate-600" />
-                }
-              </div>
-            </div>
-            {signature && (
-              <div className="absolute right-5 text-xs text-white/50 drop-shadow" style={{ bottom: SIGNATURE_BOTTOM }}>
-                {signature}
-              </div>
-            )}
-          </div>
-
-          {/* 历史动态列表：只来自"暂停营业"下🔄生成的秘密动态，按时间正序排列 */}
-          <div className="px-3 pb-6">
-            {secretMemoryPosts.length === 0 ? (
-              <div className="text-center text-white/30 text-xs py-16">
-                还没有翻到 {charName} 更早以前的心事<br />去 TA 的朋友圈点🔄看看吧
-              </div>
-            ) : (
-              secretMemoryPosts.map(renderPost)
-            )}
-          </div>
-        </div>
-      </div>
-    );
-  };
-
-  // ==================== 渲染：主视图 ====================
-
-  if (!charId) {
-    return (
-      <div className="flex items-center justify-center h-full text-white/40 text-sm">
-        请先选择一个角色
-      </div>
-    );
   }
 
-  if (view === 'compose' && composeType) return renderCompose();
-  if (view === 'settings') return renderSettings();
-  if (view === 'secretSpace') return renderSecretSpace();
+  return post;
+}
 
-  const isTA = view === 'taPage';
-  const displayPosts = isTA ? taPosts : visiblePosts;
+/** generateSecretSpaceIdentity 的返回：背景图 + 名字 + 签名（"换个心情"按钮用） */
+export interface SecretSpaceIdentity {
+  coverImage?: string;
+  name: string;
+  signature: string;
+}
 
-  return (
-    <div className="flex flex-col h-full" style={{ background: '#0f0f1a', color: '#e2e8f0' }}>
-      {renderArticleReader()}
-      {/* 顶栏 */}
-      <div className="relative flex items-center justify-between px-4 py-2 shrink-0" style={{ background: 'rgba(15,15,26,0.95)' }}>
-        <button
-          onClick={() => { if (isTA) setView('main'); else closeApp(); }}
-          className="text-white/60 active:scale-90 transition"
-        >
-          <CaretLeft size={22} />
-        </button>
+/**
+ * 🌼 秘密空间"换个心情"：只重新生成背景图 + 名字 + 个性签名，不动下面的历史动态列表。
+ * 名字和签名要体现"卸下平时人设包袱"的私密自称感，跟 TA 平时在朋友圈/聊天里的样子不同。
+ */
+export async function generateSecretSpaceIdentity(
+  char: CharacterProfile,
+  userProfile: UserProfile,
+  apiConfig: APIConfig,
+  signal?: AbortSignal,
+): Promise<SecretSpaceIdentity> {
+  const coreContext = ContextBuilder.buildCoreContext(char, userProfile, false, undefined, {
+    skipUserProfile: true,
+    headerOverride: '[角色档案]',
+  });
 
-        <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-sm font-medium text-white/80 whitespace-nowrap">
-          {isTA ? `${charName} 的朋友圈` : '朋友圈'}
-        </div>
+  const systemPrompt = `你是「${char.name}」。这里是你的秘密空间——一个完全属于你自己、别人（包括用户）都看不到的私密角落。
 
-        <div className="flex items-center gap-4">
-          {isTA ? (
-            /* TA 页面：🌼 秘密空间入口 + 刷新（暂停营业下🔄改为触发"历史动态生成"，同时归档进🌼） */
-            <>
-              <button
-                className="text-white/60 active:scale-90 transition"
-                title="秘密空间"
-                onClick={() => setView('secretSpace')}
-              >
-                <span style={{ fontSize: 20, lineHeight: 1 }}>🌼</span>
-              </button>
-              <button
-                className="text-white/60 active:scale-90 transition"
-                style={generating ? { animation: 'spin 1s linear infinite' } : {}}
-                title={settings?.updateFrequency === 'paused' ? '翻出 TA 更早以前的心事' : '让 TA 更新动态'}
-                disabled={generating}
-                onClick={() => handleGenerate(true)}
-              >
-                <ArrowsClockwise size={20} />
-              </button>
-            </>
-          ) : (
-            /* 我的页面：发布 + 设置 */
-            <>
-              <button
-                onClick={() => setView('settings')}
-                className="text-white/60 active:scale-90 transition"
-              >
-                <Gear size={18} />
-              </button>
-              <button
-                onClick={() => setShowComposeMenu(true)}
-                className="text-white/60 active:scale-90 transition"
-              >
-                <Camera size={20} weight="bold" />
-              </button>
-            </>
-          )}
-        </div>
-      </div>
+${coreContext}
 
-      {/* 内容区 */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto no-scrollbar overscroll-contain">
-        {/* 封面 */}
-        {renderCover(isTA ? 'ta' : 'user')}
+请为这个秘密空间取一个只有你自己会用的称呼和一句个性签名。这个称呼和签名要体现你卸下平时在朋友圈/
+日常里的人设包袱后，更私密、更真实的一面——可以是自嘲、脆弱、任性、或藏在心底没说出口的样子，
+不需要维持你平时给别人看的形象。
 
-        {/* AI 生成中提示 */}
-        {generating && (
-          <div className="flex items-center justify-center gap-2 py-3 text-white/40 text-xs">
-            <ArrowsClockwise size={14} style={{ animation: 'spin 1s linear infinite' }} />
-            <span>{charName} 正在更新朋友圈…</span>
-          </div>
-        )}
+请严格按以下 JSON 格式返回，不要附加任何其他文字：
 
-        {/* 动态列表 */}
-        {loading ? (
-          <div className="flex items-center justify-center py-12 text-white/30 text-sm">加载中...</div>
-        ) : displayPosts.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-16 text-white/30">
-            <div className="text-sm">
-              {generating
-                ? `${charName} 正在思考发什么…`
-                : isTA
-                  ? `${charName} 还没发过动态`
-                  : '还没有动态'
-              }
-            </div>
-            {!isTA && !generating && (
-              <button
-                onClick={() => setShowComposeMenu(true)}
-                className="mt-3 text-xs text-blue-400 active:scale-90 transition"
-              >
-                发布第一条朋友圈
-              </button>
-            )}
-            {isTA && !generating && apiConfig.apiKey && (
-              <button
-                onClick={() => handleGenerate(true)}
-                className="mt-3 text-xs text-blue-400 active:scale-90 transition"
-              >
-                让 {charName} 发一条
-              </button>
-            )}
-          </div>
-        ) : (
-          displayPosts.map(renderPost)
-        )}
+{
+  "name": "这个秘密空间里你给自己的称呼",
+  "signature": "一句个性签名"
+}`;
 
-        {/* 底部安全间距 */}
-        <div className="h-20" />
-      </div>
+  const url = `${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+  const body = {
+    model: apiConfig.model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: '换个心情，重新取一个称呼和签名。只返回 JSON。' },
+    ],
+    temperature: 1.0,
+    max_tokens: 300,
+  };
 
-      {/* 发布菜单 */}
-      {showComposeMenu && renderComposeMenu()}
-    </div>
-  );
-};
+  const data = await safeFetchJson(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiConfig.apiKey}`,
+    },
+    body: JSON.stringify(body),
+    signal,
+  } as RequestInit, 1, 30_000, {
+    appId: 'moments',
+    appName: '朋友圈',
+    purpose: '秘密空间换心情',
+  });
 
-export default MomentsApp;
+  const content = data?.choices?.[0]?.message?.content || '';
+  const parsed = extractJson(content) as { name?: string; signature?: string } | null;
+  if (!parsed?.name?.trim()) {
+    throw new Error('AI 没有返回有效的称呼');
+  }
+
+  const identity: SecretSpaceIdentity = {
+    name: parsed.name.trim(),
+    signature: parsed.signature?.trim() || '',
+  };
+
+  // 背景图：能生就生，生不出来不阻塞（名字/签名依然生效）。竖版尺寸，贴近手机封面比例。
+  if (isImageGenApiReady(apiConfig.imageGenApi) && apiConfig.imageGenApi) {
+    console.info('[Moments/Secret] 开始生成秘密空间背景图');
+    try {
+      const bgPrompt = `A dreamy, private, abstract background image representing a secret personal space, `
+        + `soft colors, atmospheric, no text, no people, portrait orientation`;
+      const results = await generateImage(apiConfig.imageGenApi, bgPrompt, {
+        size: '1024x1536',
+        meta: { appId: 'moments', appName: '朋友圈', purpose: '秘密空间背景生成', charId: char.id, charName: char.name } as any,
+      });
+      const first = results[0];
+      if (!first?.src) throw new Error('生图 API 没有返回图片（results 为空或缺少 src）');
+      identity.coverImage = first.src.startsWith('data:') ? await migrateDataUrlToRef(first.src) : first.src;
+      console.info('[Moments/Secret] 背景图生成成功');
+    } catch (e: any) {
+      console.warn(
+        '[Moments/Secret] 背景图生成失败，跳过:',
+        '\nmessage:', e?.message || String(e),
+        '\nstack:', e?.stack || '(无堆栈)',
+      );
+    }
+  } else {
+    console.info('[Moments/Secret] 生图 API 未就绪，跳过背景图生成');
+  }
+
+  return identity;
+}
+
+// ==================== 文章详情页：虚拟评论区（一次性生成，纯氛围，只读） ====================
+
+/** generateFakeArticleComments 的入参 */
+export interface GenerateFakeArticleCommentsInput {
+  char: CharacterProfile;
+  userProfile: UserProfile;
+  apiConfig: APIConfig;
+  article: MomentArticleCard;
+  signal?: AbortSignal;
+}
+
+/**
+ * 给一篇文章生成一个虚拟评论区：3 条主楼（多为虚构路人，偶尔角色本人插一句），
+ * 每条楼下 2-3 条追评（路人接路人的茬，或角色本人回一句）。纯粹是营造"这篇文章
+ * 下面很热闹"的氛围，一次性生成、只读展示，不支持用户参与或多轮追加。
+ */
+export async function generateFakeArticleComments(
+  input: GenerateFakeArticleCommentsInput,
+): Promise<FakeCommentThread[]> {
+  const { char, userProfile, apiConfig, article, signal } = input;
+
+  const articleText = (article.fullText || article.body || '').slice(0, 2000);
+  const coreContext = ContextBuilder.buildCoreContext(char, userProfile, false, undefined, {
+    skipUserProfile: true,
+    headerOverride: '[角色档案，其中一条评论可能是这个角色本人发的]',
+  });
+
+  const systemPrompt = `你要给一篇文章编造一个热闹的评论区，纯粹是营造氛围用的虚构内容，不是真实评论。
+
+【文章标题】${article.title || '未命名文章'}
+【文章内容】${articleText || '（没有正文，仅凭标题发挥）'}
+
+${coreContext}
+
+【写作要求】
+- 编 3 条主楼评论 + 每条楼下 2-3 条追评（楼中楼），像真实网友评论区一样：
+  语气松散口语化、观点各异、可以有抬杠的、玩梗的、跑题的、共情的，不要每条都一本正经
+- 昵称要有"网友感"（类似"四处乱窜""躺平中（休假勿扰）"这种风格），不要用真实姓名，
+  每条评论昵称不重复
+- 3 条主楼里，1 条可以是「${char.name}」本人用真实身份发的（isChar 设为 true，authorName
+  填"${char.name}"，语气要符合这个角色的人设，不要变成路人腔调）；其余保持虚构路人
+- 追评是路人之间互相接话、玩梗、抬杠，或者角色本人在评论区里被艾特/回复了一句（isChar 设 true）；
+  不是每条追评都要有角色参与，大部分追评应该还是路人对路人
+- 每条评论内容控制在 1-2 句话，别写成小作文
+
+请严格按以下 JSON 格式返回，不要附加任何其他文字：
+
+{
+  "threads": [
+    {
+      "authorName": "昵称",
+      "isChar": false,
+      "content": "主楼评论内容",
+      "replies": [
+        { "authorName": "昵称", "isChar": false, "content": "追评内容" }
+      ]
+    }
+  ]
+}`;
+
+  const url = `${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+  const body = {
+    model: apiConfig.model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: '生成这篇文章的评论区。只返回 JSON。' },
+    ],
+    temperature: 1.0,
+    max_tokens: 1400,
+  };
+
+  const data = await safeFetchJson(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiConfig.apiKey}`,
+    },
+    body: JSON.stringify(body),
+    signal,
+  } as RequestInit, 1, 30_000, {
+    appId: 'moments',
+    appName: '朋友圈',
+    purpose: '生成文章虚拟评论区',
+  });
+
+  const content = data?.choices?.[0]?.message?.content || '';
+  const parsed = extractJson(content) as { threads?: FakeCommentThread[] } | null;
+  const threads = parsed?.threads;
+  if (!Array.isArray(threads) || threads.length === 0) {
+    console.warn('[Moments/ArticleComments] JSON 解析失败或为空，原始返回内容:', content);
+    throw new Error('AI 没有返回有效的评论区内容');
+  }
+
+  // 防御性清洗：过滤掉没有内容的楼层，追评数组不存在时兜底成空数组。
+  return threads
+    .filter(t => t?.content?.trim() && t?.authorName?.trim())
+    .slice(0, 3)
+    .map(t => ({
+      authorName: t.authorName.trim(),
+      isChar: !!t.isChar,
+      content: t.content.trim(),
+      replies: (Array.isArray(t.replies) ? t.replies : [])
+        .filter(r => r?.content?.trim() && r?.authorName?.trim())
+        .slice(0, 3)
+        .map(r => ({ authorName: r.authorName.trim(), isChar: !!r.isChar, content: r.content.trim() })),
+    }));
+}
