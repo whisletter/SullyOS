@@ -10,11 +10,13 @@
  */
 
 import type { CharacterProfile, UserProfile, APIConfig } from '../types';
-import type { MomentPost, MomentComment, MomentSettings, MomentUpdateFrequency } from './momentsDb';
+import type { MomentPost, MomentComment, MomentSettings, MomentUpdateFrequency, MomentMusicCard } from './momentsDb';
 import { createPostId, createCommentId } from './momentsDb';
 import { ContextBuilder } from './context';
 import { DB } from './db';
 import { safeFetchJson, extractJson } from './safeApi';
+import type { MusicCfg } from '../context/MusicContext';
+import { musicApi } from '../context/MusicContext';
 import { formatMessageForPrompt } from './messageFormat';
 import { buildScheduleInjection, type RenderableSchedule } from './scheduleInjection';
 import { generateImage, isImageGenApiReady } from './imageGenApi';
@@ -37,6 +39,12 @@ interface AiGeneratedPost {
    * 只有全局生图 API 已开启时，prompt 里才会教这个字段；否则 AI 不会写它。
    */
   imagePrompt?: string;
+  /**
+   * 可选：这条动态想分享一首歌时，填候选列表里那首歌的 id；不想分享就不填。
+   * 只能选 prompt 里明确列出的候选（TA 自己歌单 / 用户网易云歌单），不能编造。
+   * 前端会先用 song/url 验证这首歌真的能播放，不能播就退化成不分享音乐。
+   */
+  shareMusicId?: number;
 }
 
 /** AI 返回的对用户某条动态的互动 */
@@ -64,8 +72,16 @@ interface AiMomentsResponse {
   newPosts: AiGeneratedPost[];
   interactions: AiInteraction[];
   commentReplies?: AiCommentReply[];
-  /** 想置顶/继续置顶的动态 id 列表；不写代表置顶现状不变。只在完整模式（非暂停营业）下可用。 */
-  pinnedPostIds?: string[];
+}
+
+/** 可供 TA 分享的候选歌曲（精简结构，来源可能是 TA 自己歌单或用户网易云歌单） */
+export interface MusicShareCandidate {
+  id: number;
+  name: string;
+  artists: string;
+  albumPic: string;
+  /** 'ta' = 来自 TA 自己的歌单；'user' = 来自用户的网易云歌单 */
+  source: 'ta' | 'user';
 }
 
 /** generateMoments 的入参 */
@@ -76,6 +92,13 @@ export interface GenerateMomentsInput {
   settings: MomentSettings;
   /** 当前已有的全部动态（用于去重 + 提供用户动态给 AI 互动） */
   existingPosts: MomentPost[];
+  /**
+   * 可供 TA 分享音乐的候选池（TA 自己歌单 + 用户网易云歌单，已在调用方去重合并）。
+   * 传了才会在 prompt 里教 AI"任务 5：分享音乐"；不传/空数组则完全不提这件事。
+   */
+  musicCandidates?: MusicShareCandidate[];
+  /** 网易云代理配置，音乐候选有值时用来验证 AI 选中的歌是否真能播放（song/url）。 */
+  musicCfg?: MusicCfg;
   /**
    * "暂停营业"模式下为 true：只做任务 1（发新动态），跳过任务 2（点赞/评论用户动态）
    * 和任务 3（回复自己动态下的追评）——因为这个状态代表"联系不上 TA"，TA 不会看用户的朋友圈。
@@ -180,8 +203,7 @@ function formatTaRecentPosts(posts: MomentPost[], charId: string): string {
   return taPosts.map(p => {
     const time = new Date(p.createdAt);
     const timeStr = `${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}`;
-    const pinnedTag = p.pinned ? ' (已置顶)' : '';
-    return `[id=${p.id}] ${timeStr} "${(p.text || '').slice(0, 80)}"${pinnedTag}`;
+    return `${timeStr} "${(p.text || '').slice(0, 80)}"`;
   }).join('\n');
 }
 
@@ -217,6 +239,26 @@ function formatPendingReplies(pendingPosts: MomentPost[], charName: string): str
 }
 
 /**
+ * 格式化「可分享的候选歌曲」列表：只报 id/歌名/歌手/来源，不让 AI 编造歌单里没有的歌。
+ * 最多各取 8 首（TA 自己的 + 用户的），避免 prompt 太长。
+ */
+function formatMusicCandidates(candidates: MusicShareCandidate[]): string {
+  if (candidates.length === 0) return '(没有可分享的歌)';
+  const taSongs = candidates.filter(c => c.source === 'ta').slice(0, 8);
+  const userSongs = candidates.filter(c => c.source === 'user').slice(0, 8);
+  const lines: string[] = [];
+  if (taSongs.length > 0) {
+    lines.push('你自己歌单里的歌：');
+    lines.push(...taSongs.map(s => `  [id=${s.id}] ${s.name} - ${s.artists}`));
+  }
+  if (userSongs.length > 0) {
+    lines.push('用户网易云歌单里的歌（你能看到，因为对方允许你读取）：');
+    lines.push(...userSongs.map(s => `  [id=${s.id}] ${s.name} - ${s.artists}`));
+  }
+  return lines.join('\n');
+}
+
+/**
  * 组装完整的 system prompt
  */
 function buildMomentsPrompt(
@@ -228,6 +270,8 @@ function buildMomentsPrompt(
   userPostsText: string,
   taRecentText: string,
   pendingRepliesText: string,
+  musicCandidatesText: string,
+  hasMusicCandidates: boolean,
   maxPosts: number,
   imageGenAvailable: boolean,
   skipInteractions: boolean,
@@ -251,7 +295,14 @@ ${taRecentText}
 
 【你自己动态下面，用户刚追评、还等你回话的】
 ${pendingRepliesText}
-`;
+${hasMusicCandidates ? `
+【可以分享的歌（只能从这里面选，不能编造）】
+${musicCandidatesText}
+` : ''}`;
+
+  const musicTaskHint = (!skipInteractions && hasMusicCandidates) ? `
+   - 这条动态也可以是分享一首歌：想分享就在这条里加一个 "shareMusicId" 字段，填上面歌曲列表里的 id；
+     不想分享音乐就不要写这个字段（分享音乐这条通常不需要再配图或写很长的文字，写不写 text 都行）` : '';
 
   const tasksSection = skipInteractions
     ? `现在你只需要做一件事：
@@ -272,7 +323,7 @@ ${pendingRepliesText}
    - 文字风格要像真人发朋友圈：简短、口语化、可以带 emoji、不要太正式
    - 可以分享日常、感想、吐槽、自拍描述、转发感悟等${imageGenAvailable ? `
    - 这条动态要不要配图，由你自己判断（结合人设/日程/最近聊天语境，不是每条都要配）：想配图就在这条里加一个
-     "imagePrompt" 字段，写一句简短的英文图片描述（场景/动作/穿着等细节）；不想配图就不要写这个字段` : ''}
+     "imagePrompt" 字段，写一句简短的英文图片描述（场景/动作/穿着等细节）；不想配图就不要写这个字段` : ''}${musicTaskHint}
 
 2. 看用户的朋友圈，决定是否点赞/评论
    - 对标了"(你已点赞)"或"(你已评论)"的动态不要重复互动
@@ -284,13 +335,7 @@ ${pendingRepliesText}
    - 你可以回复也可以不回复（觉得没必要接就跳过），符合你的性格和当下语境即可
    - 如果要回复，commentReplies 里加一项：postId 填对应动态的 id，replyToCommentId 填你要回复的
      那条用户评论的 commentId（通常是列表里最后一条，除非你想回应更早的某句话），comment 填回复内容
-   - 回复要像真人聊天接话，别写成一段客套的官方回应
-
-4. 看"你最近发的朋友圈"列表，判断自己有没有想置顶的
-   - 通常是对你来说意义特别、值得放在最上面的一条（大部分时候不需要置顶任何东西）
-   - 如果想置顶，pinnedPostIds 填你想置顶的动态 id（可以是新的，也可以是标了"(已置顶)"、你想继续保留的）
-   - 不写这个字段，或者不把某条"(已置顶)"的 id 写进去，就代表它不再置顶
-   - 完全不需要变动现状（不新增也不取消）就整个不写这个字段`;
+   - 回复要像真人聊天接话，别写成一段客套的官方回应`;
 
   const jsonFormat = skipInteractions
     ? `{
@@ -307,7 +352,8 @@ ${pendingRepliesText}
     {
       "text": "朋友圈文字内容",
       "postTime": "HH:MM"${imageGenAvailable ? `,
-      "imagePrompt": "可选：想配图就写一句简短的英文图片描述；不配图就不要写这个字段"` : ''}
+      "imagePrompt": "可选：想配图就写一句简短的英文图片描述；不配图就不要写这个字段"` : ''}${hasMusicCandidates ? `,
+      "shareMusicId": "可选：想分享歌就填候选列表里的歌曲 id；不分享就不要写这个字段"` : ''}
     }
   ],
   "interactions": [
@@ -323,8 +369,7 @@ ${pendingRepliesText}
       "replyToCommentId": "要回复的那条用户评论的 commentId",
       "comment": "回复内容"
     }
-  ],
-  "pinnedPostIds": ["想置顶/继续置顶的动态 id，完全不写这个字段代表现状不变"]
+  ]
 }`;
 
   return `你是「${char.name}」，正在发朋友圈${skipInteractions ? '' : '和浏览朋友圈'}。
@@ -358,11 +403,12 @@ ${jsonFormat}`;
  * 核心函数：生成 TA 的朋友圈动态 + 对用户动态的互动
  */
 export async function generateMoments(input: GenerateMomentsInput): Promise<GenerateMomentsResult> {
-  const { char, userProfile, apiConfig, settings, existingPosts, skipInteractions, signal } = input;
+  const { char, userProfile, apiConfig, settings, existingPosts, musicCandidates, musicCfg, skipInteractions, signal } = input;
   const charId = char.id;
   const charName = char.name;
   const userName = userProfile.name || '用户';
   const maxPosts = settings.taPostFrequency || 3;
+  const hasMusicCandidates = !skipInteractions && !!musicCandidates && musicCandidates.length > 0;
 
   // 1. 收集上下文（暂停营业模式跳过用户动态/待回复相关的收集，反正 prompt 不会用到）
   const [chatSummary, scheduleText] = await Promise.all([
@@ -373,12 +419,14 @@ export async function generateMoments(input: GenerateMomentsInput): Promise<Gene
   const taRecentText = formatTaRecentPosts(existingPosts, charId);
   const pendingReplyPosts = skipInteractions ? [] : findPendingReplies(existingPosts, charId);
   const pendingRepliesText = skipInteractions ? '' : formatPendingReplies(pendingReplyPosts, charName);
+  const musicCandidatesText = hasMusicCandidates ? formatMusicCandidates(musicCandidates!) : '';
 
   // 2. 构建 prompt
   const imageGenAvailable = isImageGenApiReady(apiConfig.imageGenApi);
   const systemPrompt = buildMomentsPrompt(
     char, userProfile, settings,
     scheduleText, chatSummary, userPostsText, taRecentText, pendingRepliesText,
+    musicCandidatesText, hasMusicCandidates,
     maxPosts, imageGenAvailable, !!skipInteractions,
   );
 
@@ -423,42 +471,74 @@ export async function generateMoments(input: GenerateMomentsInput): Promise<Gene
 
   // 5. 构造 MomentPost[]
   const now = new Date();
-  const newPosts: MomentPost[] = (parsed.newPosts || [])
-    .filter(p => p.text?.trim())
-    .slice(0, maxPosts)
-    .map(p => {
-      // 解析 postTime → 时间戳
-      let timestamp = now.getTime() - Math.floor(Math.random() * 3600_000); // 默认：过去 1 小时内
-      if (p.postTime && /^\d{1,2}:\d{2}$/.test(p.postTime)) {
-        const [h, m] = p.postTime.split(':').map(Number);
-        const d = new Date(now);
-        d.setHours(h, m, Math.floor(Math.random() * 60), 0);
-        // 确保在过去
-        if (d.getTime() > now.getTime()) {
-          d.setTime(now.getTime() - Math.floor(Math.random() * 600_000));
-        }
-        timestamp = d.getTime();
-      }
+  const newPosts: MomentPost[] = (
+    await Promise.all(
+      (parsed.newPosts || [])
+        .filter(p => p.text?.trim() || (hasMusicCandidates && p.shareMusicId != null))
+        .slice(0, maxPosts)
+        .map(async (p) => {
+          // 解析 postTime → 时间戳
+          let timestamp = now.getTime() - Math.floor(Math.random() * 3600_000); // 默认：过去 1 小时内
+          if (p.postTime && /^\d{1,2}:\d{2}$/.test(p.postTime)) {
+            const [h, m] = p.postTime.split(':').map(Number);
+            const d = new Date(now);
+            d.setHours(h, m, Math.floor(Math.random() * 60), 0);
+            // 确保在过去
+            if (d.getTime() > now.getTime()) {
+              d.setTime(now.getTime() - Math.floor(Math.random() * 600_000));
+            }
+            timestamp = d.getTime();
+          }
 
-      const imagePrompt = imageGenAvailable ? p.imagePrompt?.trim() : undefined;
-      const post: MomentPost = {
-        id: createPostId(),
-        charId,
-        author: charId,
-        authorName: charName,
-        authorAvatar: char.avatar || '',
-        // 前端根据 imagePrompt 是否存在决定 type，不需要 AI 自己在 text/image/imageText 里三选一。
-        type: imagePrompt ? 'imageText' : 'text',
-        text: p.text.trim(),
-        imagePrompt,
-        likes: [],
-        likeNames: [],
-        comments: [],
-        createdAt: timestamp,
-        updatedAt: timestamp,
-      };
-      return post;
-    });
+          const imagePrompt = imageGenAvailable ? p.imagePrompt?.trim() : undefined;
+
+          // 音乐分享：只认候选池里真实存在的 id（防止 AI 编造），验证能播放才发出去，
+          // 不能播就整条退化成普通文字/图文动态（不占用另一次主 API 调用去重新问 AI）。
+          let musicCard: MomentMusicCard | undefined;
+          if (hasMusicCandidates && p.shareMusicId != null && musicCfg) {
+            const candidate = musicCandidates!.find(c => c.id === p.shareMusicId);
+            if (candidate) {
+              try {
+                const urlRes = await musicApi.songUrl(musicCfg, candidate.id);
+                const playable = !!urlRes?.data?.[0]?.url;
+                if (playable) {
+                  musicCard = {
+                    songId: candidate.id,
+                    songName: candidate.name,
+                    artists: candidate.artists,
+                    albumPic: candidate.albumPic,
+                  };
+                } else {
+                  console.info('[Moments] TA 想分享的歌暂不可播放，退化成普通动态:', candidate.name);
+                }
+              } catch (e: any) {
+                console.warn('[Moments] 验证分享歌曲能否播放时出错，退化成普通动态:', e?.message || String(e));
+              }
+            }
+          }
+
+          const post: MomentPost = {
+            id: createPostId(),
+            charId,
+            author: charId,
+            authorName: charName,
+            authorAvatar: char.avatar || '',
+            // 前端根据 imagePrompt/musicCard 是否存在决定 type，不需要 AI 自己在
+            // text/image/imageText/music 里选，减少格式出错的空间。
+            type: musicCard ? 'music' : (imagePrompt ? 'imageText' : 'text'),
+            text: p.text?.trim() || '',
+            imagePrompt: musicCard ? undefined : imagePrompt,
+            music: musicCard,
+            likes: [],
+            likeNames: [],
+            comments: [],
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          };
+          return post;
+        })
+    )
+  );
 
   // 5.5 并发给需要配图的动态生图。单条失败只退化成纯文字发布（type 改回 text，但保留
   // imagePrompt——用户在朋友圈里点裂图上的 🔄 时，还能用同一句描述再试一次，不用重新
@@ -574,26 +654,6 @@ export async function generateMoments(input: GenerateMomentsInput): Promise<Gene
       updatedTaPosts[idx] = updated;
     } else {
       updatedTaPosts.push(updated);
-    }
-  }
-
-  // 8. 处理置顶（只在完整模式下生效；暂停营业模式的 prompt 不会教这个字段，AI 也不会返回它，
-  // 这里的 skipInteractions 判断是双重保险，防止未来改动误让暂停营业模式也生效）。
-  if (!skipInteractions && Array.isArray(parsed.pinnedPostIds)) {
-    const nextPinnedIds = new Set(parsed.pinnedPostIds.filter((id): id is string => typeof id === 'string'));
-    const taOwnPosts = existingPosts.filter(p => p.author === charId);
-    for (const taPost of taOwnPosts) {
-      const shouldBePinned = nextPinnedIds.has(taPost.id);
-      if (!!taPost.pinned === shouldBePinned) continue; // 状态没变，跳过
-      const alreadyUpdated = updatedTaPosts.find(p => p.id === taPost.id);
-      const base = alreadyUpdated || taPost;
-      const updated: MomentPost = { ...base, pinned: shouldBePinned, updatedAt: Date.now() };
-      if (alreadyUpdated) {
-        const idx = updatedTaPosts.findIndex(p => p.id === taPost.id);
-        updatedTaPosts[idx] = updated;
-      } else {
-        updatedTaPosts.push(updated);
-      }
     }
   }
 
