@@ -113,6 +113,18 @@ export interface MomentPost {
    * 也不出现在 TA 朋友圈子页面的常规列表里（那两处都要按这个字段过滤掉）。
    */
   isSecretMemory?: boolean;
+  /**
+   * 「沉寂归档」的高水位标记：这条动态的评论区已经归档进记忆宫殿到哪个时间点。
+   *
+   * 存时间戳而不是"第几条评论"，因为索引会在两种情况下错位：评论被删除、
+   * 楼中楼回复插进已有的楼里。时间戳水位对这两种情况天然免疫 —— 归档时把
+   * 评论按 createdAt 排序，只取 > memoryArchivedUntil 的部分即可。
+   *
+   * undefined = 从未归档过（正文也还没进宫殿）。
+   * 只在 extractMemoriesFromBuffer 成功返回之后才写，失败绝不推进，
+   * 否则那批评论会永久丢失、再也不会被扫到。
+   */
+  memoryArchivedUntil?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -121,7 +133,7 @@ export interface MomentPost {
 export type MomentUpdateFrequency = '5min' | '30min' | '1h' | '2h' | 'paused';
 
 /** 每角色的朋友圈设置 */
-export type MomentAiTaskKind = 'pin' | 'image_ai';
+export type MomentAiTaskKind = 'pin' | 'image_ai' | 'memory_archive';
 export type MomentAiTaskStatus = 'pending' | 'processing' | 'completed' | 'failed';
 
 /** 朋友圈发布后的本地后台任务。任务只保存 ID/状态，不把 API Key 写进队列。 */
@@ -278,6 +290,21 @@ export async function enqueueMomentAiTask(task: MomentAiTask): Promise<void> {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
     tx.onabort = () => reject(tx.error || new Error('enqueueMomentAiTask aborted'));
+  });
+}
+
+/**
+ * 按 ID 读单个任务。沉寂扫描入队前用它检查"这条动态是不是已经有一个归档任务在跑"——
+ * 因为 createMomentAiTaskId 是固定 ID，直接 put 会把 processing 中的任务重置成 pending，
+ * 造成同一批评论被提取两次。
+ */
+export async function getMomentAiTask(taskId: string): Promise<MomentAiTask | null> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_AI_TASKS, 'readonly');
+    const req = tx.objectStore(STORE_AI_TASKS).get(taskId);
+    req.onsuccess = () => resolve((req.result as MomentAiTask | undefined) || null);
+    req.onerror = () => reject(req.error);
   });
 }
 
