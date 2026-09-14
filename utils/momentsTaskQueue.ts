@@ -155,7 +155,6 @@ export async function pumpMomentTaskQueue(): Promise<void> {
   if (timer) clearTimeout(timer);
   timer = setTimeout(() => { void pumpMomentTaskQueue(); }, running.size ? 500 : 2500);
 }
-
 // 页面可见性恢复时立即扫一遍；浏览器后台节流时也不会丢任务，重新进入页面后会继续。
 if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => { if (!document.hidden) void pumpMomentTaskQueue(); });
