@@ -394,6 +394,7 @@ const MomentsApp: React.FC = () => {
       text: composeText.trim() || undefined,
       images: composeImages.length > 0 ? composeImages : undefined,
       music: composeType === 'music' ? {
+        songId: composeMusicSongId ?? undefined,
         songName: composeMusicName,
         artists: composeMusicArtist,
         albumPic: composeMusicCover,
@@ -615,6 +616,10 @@ const MomentsApp: React.FC = () => {
     try {
       // 音乐动态：分享成真能播放的 music_card（intent: 'shared'），不是纯展示的转发卡片。
       if (post.type === 'music' && post.music) {
+        if (!post.music.songId) {
+          addToast('这首歌没有可播放的信息，没法分享成播放卡片', 'error');
+          return;
+        }
         await DB.saveMessage({
           charId,
           role: 'user',
