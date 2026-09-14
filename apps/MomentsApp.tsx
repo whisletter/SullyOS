@@ -45,7 +45,6 @@ import {
   MomentSettings,
   MomentMusicCard,
   MomentArticleCard,
-  FakeCommentThread,
   MomentPostType,
   MomentUpdateFrequency,
   DEFAULT_MOMENT_SETTINGS,
@@ -57,7 +56,8 @@ import {
   createPostId,
   createCommentId,
 } from '../utils/momentsDb';
-import { generateMoments, canGenerate, generateSecretMemory, generateSecretSpaceIdentity, generateFakeArticleComments, type MusicShareCandidate } from '../utils/momentsAi';
+import { generateMoments, canGenerate, generateSecretMemory, generateSecretSpaceIdentity, type MusicShareCandidate } from '../utils/momentsAi';
+import ArticleReader from '../components/moments/ArticleReader';
 import { DB } from '../utils/db';
 import { useMusic, musicApi, toHttps } from '../context/MusicContext';
 import { expandShortUrl, extractWebpageContent, detectFirstUrl } from '../utils/webpageExtractor';
@@ -115,7 +115,6 @@ const MomentsApp: React.FC = () => {
   const [secretSpaceEditing, setSecretSpaceEditing] = useState(false);
   /** 点文章卡片展开详情页时，正在看哪篇（含所属动态 id，null = 没打开）。 */
   const [readingArticle, setReadingArticle] = useState<{ postId: string; article: MomentArticleCard } | null>(null);
-  const [articleCommentsGenerating, setArticleCommentsGenerating] = useState(false);
   const [secretSpaceNameDraft, setSecretSpaceNameDraft] = useState('');
   const [secretSpaceSignatureDraft, setSecretSpaceSignatureDraft] = useState('');
   const genAbortRef = useRef<AbortController | null>(null);
@@ -715,10 +714,16 @@ const MomentsApp: React.FC = () => {
 
       const momentData = {
         charId: post.charId,
+        // 谁发的这条动态。messageFormat 靠它区分「用户转发自己的」还是「转发 TA 的」，
+        // 不用再去猜 charName 是昵称还是角色名。旧消息没有这个字段，那边有兜底。
+        author: post.author,
         charName: post.author === 'user' ? (settings?.userNickname || userProfile.name || '我') : charName,
         charAvatar: post.author === 'user' ? (userProfile.perCharAvatars?.[charId] || userProfile.avatar) : charAvatar,
         text: post.text || '',
         images: post.images || [],
+        // 图片的识图描述缓存一起带走：角色在朋友圈里"看过"的图，转发到聊天里也该还看得见，
+        // 否则同一批图在两个场景下角色的认知不一致。没缓存就是 undefined，那边会如实说看不到。
+        imageDescriptions: post.imageDescriptions || undefined,
         music: post.music || undefined,
         article: post.article || undefined,
         createdAt: post.createdAt,
@@ -1055,124 +1060,33 @@ const MomentsApp: React.FC = () => {
   // ==================== 渲染：文章全文阅读层 ====================
 
   /**
-   * 点评论区中间那个不明显的"网络不好，刷新试试..."按钮：生成一次虚拟评论区并
-   * 写回这篇文章所属动态的 article.fakeComments 缓存，之后重复打开不用再生成。
+   * 详情页本体已抽到 components/moments/ArticleReader.tsx，聊天框里的朋友圈转发卡
+   * 引用同一份（样式单点维护）。这里只留「生成好的评论区存哪」这件本地的事：
+   * 写回这篇文章所属动态的 article.fakeComments 并落库，之后重复打开不用再生成。
    */
-  const handleGenerateArticleComments = useCallback(async () => {
-    if (!readingArticle || !char) return;
-    if (!apiConfig.apiKey || !apiConfig.baseUrl) {
-      addToast('请先配置 API', 'info');
-      return;
-    }
-    setArticleCommentsGenerating(true);
-    try {
-      const threads = await generateFakeArticleComments({
-        char, userProfile, apiConfig, article: readingArticle.article,
-      });
-      const post = posts.find(p => p.id === readingArticle.postId);
-      if (!post || !post.article) return;
-      const updatedArticle: MomentArticleCard = { ...post.article, fakeComments: threads };
-      const updatedPost: MomentPost = { ...post, article: updatedArticle, updatedAt: Date.now() };
-      await savePost(updatedPost);
-      setPosts(prev => prev.map(p => p.id === updatedPost.id ? updatedPost : p));
-      setReadingArticle({ postId: readingArticle.postId, article: updatedArticle });
-    } catch (e: any) {
-      addToast(`评论加载失败: ${e?.message?.slice(0, 60) || '未知错误'}`, 'error');
-    } finally {
-      setArticleCommentsGenerating(false);
-    }
-  }, [readingArticle, char, apiConfig, userProfile, posts, addToast]);
+  const handleArticleCommentsGenerated = useCallback(async (updatedArticle: MomentArticleCard) => {
+    if (!readingArticle) return;
+    // 先把详情页刷新掉，落库失败也不影响这次已经生成出来的评论区。
+    setReadingArticle({ postId: readingArticle.postId, article: updatedArticle });
+    const post = posts.find(p => p.id === readingArticle.postId);
+    if (!post || !post.article) return;
+    const updatedPost: MomentPost = { ...post, article: updatedArticle, updatedAt: Date.now() };
+    await savePost(updatedPost);
+    setPosts(prev => prev.map(p => p.id === updatedPost.id ? updatedPost : p));
+  }, [readingArticle, posts]);
 
   const renderArticleReader = () => {
     if (!readingArticle) return null;
-    const { article } = readingArticle;
-    const text = article.fullText?.trim() || article.body?.trim() || '（这篇文章没有留下更多内容）';
-    const threads = article.fakeComments;
-
     return (
-      <div className="fixed inset-0 z-50 flex flex-col" style={{ background: '#f5f5f7' }}>
-        <div className="flex items-center gap-3 px-4 py-3 border-b border-black/5 shrink-0 bg-white">
-          <button onClick={() => setReadingArticle(null)} className="text-slate-500 active:scale-90">
-            <CaretLeft size={22} />
-          </button>
-          <div className="text-sm font-medium truncate flex-1 text-slate-800">{article.title || '未命名文章'}</div>
-          {article.url && (
-            <button
-              onClick={() => window.open(article.url, '_blank', 'noopener,noreferrer')}
-              className="text-[11px] text-blue-500 active:scale-95 shrink-0 flex items-center gap-0.5"
-            >
-              查看原网页
-            </button>
-          )}
-        </div>
-
-        <div className="flex-1 overflow-y-auto">
-          {/* 正文区：仿公众号推送排版 */}
-          <div className="bg-white px-5 pt-6 pb-5">
-            <div className="text-xl font-bold mb-4 leading-snug text-slate-900">
-              {article.title || '未命名文章'}
-            </div>
-            {article.image && (
-              <img src={article.image} alt="" className="w-full rounded-lg mb-4 object-cover max-h-56" />
-            )}
-            {article.body && (
-              <div className="text-sm mb-3 text-slate-500">
-                {article.body}
-              </div>
-            )}
-            <div className="text-[15px] leading-[1.9] whitespace-pre-wrap text-slate-700">
-              {text}
-            </div>
-          </div>
-
-          {/* 虚拟评论区 */}
-          <div className="mt-2 bg-white px-4 py-4">
-            <div className="text-sm font-medium text-slate-800 mb-3">精选留言</div>
-            {!threads || threads.length === 0 ? (
-              <button
-                onClick={handleGenerateArticleComments}
-                disabled={articleCommentsGenerating}
-                className="w-full py-8 text-center text-xs text-slate-300 active:scale-[0.99] transition-transform disabled:opacity-60"
-              >
-                {articleCommentsGenerating ? '加载中…' : '网络不好，刷新试试...'}
-              </button>
-            ) : (
-              <div className="space-y-4">
-                {threads.map((thread, i) => (
-                  <div key={i}>
-                    <div className="flex items-start gap-2">
-                      <div
-                        className="w-7 h-7 rounded-full shrink-0 flex items-center justify-center text-[11px] font-medium text-white"
-                        style={{ background: thread.isChar ? '#807c9d' : '#c2c2c8' }}
-                      >
-                        {thread.authorName.slice(0, 1)}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-xs font-medium" style={{ color: thread.isChar ? '#5a49a8' : '#64748b' }}>
-                          {thread.authorName}
-                        </div>
-                        <div className="text-sm text-slate-700 mt-0.5">{thread.content}</div>
-                      </div>
-                    </div>
-                    {thread.replies.length > 0 && (
-                      <div className="ml-9 mt-2 pl-3 border-l border-slate-100 space-y-2">
-                        {thread.replies.map((reply, j) => (
-                          <div key={j} className="text-xs">
-                            <span className="font-medium" style={{ color: reply.isChar ? '#5a49a8' : '#64748b' }}>
-                              {reply.authorName}
-                            </span>
-                            <span className="text-slate-500">：{reply.content}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
+      <ArticleReader
+        article={readingArticle.article}
+        onClose={() => setReadingArticle(null)}
+        onCommentsGenerated={handleArticleCommentsGenerated}
+        char={char}
+        userProfile={userProfile}
+        apiConfig={apiConfig}
+        onToast={addToast}
+      />
     );
   };
 
