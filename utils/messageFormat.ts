@@ -326,6 +326,65 @@ export function normalizeMessageContent(
         return `${head}\n网页正文：\n${body}`;
     }
 
+    // 朋友圈转发卡片：content 存的是整个 momentData 的 JSON 字符串（见 MomentsApp 的转发逻辑），
+    // 数据不在 metadata 里。没有这个分支时会掉到最后的默认 `return msg.content`，角色读到的是
+    // 一坨 {"charId":"...","article":{"title":"...","fullText":"..."}} 的裸 JSON —— 技术上确实
+    // "打包"过去了，但理解成本极高，也说不清"转发"这个动作本身。这里翻成人话。
+    if (type === 'moment_card') {
+        let d: any = null;
+        try { d = JSON.parse(msg.content || ''); } catch {}
+        if (!d || typeof d !== 'object') return `[朋友圈转发] ${userName}转发了一条朋友圈动态（内容解析失败）`;
+
+        // author 是后加的字段，老消息没有：退回用名字比对（转发自己的动态时 charName 存的是
+        // 用户在朋友圈里的昵称，跟角色名不会一样）。
+        const isOwn = d.author ? d.author === 'user' : !!(d.charName && d.charName !== charName);
+        const lines: string[] = [isOwn
+            ? `[朋友圈转发] ${userName}把自己发的一条朋友圈动态转发到了聊天里`
+            : `[朋友圈转发] ${userName}把${d.charName || charName}发的一条朋友圈动态转发到了聊天里`];
+
+        if (typeof d.text === 'string' && d.text.trim()) lines.push(`动态正文：${d.text.trim()}`);
+
+        // 配图：优先用朋友圈里已经缓存的识图描述（同一批图在两个场景下角色的认知要一致）；
+        // 没有缓存就如实说看不到，别让它对着"3 张图"瞎编画面。
+        const images: string[] = Array.isArray(d.images) ? d.images : [];
+        if (images.length) {
+            const descs: string[] = Array.isArray(d.imageDescriptions)
+                ? d.imageDescriptions.filter((t: any) => typeof t === 'string' && t.trim())
+                : [];
+            lines.push(descs.length
+                ? `配图（${images.length} 张）：\n${descs.map((t: string, i: number) => `· 第${i + 1}张：${t.trim()}`).join('\n')}`
+                : `配图：${images.length} 张（注：这几张图没有识图描述，你看不到图里是什么，别假装看过。）`);
+        }
+
+        if (d.music?.songName) {
+            lines.push(`分享的音乐：《${d.music.songName}》${d.music.artists ? ` - ${d.music.artists}` : ''}`);
+        }
+
+        // 文章：卡片上只显标题 + 摘要，但喂给角色的要是能读的正文，否则"转发文章给 TA 看"
+        // 这件事对角色来说等于什么都没发生。正文来源与网页卡片一致（链接识别时
+        // extractWebpageContent 抓到的 content 存进了 article.fullText），同样截到 1500 字防 token 爆。
+        const a = d.article;
+        if (a && (a.title || a.url || a.body || a.fullText)) {
+            lines.push(`附带的文章：《${a.title || '未命名文章'}》${a.url ? `\n链接：${a.url}` : ''}`);
+            const full = typeof a.fullText === 'string' ? a.fullText.trim() : '';
+            const excerpt = typeof a.body === 'string' ? a.body.trim() : '';
+            const bodyRaw = full || excerpt;
+            if (!bodyRaw) {
+                // 链接抓取失败 / 用户只贴了个链接：角色手上只有标题和 URL。它没有联网能力，
+                // 不会也不该去访问这个链接，所以必须明说，免得它对着标题编一篇文章出来。
+                lines.push('（注：这篇文章的正文没能抓取到，你只看到标题和链接。你没有访问链接的能力，不知道里面写了什么，别假装读过。）');
+            } else {
+                const body = bodyRaw.length > 1500 ? `${bodyRaw.slice(0, 1500)}…（正文过长已截断）` : bodyRaw;
+                lines.push(`文章正文：\n${body}`);
+                if (!full && excerpt) {
+                    lines.push('（注：只拿到了这篇文章的摘要，没有全文。）');
+                }
+            }
+        }
+
+        return lines.join('\n');
+    }
+
     // 小剧场卡片：用户在日程表"窥视"了角色某时段的行为演出，并把这一刻发到聊天里。
     // 归档/记忆宫殿要读到「用户偷看了你 + 你当时在做什么」，角色才会记得"被看到"这件事。
     if (type === 'theater_card') {
