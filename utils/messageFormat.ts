@@ -27,6 +27,55 @@ export function stickerNameFromUrl(emojis: Emoji[], url: string): string {
 }
 
 /**
+ * 把一条朋友圈压缩成适合长期置顶在 prompt 里的“即时便利贴”。
+ * 与 moment_card 使用同一套字段口径，但严格控制长度；这里不调用 API。
+ */
+export function summarizeMomentForPin(post: any, maxLen: number = 300): string {
+    const name = String(post?.authorName || '用户');
+    const clamp = (value: string, limit: number) => value.length > limit ? `${value.slice(0, limit)}…` : value;
+    const text = typeof post?.text === 'string' ? post.text.trim() : '';
+
+    if (post?.type === 'music' || post?.music?.songName) {
+        const song = String(post.music.songName || '').trim();
+        const artists = String(post.music.artists || '').trim();
+        return `${name}刚发了条朋友圈：分享了音乐《${song || '未命名歌曲'}》${artists ? ` - ${artists}` : ''}`;
+    }
+
+    if (post?.type === 'article' || post?.article) {
+        const article = post.article || {};
+        const title = String(article.title || '未命名文章').trim();
+        const body = typeof article.body === 'string' && article.body.trim()
+            ? article.body.trim()
+            : (typeof article.fullText === 'string' ? article.fullText.trim() : '');
+        const excerpt = body ? clamp(body, 55) : '正文没有成功抓取到';
+        return clamp(`${name}分享了一篇文章《${title}》，摘要：${excerpt}`, maxLen);
+    }
+
+    const images: string[] = Array.isArray(post?.images) ? post.images : [];
+    if (images.length) {
+        const keywordList = Array.isArray(post?.imageKeywords)
+            ? post.imageKeywords.filter((k: any) => typeof k === 'string' && k.trim()).slice(0, 2)
+            : [];
+        const descList = Array.isArray(post?.imageDescriptions)
+            ? post.imageDescriptions.filter((d: any) => typeof d === 'string' && d.trim()).slice(0, 2)
+            : [];
+        const visual = keywordList.length
+            ? `配了${images.length}张图（关键词：${keywordList.join('；')}）`
+            : descList.length
+                ? `配了${images.length}张图（画面：${descList.map((d: string) => clamp(d.trim(), 70)).join('；')}）`
+                : `配了${images.length}张图（图片识别暂未成功）`;
+        const body = text ? `正文「${clamp(text, 100)}」` : '';
+        return clamp(`${name}刚发了条朋友圈：${body}${body ? '，' : ''}${visual}`, maxLen);
+    }
+
+    if (text) {
+        return clamp(`${name}刚发了条朋友圈：正文「${clamp(text, 100)}」`, maxLen);
+    }
+
+    return `${name}刚发了一条朋友圈。`;
+}
+
+/**
  * 语音消息的音频资源与转写文本可能分别落在 content / metadata 中。
  * 记忆链路只取可理解的文字，绝不把 blob、data URI 或纯音频 URL 当成上下文。
  */
