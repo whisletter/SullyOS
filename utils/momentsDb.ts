@@ -31,6 +31,8 @@ export interface MomentArticleCard {
   title: string;
   url?: string;
   body?: string;
+  /** 封面图（链接识别抓到的 og:image，或手动没填时留空）。 */
+  image?: string;
 }
 
 /** 评论 */
