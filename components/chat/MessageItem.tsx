@@ -20,7 +20,8 @@ import LuckinCard from './LuckinCard';
 import LuckinCheckoutCard from './LuckinCheckoutCard';
 import QixiEventCardView from './QixiEventCard';
 import { useMusic, musicApi, parseLyric } from '../../context/MusicContext';
-import { Play, Pause } from '@phosphor-icons/react';
+import { Play, Pause, Article } from '@phosphor-icons/react';
+import MomentArticleReaderHost from './MomentArticleReaderHost';
 
 // 思考链卡片支持的 12 种风格预设 — 同时被 MessageItem 与 ThinkingChainSettingsModal 复用
 export type ThinkingChainStyleId = 'echo' | 'whisper' | 'minimal' | 'ink' | 'neon' | 'terminal' | 'stellar' | 'tama' | 'pixel' | 'muji' | 'ins' | 'custom';
@@ -808,16 +809,27 @@ const ForwardCard: React.FC<{
 
 const MomentForwardCard: React.FC<{
     momentData: any;
+    /** 这条消息的 id：生成的文章评论区要写回它的 content（moment_card 的数据存在 content 里）。 */
+    messageId?: number;
     commonLayout: (content: React.ReactNode) => JSX.Element;
     selectionMode: boolean;
-}> = ({ momentData, commonLayout, selectionMode }) => {
+}> = ({ momentData, messageId, commonLayout, selectionMode }) => {
+    /**
+     * 生成过评论区后，用新 article 覆盖 content 里解析出来的那份 —— 落库是异步的，
+     * 不等重新拉库，详情页当场就能看到评论。
+     */
+    const [articleOverride, setArticleOverride] = useState<any>(null);
+    const article = articleOverride || momentData.article;
+    /** 打开的是哪篇文章的全屏详情页（null = 没打开）。 */
+    const [readingArticle, setReadingArticle] = useState<any>(null);
+
     const formatMomentTime = (ts: number) => {
         if (!ts) return '';
         const d = new Date(ts);
         return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
     };
 
-    return commonLayout(
+    const card = commonLayout(
         <div
             className="w-64 bg-white rounded-2xl overflow-hidden shadow-sm border border-slate-100 active:scale-[0.98] transition-transform cursor-pointer"
             onClick={(e) => { if (selectionMode) return; e.stopPropagation(); }}
@@ -857,18 +869,59 @@ const MomentForwardCard: React.FC<{
                     </div>
                 </div>
             )}
-            {momentData.article && (
-                <div className="mx-3 mb-2 px-2.5 py-2 rounded-xl bg-slate-50">
-                    <div className="text-[13px] font-medium text-slate-700 line-clamp-2">{momentData.article.title}</div>
-                    {momentData.article.body && (
-                        <div className="text-[11px] text-slate-400 mt-0.5 line-clamp-2">{momentData.article.body}</div>
-                    )}
+            {article && (
+                <div
+                    className="mx-3 mb-2 flex items-center gap-3 px-2.5 py-2 rounded-xl bg-slate-50 active:opacity-80 transition-opacity"
+                    onClick={(e) => {
+                        if (selectionMode) return;
+                        e.stopPropagation();
+                        setReadingArticle(article);
+                    }}
+                >
+                    <div className="w-14 h-14 rounded-lg overflow-hidden shrink-0">
+                        {article.image ? (
+                            <TokenImg value={article.image} className="w-full h-full object-cover" />
+                        ) : (
+                            // 抓不到封面就用默认文章图标占位，跟朋友圈里的空态一致。
+                            <div className="w-full h-full flex items-center justify-center bg-slate-200">
+                                <Article size={22} className="text-slate-400" />
+                            </div>
+                        )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                        <div className="text-[13px] font-medium text-slate-700 line-clamp-1">
+                            {article.title || '未命名文章'}
+                        </div>
+                        {article.body && (
+                            <div className="text-[11px] text-slate-400 mt-0.5 line-clamp-1">
+                                {article.body.length > 20 ? `${article.body.slice(0, 20)}...` : article.body}
+                            </div>
+                        )}
+                    </div>
                 </div>
             )}
             <div className="px-3 py-1.5 border-t border-slate-50 text-[10px] text-slate-400">
                 {formatMomentTime(momentData.createdAt)}
             </div>
         </div>
+    );
+
+    return (
+        <>
+            {card}
+            {readingArticle && (
+                <MomentArticleReaderHost
+                    messageId={messageId}
+                    momentData={momentData}
+                    article={readingArticle}
+                    onClose={() => setReadingArticle(null)}
+                    onArticleUpdated={(updated) => {
+                        setArticleOverride(updated);
+                        setReadingArticle(updated);
+                    }}
+                />
+            )}
+        </>
     );
 };
 
@@ -2129,7 +2182,7 @@ const MessageItem = React.memo(({
         let momentData: any = null;
         try { momentData = JSON.parse(m.content); } catch {}
         if (momentData) {
-            return <MomentForwardCard momentData={momentData} commonLayout={commonLayout} selectionMode={selectionMode} />;
+            return <MomentForwardCard momentData={momentData} messageId={m.id} commonLayout={commonLayout} selectionMode={selectionMode} />;
         }
     }
 
