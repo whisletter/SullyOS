@@ -43,8 +43,10 @@ interface AiGeneratedPost {
    * 可选：这条动态想分享一首歌时，填候选列表里那首歌的 id；不想分享就不填。
    * 只能选 prompt 里明确列出的候选（TA 自己歌单 / 用户网易云歌单），不能编造。
    * 前端会先用 song/url 验证这首歌真的能播放，不能播就退化成不分享音乐。
+   * 类型写成 number | string 是因为有些模型会把数字 id 写成字符串（如 "123"），
+   * 用的地方会用 Number() 统一转换后再比较，这里如实反映运行时可能出现的两种形态。
    */
-  shareMusicId?: number;
+  shareMusicId?: number | string;
 }
 
 /** AI 返回的对用户某条动态的互动 */
@@ -304,8 +306,9 @@ ${musicCandidatesText}
 ` : ''}`;
 
   const musicTaskHint = (!skipInteractions && hasMusicCandidates) ? `
-   - 这条动态也可以是分享一首歌：想分享就在这条里加一个 "shareMusicId" 字段，填上面歌曲列表里的 id；
-     不想分享音乐就不要写这个字段（分享音乐这条通常不需要再配图或写很长的文字，写不写 text 都行）` : '';
+   - 这条动态也可以是分享一首歌：想分享就在这条里加一个 "shareMusicId" 字段，填上面歌曲列表里的 id
+     （纯数字，不要加引号，比如 2158159412）；不想分享音乐就不要写这个字段
+     （分享音乐这条通常不需要再配图或写很长的文字，写不写 text 都行）` : '';
 
   const tasksSection = skipInteractions
     ? `现在你只需要做一件事：
@@ -362,7 +365,7 @@ ${musicCandidatesText}
       "text": "朋友圈文字内容",
       "postTime": "HH:MM"${imageGenAvailable ? `,
       "imagePrompt": "可选：想配图就写一句简短的英文图片描述；不配图就不要写这个字段"` : ''}${hasMusicCandidates ? `,
-      "shareMusicId": "可选：想分享歌就填候选列表里的歌曲 id；不分享就不要写这个字段"` : ''}
+      "shareMusicId": 2158159412` : ''}
     }
   ],
   "interactions": [
@@ -504,9 +507,12 @@ export async function generateMoments(input: GenerateMomentsInput): Promise<Gene
 
           // 音乐分享：只认候选池里真实存在的 id（防止 AI 编造），验证能播放才发出去，
           // 不能播就整条退化成普通文字/图文动态（不占用另一次主 API 调用去重新问 AI）。
+          // AI 返回的 shareMusicId 有时是字符串形式的数字（比如 "2158159412"），
+          // 用 Number() 统一转换后再比较，避免因为类型不同（'123' !== 123）而误判成"编造的id"。
           let musicCard: MomentMusicCard | undefined;
-          if (hasMusicCandidates && p.shareMusicId != null && musicCfg) {
-            const candidate = musicCandidates!.find(c => c.id === p.shareMusicId);
+          const shareMusicIdNum = p.shareMusicId != null ? Number(p.shareMusicId) : null;
+          if (hasMusicCandidates && shareMusicIdNum != null && !Number.isNaN(shareMusicIdNum) && musicCfg) {
+            const candidate = musicCandidates!.find(c => c.id === shareMusicIdNum);
             if (candidate) {
               try {
                 const urlRes = await musicApi.songUrl(musicCfg, candidate.id);
