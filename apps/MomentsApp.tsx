@@ -147,6 +147,11 @@ const MomentsApp: React.FC = () => {
   const [editingField, setEditingField] = useState<{ postId: string; commentId?: string } | null>(null);
   const [editText, setEditText] = useState('');
 
+  // ---- 双击编辑（替代长按，避免误触） ----
+  const DOUBLE_TAP_EDIT_DELAY = 300; // ms，两次点击间隔阈值
+  const lastEditTapRef = useRef<{ key: string; time: number } | null>(null);
+  const commentTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const commentInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -689,9 +694,9 @@ const MomentsApp: React.FC = () => {
     }
   }, [posts, apiConfig.imageGenApi, charId, charName, addToast, retryingImageKeys]);
 
-  // ==================== 长按编辑 ====================
+  // ==================== 双击编辑（原长按编辑，因容易误触已改为快速双击两下触发） ====================
 
-  const handleLongPress = useCallback((postId: string, commentId?: string) => {
+  const handleEditTrigger = useCallback((postId: string, commentId?: string) => {
     const post = posts.find(p => p.id === postId);
     if (!post) return;
     if (commentId) {
@@ -705,6 +710,42 @@ const MomentsApp: React.FC = () => {
       setEditText(post.text || '');
     }
   }, [posts]);
+
+  // 正文双击判定：无其他单击行为竞争，直接按 key（postId）判断两次点击间隔。
+  const handleTextDoubleTap = useCallback((postId: string) => {
+    const key = postId;
+    const now = Date.now();
+    const last = lastEditTapRef.current;
+    if (last && last.key === key && now - last.time < DOUBLE_TAP_EDIT_DELAY) {
+      lastEditTapRef.current = null;
+      handleEditTrigger(postId);
+    } else {
+      lastEditTapRef.current = { key, time: now };
+    }
+  }, [handleEditTrigger]);
+
+  // 评论双击判定：单击本身要用来"回复"，所以第一下先延迟执行单击动作，
+  // 若在阈值内等到第二下则取消单击动作、改为触发编辑。
+  const handleCommentTap = useCallback((postId: string, commentId: string, onSingleTap: () => void) => {
+    const key = `${postId}:${commentId}`;
+    const now = Date.now();
+    const last = lastEditTapRef.current;
+    if (last && last.key === key && now - last.time < DOUBLE_TAP_EDIT_DELAY) {
+      lastEditTapRef.current = null;
+      if (commentTapTimerRef.current) {
+        clearTimeout(commentTapTimerRef.current);
+        commentTapTimerRef.current = null;
+      }
+      handleEditTrigger(postId, commentId);
+    } else {
+      lastEditTapRef.current = { key, time: now };
+      if (commentTapTimerRef.current) clearTimeout(commentTapTimerRef.current);
+      commentTapTimerRef.current = setTimeout(() => {
+        commentTapTimerRef.current = null;
+        onSingleTap();
+      }, DOUBLE_TAP_EDIT_DELAY);
+    }
+  }, [handleEditTrigger]);
 
   const saveEdit = useCallback(async () => {
     if (!editingField) return;
@@ -995,12 +1036,7 @@ const MomentsApp: React.FC = () => {
                 <div
                   className="text-sm mt-1 whitespace-pre-wrap leading-relaxed cursor-pointer"
                   style={{ color: 'var(--moments-text, #e2e8f0)' }}
-                  onContextMenu={e => { e.preventDefault(); handleLongPress(post.id); }}
-                  onTouchStart={() => {
-                    const timer = setTimeout(() => handleLongPress(post.id), 600);
-                    const clear = () => { clearTimeout(timer); document.removeEventListener('touchend', clear); };
-                    document.addEventListener('touchend', clear, { once: true });
-                  }}
+                  onClick={() => handleTextDoubleTap(post.id)}
                 >
                   {post.text}
                 </div>
@@ -1151,19 +1187,12 @@ const MomentsApp: React.FC = () => {
                               transition: 'transform 0.2s ease-out',
                               background: 'inherit',
                             }}
-                            onContextMenu={e => { e.preventDefault(); handleLongPress(post.id, c.id); }}
                             onTouchStart={(e) => {
                               const startX = e.touches[0].clientX;
                               const startY = e.touches[0].clientY;
-                              let moved = false;
-                              const longPressTimer = setTimeout(() => { if (!moved) handleLongPress(post.id, c.id); }, 600);
                               const handleMove = (moveEvent: TouchEvent) => {
                                 const dx = moveEvent.touches[0].clientX - startX;
                                 const dy = moveEvent.touches[0].clientY - startY;
-                                if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
-                                  moved = true;
-                                  clearTimeout(longPressTimer);
-                                }
                                 // 只处理左滑（dx < 0），且横向位移明显大于纵向，避免和纵向滚动打架
                                 if (dx < -16 && Math.abs(dx) > Math.abs(dy)) {
                                   setSwipedCommentKey(swipeKey);
@@ -1172,7 +1201,6 @@ const MomentsApp: React.FC = () => {
                                 }
                               };
                               const handleEnd = () => {
-                                clearTimeout(longPressTimer);
                                 document.removeEventListener('touchmove', handleMove);
                                 document.removeEventListener('touchend', handleEnd);
                               };
@@ -1181,9 +1209,12 @@ const MomentsApp: React.FC = () => {
                             }}
                             onClick={() => {
                               if (isSwipedOpen) { setSwipedCommentKey(null); return; }
-                              setActiveCommentPostId(post.id);
-                              setReplyTarget({ id: c.id, name: liveAuthorName });
-                              setTimeout(() => commentInputRef.current?.focus(), 100);
+                              // 单击先延迟触发"回复"，若阈值内等到第二下则改为触发"编辑"（双击两下才编辑，避免误触）。
+                              handleCommentTap(post.id, c.id, () => {
+                                setActiveCommentPostId(post.id);
+                                setReplyTarget({ id: c.id, name: liveAuthorName });
+                                setTimeout(() => commentInputRef.current?.focus(), 100);
+                              });
                             }}
                           >
                             <div>
