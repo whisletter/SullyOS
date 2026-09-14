@@ -27,7 +27,6 @@ import {
   TextAa,
   MusicNote,
   Article,
-  LinkSimple,
   Trash,
   PushPin,
   Gear,
@@ -113,6 +112,8 @@ const MomentsApp: React.FC = () => {
   const [generating, setGenerating] = useState(false);
   const [secretSpaceRefreshing, setSecretSpaceRefreshing] = useState(false);
   const [secretSpaceEditing, setSecretSpaceEditing] = useState(false);
+  /** 点文章卡片展开全文阅读层时，正在看哪篇（null = 没打开）。 */
+  const [readingArticle, setReadingArticle] = useState<MomentArticleCard | null>(null);
   const [secretSpaceNameDraft, setSecretSpaceNameDraft] = useState('');
   const [secretSpaceSignatureDraft, setSecretSpaceSignatureDraft] = useState('');
   const genAbortRef = useRef<AbortController | null>(null);
@@ -144,6 +145,7 @@ const MomentsApp: React.FC = () => {
   const [composeArticleUrl, setComposeArticleUrl] = useState('');
   const [composeArticleBody, setComposeArticleBody] = useState('');
   const [composeArticleImage, setComposeArticleImage] = useState('');
+  const [composeArticleFullText, setComposeArticleFullText] = useState('');
   const [composeArticleLinkInput, setComposeArticleLinkInput] = useState('');
   const [articleParsing, setArticleParsing] = useState(false);
   const [articleParseError, setArticleParseError] = useState('');
@@ -410,6 +412,7 @@ const MomentsApp: React.FC = () => {
         url: composeArticleUrl || undefined,
         body: composeArticleBody || undefined,
         image: composeArticleImage || undefined,
+        fullText: composeArticleFullText || undefined,
       } : undefined,
       likes: [],
       likeNames: [],
@@ -434,13 +437,14 @@ const MomentsApp: React.FC = () => {
     setComposeArticleUrl('');
     setComposeArticleBody('');
     setComposeArticleImage('');
+    setComposeArticleFullText('');
     setComposeArticleLinkInput('');
     setArticleParsed(false);
     setArticleParseError('');
     setComposeType(null);
     setView('main');
     addToast('已发布', 'success');
-  }, [charId, composeType, composeText, composeImages, composeMusicName, composeMusicArtist, composeMusicCover, composeArticleTitle, composeArticleUrl, composeArticleBody, composeArticleImage, userProfile, addToast]);
+  }, [charId, composeType, composeText, composeImages, composeMusicName, composeMusicArtist, composeMusicCover, composeArticleTitle, composeArticleUrl, composeArticleBody, composeArticleImage, composeArticleFullText, userProfile, addToast]);
 
   // ==================== 图片上传 ====================
 
@@ -545,6 +549,7 @@ const MomentsApp: React.FC = () => {
       setComposeArticleTitle(webpage.title || '');
       setComposeArticleBody(webpage.excerpt || '');
       setComposeArticleImage(webpage.image || '');
+      setComposeArticleFullText(webpage.content || '');
       setComposeArticleUrl(webpage.finalUrl || url);
       setArticleParsed(true);
     } catch (e: any) {
@@ -996,17 +1001,20 @@ const MomentsApp: React.FC = () => {
 
   const renderArticleCard = (article: MomentArticleCard) => {
     const excerpt = article.body
-      ? (article.body.length > 50 ? `${article.body.slice(0, 50)}...` : article.body)
+      ? (article.body.length > 20 ? `${article.body.slice(0, 20)}...` : article.body)
       : '';
     return (
-      <div className="flex items-center gap-3 rounded-xl p-3 mt-2"
-        style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)' }}>
+      <div
+        className="flex items-center gap-3 rounded-xl p-3 mt-2 cursor-pointer active:opacity-90 transition-opacity"
+        style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)' }}
+        onClick={() => setReadingArticle(article)}
+      >
         <div className="w-14 h-14 rounded-lg overflow-hidden shrink-0">
           {article.image ? (
             <img src={article.image} alt="" className="w-full h-full object-cover" />
           ) : (
             <div className="w-full h-full flex items-center justify-center bg-slate-700">
-              <LinkSimple size={22} className="text-white/40" />
+              <Article size={22} className="text-white/40" />
             </div>
           )}
         </div>
@@ -1015,8 +1023,41 @@ const MomentsApp: React.FC = () => {
             {article.title || '未命名文章'}
           </div>
           {excerpt && (
-            <div className="text-xs mt-0.5 line-clamp-2" style={{ color: 'var(--moments-text-secondary, #94a3b8)' }}>
+            <div className="text-xs mt-0.5 line-clamp-1" style={{ color: 'var(--moments-text-secondary, #94a3b8)' }}>
               {excerpt}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  // ==================== 渲染：文章全文阅读层 ====================
+
+  const renderArticleReader = () => {
+    if (!readingArticle) return null;
+    const text = readingArticle.fullText?.trim() || readingArticle.body?.trim() || '（这篇文章没有留下更多内容）';
+    return (
+      <div className="fixed inset-0 z-50 flex flex-col" style={{ background: '#0f0f1a', color: '#e2e8f0' }}>
+        <div className="flex items-center gap-3 px-4 py-3 border-b border-white/10 shrink-0">
+          <button onClick={() => setReadingArticle(null)} className="text-white/60 active:scale-90">
+            <CaretLeft size={22} />
+          </button>
+          <div className="text-sm font-medium truncate flex-1">{readingArticle.title || '未命名文章'}</div>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4">
+          {readingArticle.image && (
+            <img src={readingArticle.image} alt="" className="w-full rounded-xl mb-4 object-cover max-h-48" />
+          )}
+          <div className="text-lg font-bold mb-2" style={{ color: 'var(--moments-text, #e2e8f0)' }}>
+            {readingArticle.title || '未命名文章'}
+          </div>
+          <div className="text-sm leading-relaxed whitespace-pre-wrap" style={{ color: 'var(--moments-text-secondary, #cbd5e1)' }}>
+            {text}
+          </div>
+          {readingArticle.url && (
+            <div className="mt-6 pt-3 border-t border-white/10 text-xs text-blue-400 break-all">
+              原文链接：{readingArticle.url}
             </div>
           )}
         </div>
@@ -1439,6 +1480,7 @@ const MomentsApp: React.FC = () => {
             setComposeArticleUrl('');
             setComposeArticleBody('');
             setComposeArticleImage('');
+            setComposeArticleFullText('');
             setComposeArticleLinkInput('');
             setArticleParsed(false);
             setArticleParseError('');
@@ -1562,20 +1604,20 @@ const MomentsApp: React.FC = () => {
                 className="w-full px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10 placeholder:text-white/30"
               />
               <input
-                value={composeArticleUrl}
-                onChange={e => setComposeArticleUrl(e.target.value)}
-                placeholder="链接（可选）"
+                value={composeArticleBody}
+                onChange={e => { setComposeArticleBody(e.target.value); setArticleParsed(false); }}
+                placeholder="作者/摘要（走链接会自动填入识别到的信息）"
                 className="w-full px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10 placeholder:text-white/30"
               />
               <textarea
-                value={composeArticleBody}
-                onChange={e => { setComposeArticleBody(e.target.value); setArticleParsed(false); }}
-                placeholder="正文摘要（可选，识别后自动填入，也可手动输入）"
-                className="w-full min-h-[80px] px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10 placeholder:text-white/30 resize-none"
+                value={composeArticleFullText}
+                onChange={e => setComposeArticleFullText(e.target.value)}
+                placeholder="正文全文（可选，不在动态卡片上显示；用于点开卡片看全文，也会作为角色能读到的完整内容）"
+                className="w-full min-h-[100px] px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10 placeholder:text-white/30 resize-none"
               />
               {composeArticleTitle && (
                 <div className="mt-2">
-                  {renderArticleCard({ title: composeArticleTitle, body: composeArticleBody, url: composeArticleUrl, image: composeArticleImage })}
+                  {renderArticleCard({ title: composeArticleTitle, body: composeArticleBody, url: composeArticleUrl, image: composeArticleImage, fullText: composeArticleFullText })}
                 </div>
               )}
             </div>
@@ -1868,6 +1910,7 @@ const MomentsApp: React.FC = () => {
 
   return (
     <div className="flex flex-col h-full" style={{ background: '#0f0f1a', color: '#e2e8f0' }}>
+      {renderArticleReader()}
       {/* 顶栏 */}
       <div className="relative flex items-center justify-between px-4 py-2 shrink-0" style={{ background: 'rgba(15,15,26,0.95)' }}>
         <button
