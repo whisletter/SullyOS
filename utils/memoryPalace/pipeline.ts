@@ -1577,6 +1577,180 @@ export async function ingestDiaryToPalace(
     };
 }
 
+// ─── 朋友圈「沉寂归档」一次性吞吐 ──────────────────────
+
+/** 归档一条朋友圈动态（正文 + 本轮新增评论）的结果 */
+export type MomentIngestResult =
+    | { status: 'palace_disabled' }
+    | { status: 'lightllm_missing' }
+    | { status: 'embedding_missing' }
+    | { status: 'empty_input' }
+    | { status: 'extracted_none'; stored: 0; skipped: 0 }
+    | { status: 'done'; stored: number; skipped: number; nodes: { content: string; room: import('./types').MemoryRoom }[] };
+
+/** ingestMomentThreadToPalace 的入参。内容怎么拼（图片描述/音乐/文章）由调用方负责。 */
+export interface MomentThreadIngestInput {
+    postId: string;
+    /** 动态是用户发的还是角色自己发的，决定正文的 role 和来源说明的措辞 */
+    postAuthorIsUser: boolean;
+    /** 已经格式化好的正文文本（含图片描述、音乐、文章摘要），不含评论 */
+    postBodyText: string;
+    postCreatedAt: number;
+    /**
+     * 正文要不要作为一条 fake Message 参与提取。
+     * 首次归档 = true；同一条动态之后的「旧账重开」= false —— 那时正文只作为
+     * charContext 里的背景交代，避免同一段正文被反复压缩进宫殿第二次、第三次。
+     */
+    includeBodyAsMessage: boolean;
+    /** 本轮要归档的评论（已按时间升序、已扁平化楼中楼） */
+    comments: { role: 'user' | 'assistant'; speakerName: string; text: string; timestamp: number }[];
+}
+
+/**
+ * 把一条朋友圈动态的「正文 + 评论串」一次性塞进记忆宫殿。
+ *
+ * 跟 ingestDiaryToPalace 同一个套路（伪装成 fake Message → extractMemoriesFromBuffer →
+ * vectorizeAndStore，origin 标 'system'，不动 hideBefore / mp_lastMsgId_ 高水位），
+ * 差异只在三处：
+ *  - 来源说明必须讲清楚「正文是 TA 刷到的，不是用户当面告诉 TA 的」，否则宫殿的
+ *    第一人称叙事规则会把「被动看到」写成「用户对我说」，语气会跑偏
+ *  - 评论区是真正的双向互动，按聊天口径映射 role
+ *  - MemoryNode.createdAt 落在这批内容真实发生的时间（最后一条评论的时间戳），
+ *    而不是归档任务跑起来的时间
+ *
+ * 不负责判断「该不该归档」和「归档到哪」—— 沉寂判定、水位读写都在 utils/momentsArchive.ts。
+ * 本函数只要被调用就老实提取一次；失败直接抛，让上层决定重试，绝不自己吞掉异常
+ * （上层要靠异常来决定「不推进水位」）。
+ */
+export async function ingestMomentThreadToPalace(
+    char: { id: string; name: string; memoryPalaceEnabled?: boolean; embeddingConfig?: any; systemPrompt?: string; worldview?: string },
+    input: MomentThreadIngestInput,
+    lightLLMConfig: LightLLMConfig | null | undefined,
+    userName: string,
+): Promise<MomentIngestResult> {
+    if (!char.memoryPalaceEnabled) return { status: 'palace_disabled' };
+    if (!lightLLMConfig?.baseUrl || !lightLLMConfig?.apiKey) {
+        console.warn(`🏰 [MomentIngest] 跳过：lightLLM 未配置`);
+        return { status: 'lightllm_missing' };
+    }
+    const embeddingConfig = getEmbeddingConfig(char.embeddingConfig);
+    if (!embeddingConfig) {
+        console.warn(`🏰 [MomentIngest] 跳过：embedding 配置未就绪`);
+        return { status: 'embedding_missing' };
+    }
+
+    const body = (input.postBodyText || '').trim();
+    const name = userName || '用户';
+    const fakeMessages: Message[] = [];
+
+    if (input.includeBodyAsMessage && body) {
+        fakeMessages.push({
+            id: -Math.floor(Math.random() * 1e9),
+            charId: char.id,
+            // 用户发的动态 → 用户侧内容；TA 自己发的动态 → 角色侧内容
+            role: input.postAuthorIsUser ? 'user' : 'assistant',
+            type: 'text',
+            content: input.postAuthorIsUser
+                ? `【朋友圈动态】${name}发了一条朋友圈：\n${body}`
+                : `【朋友圈动态】我（${char.name}）发了一条朋友圈：\n${body}`,
+            timestamp: input.postCreatedAt,
+        } as Message);
+    }
+
+    for (const c of input.comments) {
+        if (!c.text?.trim()) continue;
+        fakeMessages.push({
+            id: -Math.floor(Math.random() * 1e9),
+            charId: char.id,
+            role: c.role,
+            type: 'text',
+            content: `【朋友圈评论】${c.speakerName}：${c.text.trim()}`,
+            timestamp: c.timestamp,
+        } as Message);
+    }
+
+    if (fakeMessages.length === 0) return { status: 'empty_input' };
+
+    // 记忆落在内容真实发生的时刻，不是归档任务跑起来的时刻
+    const createdAt = fakeMessages[fakeMessages.length - 1].timestamp || input.postCreatedAt || Date.now();
+
+    let charContext = `[角色档案]\n名字: ${char.name}\n核心设定:\n${char.systemPrompt || '无'}\n`;
+    if (char.worldview?.trim()) charContext += `世界观: ${char.worldview}\n`;
+    charContext += `\n[用户档案]\n名字: ${name}\n`;
+    charContext += `\n[来源说明]\n这是来自【朋友圈】的一次归档，不是面对面聊天。\n`;
+    charContext += input.postAuthorIsUser
+        ? `动态正文是${name}发在朋友圈里的，我（${char.name}）是刷到的、看到的，不是${name}专门跑来告诉我的 —— 叙述时不要写成「${name}对我说」。\n`
+        : `动态正文是我（${char.name}）自己发的朋友圈。\n`;
+    charContext += `下面的评论则是真正的双向互动，按普通对话理解即可。\n`;
+    if (!input.includeBodyAsMessage && body) {
+        // 旧账重开：正文不再参与提取，只作为读懂评论所需的背景
+        charContext += `\n[这条动态的正文（背景，之前已经记过，不需要再记一遍）]\n${body.slice(0, 600)}\n`;
+    }
+
+    // 相关记忆检索：这一步是「三天后翻旧账」能自动并进同一个 EventBox 的前提。
+    // LLM 只有看见已有记忆的结构化引用，才可能标出 relatedTo；没有这一步，
+    // crossTimeLinks 恒为空，EventBox 永远不会被触达，新旧两批评论会变成互不相干的孤立记忆。
+    // 成本：一次批量 embedding（本地向量比对不花钱），不额外调 LLM。
+    let relatedMemoryRefs: RelatedMemoryRef[] = [];
+    try {
+        let snippets = splitMessagesToSpikes(fakeMessages);
+        if (snippets.length === 0) snippets = sampleSnippetsFromMessages(fakeMessages, 3, 300);
+        relatedMemoryRefs = await fetchRelatedMemoriesForExtraction(snippets, char.id, embeddingConfig);
+    } catch (e: any) {
+        console.warn(`🏰 [MomentIngest] 相关记忆检索失败（降级为无上下文提取）: ${e.message}`);
+    }
+
+    const extracted = await extractMemoriesFromBuffer(
+        fakeMessages,
+        char.id,
+        char.name,
+        lightLLMConfig,
+        charContext,
+        name,
+        relatedMemoryRefs,
+        [], // 不喂便利贴：朋友圈便利贴由 momentsMemory 按 pinnedUntil 自然过期，不在这里摘
+    );
+
+    if (extracted.memories.length === 0) {
+        console.log(`🏰 [MomentIngest] 动态 ${input.postId} 未提取出记忆节点`);
+        return { status: 'extracted_none', stored: 0, skipped: 0 };
+    }
+
+    for (const node of extracted.memories) {
+        node.createdAt = createdAt;
+        node.lastAccessedAt = createdAt;
+        node.origin = 'system';
+        // 留一个来源指针，方便以后按动态反查/清理（删动态时可顺手清掉）
+        (node as any).sourceId = input.postId;
+    }
+
+    const remoteConfig = getRemoteVectorConfig();
+    const result = await vectorizeAndStore(extracted.memories, embeddingConfig, remoteConfig);
+    console.log(`🏰 [MomentIngest] 动态 ${input.postId} 入宫：提取 ${extracted.memories.length} 条，存储 ${result.stored}，去重跳过 ${result.skipped}`);
+
+    // 建链 / EventBox 绑定 + 压缩 / 纠正 / 巩固。跟聊天、见面、剧情走同一套副作用，
+    // 所以「同一条动态隔三天被重新翻起来评论」会被绑进同一个事件盒，而不是散成两条孤立记忆。
+    // 内部每步独立 try/catch，失败不影响已经存好的记忆，也不会让本函数抛错误导致水位不推进。
+    await applyMemorySideEffects(
+        char.id,
+        char.name,
+        extracted.memories,
+        extracted.crossTimeLinks,
+        extracted.eventBoxHints,
+        extracted.corrections,
+        embeddingConfig,
+        lightLLMConfig,
+        name,
+    );
+    return {
+        status: 'done',
+        stored: result.stored,
+        skipped: result.skipped,
+        nodes: extracted.memories.map(n => ({ content: n.content, room: n.room })),
+    };
+}
+
+
 // ─── 输入管线（AI 回复后，后台） ──────────────────────
 
 // ─── 高水位标记：记录每个角色处理到的最后消息 ID ────────
