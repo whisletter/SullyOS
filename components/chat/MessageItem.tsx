@@ -19,6 +19,8 @@ import HtmlCard from './HtmlCard';
 import LuckinCard from './LuckinCard';
 import LuckinCheckoutCard from './LuckinCheckoutCard';
 import QixiEventCardView from './QixiEventCard';
+import { useMusic, musicApi, parseLyric } from '../../context/MusicContext';
+import { Play, Pause } from '@phosphor-icons/react';
 
 // 思考链卡片支持的 12 种风格预设 — 同时被 MessageItem 与 ThinkingChainSettingsModal 复用
 export type ThinkingChainStyleId = 'echo' | 'whisper' | 'minimal' | 'ink' | 'neon' | 'terminal' | 'stellar' | 'tama' | 'pixel' | 'muji' | 'ins' | 'custom';
@@ -1547,6 +1549,14 @@ const MessageItem = React.memo(({
 }: MessageItemProps) => {
     const isUser = m.role === 'user';
     const isSystem = m.role === 'system';
+    // 只有 music_card（intent: 'shared'）需要真播放能力；其余渲染路径完全不碰这个 context，
+    // 保持这个巨型组件对 useMusic 的接触面尽量小。
+    const { cfg: musicCfg, current: musicCurrent, playing: musicPlaying, progress: musicProgress, duration: musicDuration, playSong: musicPlaySong, togglePlay: musicTogglePlay, seek: musicSeek } = useMusic();
+    // 分享的音乐卡片（music_card, intent: 'shared'）展开歌词用的状态。每条消息独立一份，
+    // 用 msg.id 前缀隔离，避免多张卡片共享同一个展开/歌词缓存。
+    const [sharedMusicLyricOpen, setSharedMusicLyricOpen] = useState(false);
+    const [sharedMusicLyric, setSharedMusicLyric] = useState<{ t: number; text: string }[] | null>(null);
+    const [sharedMusicLyricLoading, setSharedMusicLyricLoading] = useState(false);
     const spacingClass = messageSpacing === 'compact' ? (isLastInGroup ? 'mb-3' : 'mb-0.5') : messageSpacing === 'spacious' ? (isLastInGroup ? 'mb-8' : 'mb-2.5') : (isLastInGroup ? 'mb-6' : 'mb-1.5');
     const marginBottom = spacingClass;
     const avatarSizeClass = avatarSize === 'small' ? 'w-7 h-7' : avatarSize === 'large' ? 'w-12 h-12' : 'w-9 h-9';
@@ -2123,10 +2133,133 @@ const MessageItem = React.memo(({
         }
     }
 
-    // --- Music Card Rendering (一起听 / 加入歌单) ---
+    // --- Music Card Rendering (一起听 / 加入歌单 / 分享播放) ---
     if (m.type === 'music_card' && m.metadata?.song) {
         const song = m.metadata.song as { songId: number; name: string; artists: string; albumPic: string };
-        const intent = (m.metadata.intent || 'join') as 'join' | 'add' | 'join_and_add';
+        const intent = (m.metadata.intent || 'join') as 'join' | 'add' | 'join_and_add' | 'shared';
+
+        // "shared"：从朋友圈分享过来的、真能播放的音乐卡片，独立分支，完全不影响下面
+        // join/add/join_and_add 那套「一起听」互动记录卡片的既有渲染。
+        if (intent === 'shared') {
+            const isThisSongPlaying = musicCurrent?.id === song.songId && musicPlaying;
+            const isThisSongLoaded = musicCurrent?.id === song.songId;
+            const fmtTime = (s: number) => {
+                if (!isFinite(s) || s < 0) s = 0;
+                const mm = Math.floor(s / 60);
+                const ss = Math.floor(s % 60);
+                return `${mm}:${ss.toString().padStart(2, '0')}`;
+            };
+            const handleToggle = (e: React.MouseEvent) => {
+                e.stopPropagation();
+                if (isThisSongLoaded) {
+                    musicTogglePlay();
+                } else {
+                    musicPlaySong({
+                        id: song.songId, name: song.name || '未知歌曲', artists: song.artists || '未知歌手',
+                        album: '', albumPic: song.albumPic || '', duration: 0, fee: 0,
+                    });
+                }
+            };
+            const handleToggleLyric = async () => {
+                const next = !sharedMusicLyricOpen;
+                setSharedMusicLyricOpen(next);
+                if (next && !sharedMusicLyric && !sharedMusicLyricLoading) {
+                    setSharedMusicLyricLoading(true);
+                    try {
+                        const res = await musicApi.lyric(musicCfg, song.songId);
+                        setSharedMusicLyric(parseLyric(res?.lrc?.lyric || ''));
+                    } catch (e) {
+                        console.warn('[MessageItem] 拉取分享歌曲歌词失败:', e);
+                        setSharedMusicLyric([]);
+                    } finally {
+                        setSharedMusicLyricLoading(false);
+                    }
+                }
+            };
+            const shownProgress = isThisSongLoaded ? musicProgress : 0;
+            const shownDuration = isThisSongLoaded ? musicDuration : 0;
+            const pct = shownDuration ? (shownProgress / shownDuration) * 100 : 0;
+
+            return commonLayout(
+                <div className="w-64 rounded-2xl overflow-hidden shadow-sm border transition-opacity"
+                    style={{
+                        borderColor: '#f3d9e6',
+                        background: 'linear-gradient(135deg, #fff2f7 0%, #f5edff 55%, #eaf1ff 100%)',
+                    }}>
+                    {/* 静态浮光粒子装饰：呼应音乐 App 的视觉风格，不做动画（聊天里可能同时存在多张卡片） */}
+                    <div aria-hidden className="pointer-events-none absolute" style={{ position: 'relative' }}>
+                        <div className="absolute rounded-full" style={{ top: 8, right: 14, width: 36, height: 36, background: 'radial-gradient(circle, rgba(255,255,255,0.85) 0%, rgba(255,255,255,0) 70%)' }} />
+                        <div className="absolute rounded-full" style={{ top: 30, left: 10, width: 24, height: 24, background: 'radial-gradient(circle, rgba(255,255,255,0.6) 0%, rgba(255,255,255,0) 70%)' }} />
+                    </div>
+                    <div className="flex items-center gap-3 p-3 cursor-pointer" onClick={handleToggleLyric}>
+                        <div className="relative w-14 h-14 rounded-xl overflow-hidden shrink-0 shadow-sm">
+                            {song.albumPic ? (
+                                <TokenImg value={song.albumPic} alt="" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                            ) : (
+                                <div className="w-full h-full flex items-center justify-center" style={{ background: 'linear-gradient(135deg, #8b7ab8 0%, #6b95c7 100%)' }}>
+                                    <span style={{ color: 'rgba(255,255,255,0.9)', fontSize: '20px' }}>♪</span>
+                                </div>
+                            )}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                            <div className="font-bold text-sm line-clamp-1 leading-snug" style={{ color: '#2a1f4d', fontFamily: `'Noto Serif','Georgia',serif` }}>
+                                {song.name || '未命名'}
+                            </div>
+                            <div className="text-[10px] mt-0.5 truncate" style={{ color: '#6b5b8f' }}>
+                                {song.artists || '—'}
+                            </div>
+                        </div>
+                        <button
+                            onClick={handleToggle}
+                            aria-label={isThisSongPlaying ? '暂停' : '播放'}
+                            className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 active:scale-95 transition-transform"
+                            style={{ background: 'linear-gradient(135deg, #807c9d, #b3a8ce)', boxShadow: '0 2px 10px rgba(179,168,206,0.4)' }}
+                        >
+                            {isThisSongPlaying
+                                ? <Pause size={16} weight="fill" color="white" />
+                                : <Play size={16} weight="fill" color="white" />}
+                        </button>
+                    </div>
+                    <div className="px-3 pb-3">
+                        <div
+                            className="relative h-[5px] rounded-full cursor-pointer"
+                            style={{ background: 'rgba(128,124,157,0.15)' }}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                if (!isThisSongLoaded) return;
+                                const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
+                                musicSeek((e.clientX - rect.left) / rect.width);
+                            }}
+                        >
+                            <div className="absolute top-0 left-0 h-full rounded-full" style={{ width: `${pct}%`, background: 'linear-gradient(90deg, #807c9d, #cdc6e9)' }} />
+                        </div>
+                        <div className="flex justify-between mt-1">
+                            <span className="text-[9px]" style={{ color: '#a89bc5', fontFamily: 'monospace' }}>{fmtTime(shownProgress)}</span>
+                            <span className="text-[9px]" style={{ color: '#a89bc5', fontFamily: 'monospace' }}>{fmtTime(shownDuration)}</span>
+                        </div>
+                    </div>
+                    {sharedMusicLyricOpen && (
+                        <div className="px-3 pb-3 pt-1 border-t max-h-40 overflow-y-auto" style={{ borderColor: '#e0d9f0' }}>
+                            {sharedMusicLyricLoading ? (
+                                <div className="text-[10px] text-center py-3" style={{ color: '#a89bc5' }}>歌词加载中…</div>
+                            ) : sharedMusicLyric && sharedMusicLyric.length > 0 ? (
+                                sharedMusicLyric.map((line, i) => (
+                                    <div key={i} className="text-[11px] py-0.5 text-center" style={{ color: '#6b5b8f' }}>{line.text}</div>
+                                ))
+                            ) : (
+                                <div className="text-[10px] text-center py-3" style={{ color: '#a89bc5' }}>没有找到歌词</div>
+                            )}
+                        </div>
+                    )}
+                    <div className="px-3 pb-2 flex items-center gap-1 text-[9px]" style={{ color: '#a89bc5' }}>
+                        <span style={{ color: '#5a49a8', fontWeight: 600 }}>Shizuku Music</span>
+                        <span>·</span>
+                        <span>分享</span>
+                    </div>
+                </div>
+            );
+        }
+
         const isTogether = intent === 'join' || intent === 'join_and_add';
         const addedTo = m.metadata.addedToPlaylistTitle as string | undefined;
 
