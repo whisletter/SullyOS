@@ -31,13 +31,34 @@ export interface MomentArticleCard {
   title: string;
   url?: string;
   body?: string;
-  /** 封面图（链接识别抓到的 og:image，或手动没填时留空）。 */
+  /** 封面图（链接识别抓到的 og:image，或用户发布时手动上传的封面，没有就留空）。 */
   image?: string;
   /**
    * 完整正文，不在动态卡片上展示（卡片只显标题 + 摘要）。用于两处：
    * 1) 点开卡片展开全文阅读页；2) 作为角色能读到的完整内容注入 prompt。
    */
   fullText?: string;
+  /**
+   * 详情页底部的虚拟评论区（AI 一次性生成，纯氛围用，只读不可互动）。
+   * 3 条主楼，每条楼下 2-3 条追评。生成后缓存在这里，重复打开同一篇文章
+   * 不用重新生成；用户点"刷新"才会重新触发一次 AI 调用并整体替换。
+   */
+  fakeComments?: FakeCommentThread[];
+}
+
+/** 虚拟评论区的一条追评（楼中楼），只读展示用。 */
+export interface FakeReplyComment {
+  authorName: string;   // 虚构路人昵称，或角色本人真实名字
+  isChar: boolean;      // true = 角色本人插的话；false = 虚构路人
+  content: string;
+}
+
+/** 虚拟评论区的一条主楼。 */
+export interface FakeCommentThread {
+  authorName: string;
+  isChar: boolean;
+  content: string;
+  replies: FakeReplyComment[];
 }
 
 /** 评论 */
