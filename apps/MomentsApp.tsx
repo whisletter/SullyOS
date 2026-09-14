@@ -63,6 +63,7 @@ import { useMusic, musicApi, toHttps } from '../context/MusicContext';
 import { expandShortUrl, extractWebpageContent, detectFirstUrl } from '../utils/webpageExtractor';
 import { generateImage, isImageGenApiReady } from '../utils/imageGenApi';
 import { migrateDataUrlToRef } from '../utils/blobRef';
+import { prepareAndPinPublishedMoment, deleteMomentPin } from '../utils/momentsMemory';
 
 // ==================== 样式常量 ====================
 
@@ -86,6 +87,7 @@ const MomentsApp: React.FC = () => {
     closeApp,
     openApp,
     theme: osTheme,
+    memoryPalaceConfig,
   } = useOS();
   const { cfg: musicCfg, profile: neteaseProfile } = useMusic();
 
@@ -425,6 +427,14 @@ const MomentsApp: React.FC = () => {
     await savePost(post);
     setPosts(prev => [post, ...prev]);
 
+    // 轨道 B：发布后立即建立即时便利贴。图片会提前识图，并用 Memory Palace 的
+    // LightLLM 压缩成关键词；结果缓存后不会因再次读取/互动而重复调用。
+    void prepareAndPinPublishedMoment(post, apiConfig.visionApi, memoryPalaceConfig?.lightLLM)
+      .then(updated => {
+        setPosts(prev => prev.map(p => p.id === updated.id ? updated : p));
+      })
+      .catch(e => console.warn('[Moments] 轨道 B 便利贴处理失败:', e));
+
     // 重置
     setComposeText('');
     setComposeImages([]);
@@ -445,7 +455,7 @@ const MomentsApp: React.FC = () => {
     setComposeType(null);
     setView('main');
     addToast('已发布', 'success');
-  }, [charId, composeType, composeText, composeImages, composeMusicName, composeMusicArtist, composeMusicCover, composeArticleTitle, composeArticleUrl, composeArticleBody, composeArticleImage, composeArticleFullText, userProfile, addToast]);
+  }, [charId, composeType, composeText, composeImages, composeMusicName, composeMusicArtist, composeMusicCover, composeArticleTitle, composeArticleUrl, composeArticleBody, composeArticleImage, composeArticleFullText, userProfile, addToast, apiConfig.visionApi, memoryPalaceConfig?.lightLLM]);
 
   // ==================== 图片上传 ====================
 
@@ -661,6 +671,7 @@ const MomentsApp: React.FC = () => {
 
   const handleDeletePost = useCallback(async (postId: string) => {
     await deletePost(postId);
+    await deleteMomentPin(postId).catch(() => {});
     setPosts(prev => prev.filter(p => p.id !== postId));
     setMenuPostId(null);
     addToast('已删除', 'info');
