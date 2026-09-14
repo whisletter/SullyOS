@@ -39,6 +39,7 @@ import {
 import { useOS } from '../context/OSContext';
 import TokenImg from '../components/os/TokenImg';
 import type { CharacterProfile } from '../types';
+import { AppID } from '../types';
 import {
   MomentPost,
   MomentComment,
@@ -83,6 +84,7 @@ const MomentsApp: React.FC = () => {
     apiConfig,
     addToast,
     closeApp,
+    openApp,
     theme: osTheme,
   } = useOS();
   const { cfg: musicCfg, profile: neteaseProfile } = useMusic();
@@ -832,10 +834,32 @@ const MomentsApp: React.FC = () => {
 
   // ==================== 渲染：音乐卡片 ====================
 
+  /**
+   * 点朋友圈里的音乐卡片：关掉朋友圈、打开音乐 App 并自动播放这首歌（不在原地出声）。
+   * 用 localStorage 存一个一次性的"待播放"标记，音乐 App 挂载时读到就播放、随即清掉，
+   * 这是项目里"跨 App 传参"的既有模式（参考查手机跳转 TA 朋友圈那个 moments_open_ta）。
+   */
+  const handlePlayMusicCard = useCallback((music: MomentMusicCard) => {
+    if (!music.songId) {
+      addToast('这首歌没有可播放的信息', 'info');
+      return;
+    }
+    localStorage.setItem('music_autoplay_song', JSON.stringify({
+      id: music.songId,
+      name: music.songName || '未知歌曲',
+      artists: music.artists || '未知歌手',
+      albumPic: music.albumPic || '',
+    }));
+    closeApp();
+    openApp(AppID.Music);
+  }, [addToast, closeApp, openApp]);
+
   const renderMusicCard = (music: MomentMusicCard) => (
-    <div className="flex items-center gap-3 rounded-xl p-3 mt-2"
-      style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)' }}>
-      {music.albumPic
+    <div
+      className="flex items-center gap-3 rounded-xl p-3 mt-2 cursor-pointer active:scale-[0.98] transition-transform"
+      style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)' }}
+      onClick={() => handlePlayMusicCard(music)}
+    >      {music.albumPic
         ? <img src={music.albumPic} alt="" className="w-14 h-14 rounded-lg object-cover shrink-0" />
         : <div className="w-14 h-14 rounded-lg bg-slate-700 flex items-center justify-center shrink-0">
             <MusicNote size={24} className="text-white/40" />
