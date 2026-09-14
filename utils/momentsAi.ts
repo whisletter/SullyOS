@@ -16,7 +16,7 @@ import { ContextBuilder } from './context';
 import { DB } from './db';
 import { safeFetchJson, extractJson } from './safeApi';
 import type { MusicCfg } from '../context/MusicContext';
-import { musicApi } from '../context/MusicContext';
+import { musicApi, toHttps } from '../context/MusicContext';
 import { formatMessageForPrompt } from './messageFormat';
 import { buildScheduleInjection, type RenderableSchedule } from './scheduleInjection';
 import { generateImage, isImageGenApiReady } from './imageGenApi';
@@ -47,6 +47,13 @@ interface AiGeneratedPost {
    * 用的地方会用 Number() 统一转换后再比较，这里如实反映运行时可能出现的两种形态。
    */
   shareMusicId?: number | string;
+  /**
+   * 可选：想分享一首不在候选列表里的歌（不限于候选池，自由发挥），就填"歌名 - 歌手"
+   * 或纯歌名（比如"晴天 - 周杰伦"）；不想分享就不填。和 shareMusicId 二选一，
+   * 两个都填时优先用 shareMusicId（候选池里的歌更确定）。前端会拿这句话去网易云搜索，
+   * 取第一条匹配结果，再用 song/url 验证能不能播放，搜不到或不能播就退化成不分享音乐。
+   */
+  shareMusicQuery?: string;
 }
 
 /** AI 返回的对用户某条动态的互动 */
@@ -277,6 +284,7 @@ function buildMomentsPrompt(
   pendingRepliesText: string,
   musicCandidatesText: string,
   hasMusicCandidates: boolean,
+  musicSearchAvailable: boolean,
   maxPosts: number,
   imageGenAvailable: boolean,
   skipInteractions: boolean,
@@ -305,10 +313,22 @@ ${hasMusicCandidates ? `
 ${musicCandidatesText}
 ` : ''}`;
 
-  const musicTaskHint = (!skipInteractions && hasMusicCandidates) ? `
-   - 这条动态也可以是分享一首歌：想分享就在这条里加一个 "shareMusicId" 字段，填上面歌曲列表里的 id
-     （纯数字，不要加引号，比如 2158159412）；不想分享音乐就不要写这个字段
-     （分享音乐这条通常不需要再配图或写很长的文字，写不写 text 都行）` : '';
+  const musicHintParts: string[] = [];
+  if (!skipInteractions && hasMusicCandidates) {
+    musicHintParts.push(
+      `想分享上面歌曲列表里的歌，就加 "shareMusicId" 字段，填对应的 id（纯数字，不要加引号，比如 2158159412）`,
+    );
+  }
+  if (!skipInteractions && musicSearchAvailable) {
+    musicHintParts.push(
+      `想分享一首不在列表里的歌（比如聊天里刚提到的、你自己想到的），就加 "shareMusicQuery" 字段，`
+      + `填"歌名"或"歌名 - 歌手"（比如 "晴天 - 周杰伦"），前端会去搜这首歌`,
+    );
+  }
+  const musicTaskHint = musicHintParts.length > 0 ? `
+   - 这条动态也可以是分享一首歌：${musicHintParts.join('；或者')}；
+     不想分享音乐就都不要写（分享音乐这条通常不需要再配图或写很长的文字，写不写 text 都行）
+     两个字段最多写一个，都写了以 shareMusicId 为准` : '';
 
   const tasksSection = skipInteractions
     ? `现在你只需要做一件事：
@@ -365,7 +385,8 @@ ${musicCandidatesText}
       "text": "朋友圈文字内容",
       "postTime": "HH:MM"${imageGenAvailable ? `,
       "imagePrompt": "可选：想配图就写一句简短的英文图片描述；不配图就不要写这个字段"` : ''}${hasMusicCandidates ? `,
-      "shareMusicId": 2158159412` : ''}
+      "shareMusicId": 2158159412` : ''}${musicSearchAvailable ? `,
+      "shareMusicQuery": "可选：想分享列表之外的歌，就填歌名或「歌名 - 歌手」；不分享就不要写"` : ''}
     }
   ],
   "interactions": [
@@ -422,6 +443,9 @@ export async function generateMoments(input: GenerateMomentsInput): Promise<Gene
   const userName = userProfile.name || '用户';
   const maxPosts = settings.taPostFrequency || 3;
   const hasMusicCandidates = !skipInteractions && !!musicCandidates && musicCandidates.length > 0;
+  // 自由搜歌不依赖候选池，只要有网易云代理配置就能搜——resolveMusicWorkerUrl 会在没配置时
+  // 自动 fallback 到公共代理地址，所以传了 musicCfg 基本等于"随时可用"。
+  const musicSearchAvailable = !skipInteractions && !!musicCfg;
 
   // 1. 收集上下文（暂停营业模式跳过用户动态/待回复相关的收集，反正 prompt 不会用到）
   const [chatSummary, scheduleText] = await Promise.all([
@@ -439,7 +463,7 @@ export async function generateMoments(input: GenerateMomentsInput): Promise<Gene
   const systemPrompt = buildMomentsPrompt(
     char, userProfile, settings,
     scheduleText, chatSummary, userPostsText, taRecentText, pendingRepliesText,
-    musicCandidatesText, hasMusicCandidates,
+    musicCandidatesText, hasMusicCandidates, musicSearchAvailable,
     maxPosts, imageGenAvailable, !!skipInteractions,
   );
 
@@ -476,10 +500,13 @@ export async function generateMoments(input: GenerateMomentsInput): Promise<Gene
     console.warn('[Moments] JSON 解析失败，原始返回内容:', content);
     throw new Error('AI 返回的内容无法解析为 JSON');
   }
-  // 诊断日志：一眼看出这一轮 AI 到底给没给 imagePrompt，不用等配图失败才排查。
+  // 诊断日志：一眼看出这一轮 AI 到底给没给 imagePrompt/分享意图，不用等配图失败才排查。
   console.info(
     '[Moments] AI 返回的 newPosts 原始内容:',
-    (parsed.newPosts || []).map(p => ({ text: p.text?.slice(0, 30), imagePrompt: p.imagePrompt, shareMusicId: p.shareMusicId })),
+    (parsed.newPosts || []).map(p => ({
+      text: p.text?.slice(0, 30), imagePrompt: p.imagePrompt,
+      shareMusicId: p.shareMusicId, shareMusicQuery: p.shareMusicQuery,
+    })),
   );
 
   // 5. 构造 MomentPost[]
@@ -487,7 +514,7 @@ export async function generateMoments(input: GenerateMomentsInput): Promise<Gene
   const newPosts: MomentPost[] = (
     await Promise.all(
       (parsed.newPosts || [])
-        .filter(p => p.text?.trim() || (hasMusicCandidates && p.shareMusicId != null))
+        .filter(p => p.text?.trim() || p.shareMusicId != null || p.shareMusicQuery?.trim())
         .slice(0, maxPosts)
         .map(async (p) => {
           // 解析 postTime → 时间戳
@@ -505,14 +532,20 @@ export async function generateMoments(input: GenerateMomentsInput): Promise<Gene
 
           const imagePrompt = imageGenAvailable ? p.imagePrompt?.trim() : undefined;
 
-          // 音乐分享：只认候选池里真实存在的 id（防止 AI 编造），验证能播放才发出去，
-          // 不能播就整条退化成普通文字/图文动态（不占用另一次主 API 调用去重新问 AI）。
-          // AI 返回的 shareMusicId 有时是字符串形式的数字（比如 "2158159412"），
-          // 用 Number() 统一转换后再比较，避免因为类型不同（'123' !== 123）而误判成"编造的id"。
+          // 音乐分享，两种来源二选一（shareMusicId 优先）：
+          // A) 候选池里的确定歌——只认真实存在的 id（防止 AI 编造），
+          // B) 候选池之外、AI 给关键词临时搜索的歌（"自由搜歌"）。
+          // 不管哪种，最后都要 song/url 验证能播放才发出去，不能播/搜不到就整条退化成
+          // 普通文字/图文动态（不占用另一次主 API 调用去重新问 AI）。
           let musicCard: MomentMusicCard | undefined;
           const shareMusicIdNum = p.shareMusicId != null ? Number(p.shareMusicId) : null;
-          if (hasMusicCandidates && shareMusicIdNum != null && !Number.isNaN(shareMusicIdNum) && musicCfg) {
-            const candidate = musicCandidates!.find(c => c.id === shareMusicIdNum);
+          const hasValidId = shareMusicIdNum != null && !Number.isNaN(shareMusicIdNum);
+
+          if (hasValidId && musicCfg) {
+            // A) 候选池里的确定 id。AI 返回的 shareMusicId 有时是字符串形式的数字
+            // （比如 "2158159412"），用 Number() 统一转换后再比较，避免因为类型不同
+            // （'123' !== 123）而误判成"编造的 id"。
+            const candidate = musicCandidates?.find(c => c.id === shareMusicIdNum);
             if (candidate) {
               try {
                 const urlRes = await musicApi.songUrl(musicCfg, candidate.id);
@@ -530,6 +563,34 @@ export async function generateMoments(input: GenerateMomentsInput): Promise<Gene
               } catch (e: any) {
                 console.warn('[Moments] 验证分享歌曲能否播放时出错，退化成普通动态:', e?.message || String(e));
               }
+            } else {
+              console.info('[Moments] shareMusicId 不在候选池里（可能是 AI 编造的），忽略:', p.shareMusicId);
+            }
+          } else if (musicSearchAvailable && p.shareMusicQuery?.trim() && musicCfg) {
+            // B) 自由搜歌：拿关键词去网易云搜，取第一条结果再验证能不能播。
+            const query = p.shareMusicQuery.trim();
+            try {
+              const searchRes = await musicApi.search(musicCfg, query);
+              const first = searchRes?.result?.songs?.[0];
+              if (!first) {
+                console.info('[Moments] 自由搜歌没搜到结果，退化成普通动态:', query);
+              } else {
+                const urlRes = await musicApi.songUrl(musicCfg, first.id);
+                const playable = !!urlRes?.data?.[0]?.url;
+                if (playable) {
+                  const artists = (first.ar || first.artists || []).map((a: any) => a.name).filter(Boolean).join(' / ');
+                  musicCard = {
+                    songId: first.id,
+                    songName: first.name || query,
+                    artists: artists || '未知歌手',
+                    albumPic: toHttps(first.al?.picUrl || first.album?.picUrl || ''),
+                  };
+                } else {
+                  console.info('[Moments] 自由搜到的歌暂不可播放，退化成普通动态:', query);
+                }
+              }
+            } catch (e: any) {
+              console.warn('[Moments] 自由搜歌时出错，退化成普通动态:', e?.message || String(e));
             }
           }
 
