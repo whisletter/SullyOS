@@ -94,6 +94,32 @@ const MusicApp: React.FC = () => {
   // 把 OS toast 注入到 Music Context（这样全局播放报错也能弹 toast）
   useEffect(() => { setToastHandler(addToast); }, [addToast, setToastHandler]);
 
+  // 从朋友圈音乐卡片跳转过来时自动播放：一次性标记，读到就播、随即清掉，
+  // 避免下次正常打开音乐 App 时又被无意义地触发。
+  useEffect(() => {
+    const raw = localStorage.getItem('music_autoplay_song');
+    if (!raw) return;
+    localStorage.removeItem('music_autoplay_song');
+    try {
+      const song = JSON.parse(raw) as { id: number; name: string; artists: string; albumPic: string };
+      if (!song?.id) return;
+      playSong({
+        id: song.id,
+        name: song.name || '未知歌曲',
+        artists: song.artists || '未知歌手',
+        album: '',
+        albumPic: song.albumPic || '',
+        duration: 0,
+        fee: 0,
+      });
+      setView('player');
+    } catch (e) {
+      console.warn('[Music] 解析朋友圈自动播放标记失败:', e);
+    }
+    // 只在挂载时读一次；playSong 本身是稳定引用（useCallback），不需要放进依赖数组反复触发。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const [view, setView] = useState<View>('profile');
   // ── 手动对轴 modal state ──
   const [showLyricSync, setShowLyricSync] = useState(false);
