@@ -63,7 +63,8 @@ import { useMusic, musicApi, toHttps } from '../context/MusicContext';
 import { expandShortUrl, extractWebpageContent, detectFirstUrl } from '../utils/webpageExtractor';
 import { generateImage, isImageGenApiReady } from '../utils/imageGenApi';
 import { migrateDataUrlToRef } from '../utils/blobRef';
-import { prepareAndPinPublishedMoment, deleteMomentPin } from '../utils/momentsMemory';
+import { deleteMomentPin } from '../utils/momentsMemory';
+import { startMomentTaskQueue, enqueuePublishedMomentTasks, deletePublishedMomentTasks } from '../utils/momentsTaskQueue';
 
 // ==================== 样式常量 ====================
 
@@ -186,6 +187,21 @@ const MomentsApp: React.FC = () => {
   }, [charId]);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  // 朋友圈自己的本地后台队列：离开朋友圈页面不会随组件卸载而取消；
+  // 重新进入时会自动接着处理尚未完成的任务。
+  useEffect(() => {
+    startMomentTaskQueue(() => ({
+      visionApi: apiConfig.visionApi,
+      lightLLM: memoryPalaceConfig?.lightLLM,
+    }));
+  }, [apiConfig.visionApi, memoryPalaceConfig?.lightLLM]);
+
+  useEffect(() => {
+    const refresh = () => { void loadData(); };
+    window.addEventListener('moments-task-updated', refresh);
+    return () => window.removeEventListener('moments-task-updated', refresh);
+  }, [loadData]);
 
   // ==================== AI 生成 TA 动态 ====================
 
@@ -427,13 +443,10 @@ const MomentsApp: React.FC = () => {
     await savePost(post);
     setPosts(prev => [post, ...prev]);
 
-    // 轨道 B：发布后立即建立即时便利贴。图片会提前识图，并用 Memory Palace 的
-    // LightLLM 压缩成关键词；结果缓存后不会因再次读取/互动而重复调用。
-    void prepareAndPinPublishedMoment(post, apiConfig.visionApi, memoryPalaceConfig?.lightLLM)
-      .then(updated => {
-        setPosts(prev => prev.map(p => p.id === updated.id ? updated : p));
-      })
-      .catch(e => console.warn('[Moments] 轨道 B 便利贴处理失败:', e));
+    // 发布后只入本地任务队列，不把 AI 请求绑死在朋友圈组件生命周期。
+    // pin 与 image_ai 是两个独立任务，可以并行；文字/音乐/文章无需 AI 时直接完成 pin，
+    // 图片则走一次多图 Vision + 一次多图 LightLLM。
+    await enqueuePublishedMomentTasks(post);
 
     // 重置
     setComposeText('');
@@ -671,6 +684,7 @@ const MomentsApp: React.FC = () => {
 
   const handleDeletePost = useCallback(async (postId: string) => {
     await deletePost(postId);
+    await deletePublishedMomentTasks(postId).catch(() => {});
     await deleteMomentPin(postId).catch(() => {});
     setPosts(prev => prev.filter(p => p.id !== postId));
     setMenuPostId(null);
