@@ -1079,7 +1079,11 @@ const PhoneShell: React.FC = () => {
           {/* Overlays: Toasts (Top) */}
           <div className="absolute top-12 left-0 w-full flex flex-col items-center gap-2 pointer-events-none z-[60]">
               {toasts.map(toast => (
-                 <div key={toast.id} className="animate-fade-in bg-white/95 backdrop-blur-xl px-4 py-3 rounded-2xl shadow-xl border border-black/5 flex items-start gap-3 max-w-[85%] ring-1 ring-white/20">
+                 <div
+                   key={toast.id}
+                   onClick={toast.onClick}
+                   className={`animate-fade-in bg-white/95 backdrop-blur-xl px-4 py-3 rounded-2xl shadow-xl border border-black/5 flex items-start gap-3 max-w-[85%] ring-1 ring-white/20 ${toast.onClick ? 'pointer-events-auto cursor-pointer active:scale-95 transition-transform' : ''}`}
+                 >
                      {toast.type === 'success' && <div className="w-2.5 h-2.5 rounded-full bg-green-500 shrink-0"></div>}
                      {toast.type === 'error' && <div className="w-2.5 h-2.5 rounded-full bg-red-500 shrink-0"></div>}
                      {toast.type === 'info' && <div className="w-2.5 h-2.5 rounded-full bg-primary shrink-0"></div>}
