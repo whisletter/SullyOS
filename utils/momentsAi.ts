@@ -476,7 +476,7 @@ export async function generateMoments(input: GenerateMomentsInput): Promise<Gene
   // 诊断日志：一眼看出这一轮 AI 到底给没给 imagePrompt，不用等配图失败才排查。
   console.info(
     '[Moments] AI 返回的 newPosts 原始内容:',
-    (parsed.newPosts || []).map(p => ({ text: p.text?.slice(0, 30), imagePrompt: p.imagePrompt })),
+    (parsed.newPosts || []).map(p => ({ text: p.text?.slice(0, 30), imagePrompt: p.imagePrompt, shareMusicId: p.shareMusicId })),
   );
 
   // 5. 构造 MomentPost[]
