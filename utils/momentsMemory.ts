@@ -7,73 +7,17 @@
 
 import type { MomentPost } from './momentsDb';
 import { savePost, getPostsByCharId } from './momentsDb';
-import { describeImageWithVisionApi, isVisionApiReady } from './visionApi';
+import { describeImagesWithVisionApi, isVisionApiReady } from './visionApi';
 import type { VisionApiConfig } from '../types';
 import { safeFetchJson, extractJson } from './safeApi';
 import { MemoryNodeDB } from './memoryPalace';
 import type { LightLLMConfig, MemoryNode } from './memoryPalace';
+import { summarizeMomentForPin } from './messageFormat';
 
 const PIN_DURATION_MS = 24 * 60 * 60 * 1000;
 
 function makePinId(postId: string): string {
   return `moment_pin_${postId}`;
-}
-
-/**
- * 把一条朋友圈压缩成适合即时置顶在 prompt 里的“便利贴”。
- * 这里直接定义在 momentsMemory.ts，避免依赖 messageFormat 的导出状态。
- */
-function summarizeMomentForPin(post: MomentPost, maxLen: number = 300): string {
-  const name = String(post.authorName || '用户');
-  const clamp = (value: string, limit: number) =>
-    value.length > limit ? `${value.slice(0, limit)}…` : value;
-  const text = typeof post.text === 'string' ? post.text.trim() : '';
-
-  if (post.type === 'music' || post.music?.songName) {
-    const song = String(post.music?.songName || '').trim();
-    const artists = String(post.music?.artists || '').trim();
-    return `${name}刚发了条朋友圈：分享了音乐《${song || '未命名歌曲'}》${artists ? ` - ${artists}` : ''}`;
-  }
-
-  if (post.type === 'article' || post.article) {
-    const article = post.article || {};
-    const title = String(article.title || '未命名文章').trim();
-    const body =
-      typeof article.body === 'string' && article.body.trim()
-        ? article.body.trim()
-        : typeof article.fullText === 'string'
-          ? article.fullText.trim()
-          : '';
-    const excerpt = body ? clamp(body, 55) : '正文没有成功抓取到';
-    return clamp(`${name}分享了一篇文章《${title}》，摘要：${excerpt}`, maxLen);
-  }
-
-  const images = Array.isArray(post.images) ? post.images : [];
-  if (images.length) {
-    const keywordList = Array.isArray(post.imageKeywords)
-      ? post.imageKeywords
-          .filter((k): k is string => typeof k === 'string' && !!k.trim())
-          .slice(0, 2)
-      : [];
-    const descList = Array.isArray(post.imageDescriptions)
-      ? post.imageDescriptions
-          .filter((d): d is string => typeof d === 'string' && !!d.trim())
-          .slice(0, 2)
-      : [];
-    const visual = keywordList.length
-      ? `配了${images.length}张图（关键词：${keywordList.join('；')}）`
-      : descList.length
-        ? `配了${images.length}张图（画面：${descList.map(d => clamp(d.trim(), 70)).join('；')}）`
-        : `配了${images.length}张图（图片识别暂未成功）`;
-    const body = text ? `正文「${clamp(text, 100)}」` : '';
-    return clamp(`${name}刚发了条朋友圈：${body}${body ? '，' : ''}${visual}`, maxLen);
-  }
-
-  if (text) {
-    return clamp(`${name}刚发了条朋友圈：正文「${clamp(text, 100)}」`, maxLen);
-  }
-
-  return `${name}刚发了一条朋友圈。`;
 }
 
 /**
@@ -147,37 +91,66 @@ export async function preparePublishedMomentImages(
   const keywords = [...(post.imageKeywords || [])];
   let changed = false;
 
-  for (let i = 0; i < post.images.length; i++) {
-    if (!descriptions[i]?.trim() && isVisionApiReady(visionApiConfig)) {
-      try {
-        descriptions[i] = await describeImageWithVisionApi(post.images[i], visionApiConfig!);
-        changed = true;
-      } catch (e: any) {
-        console.warn('[Moments] 发布时识别图片失败:', post.id, i, e?.message || String(e));
-      }
+  // Vision：把所有尚未识别的图片放进同一次请求，朋友圈当前上限 9 张。
+  if (isVisionApiReady(visionApiConfig)) {
+    const missing: number[] = [];
+    for (let i = 0; i < post.images.length; i++) {
+      if (!descriptions[i]?.trim()) missing.push(i);
     }
-
-    // 只有“详细描述已经存在 + 关键词为空”才触发压缩，保证永久复用。
-    if (descriptions[i]?.trim() && !keywords[i]?.trim() && lightLLM?.baseUrl && lightLLM.apiKey && lightLLM.model) {
+    if (missing.length) {
       try {
-        const result = await compressImageDescriptionToKeywords(descriptions[i], lightLLM);
-        if (result.length) {
-          keywords[i] = result.join('、');
-          changed = true;
+        const results = await describeImagesWithVisionApi(missing.map(i => post.images![i]), visionApiConfig!);
+        for (let j = 0; j < missing.length; j++) {
+          if (results[j]?.trim()) { descriptions[missing[j]] = results[j].trim(); changed = true; }
         }
       } catch (e: any) {
-        console.warn('[Moments] 图片关键词压缩失败:', post.id, i, e?.message || String(e));
+        console.warn('[Moments] 发布时多图识别失败:', post.id, e?.message || String(e));
       }
     }
   }
 
+  // LightLLM：所有已有描述一次性压缩，避免 9 张图产生 9 个请求。
+  const canUseLight = !!lightLLM?.baseUrl && !!lightLLM.apiKey && !!lightLLM.model;
+  const missingKeywordIndexes = canUseLight
+    ? descriptions.map((d, i) => d?.trim() && !keywords[i]?.trim() ? i : -1).filter(i => i >= 0)
+    : [];
+  if (missingKeywordIndexes.length) {
+    try {
+      const descriptionsBlock = missingKeywordIndexes
+        .map(i => `[${i}] ${descriptions[i].trim().slice(0, 1200)}`)
+        .join('\n');
+      const data = await safeFetchJson(
+        `${lightLLM!.baseUrl.replace(/\/+$/, '')}/chat/completions`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${lightLLM!.apiKey}` },
+          body: JSON.stringify({
+            model: lightLLM!.model,
+            messages: [
+              { role: 'system', content: '你负责把多张图片的详细描述压缩成关键词。严格按输入的数字索引返回 JSON：{\"keywords\":[{\"index\":0,\"keywords\":[\"词1\",\"词2\"]}]}。每张图约5个中文关键词，只能使用描述中出现的信息，不要解释。' },
+              { role: 'user', content: descriptionsBlock },
+            ],
+            temperature: 0.1, max_tokens: Math.min(80 * missingKeywordIndexes.length, 700), stream: false,
+          }),
+        }, 0, 30_000, { appName: '朋友圈', purpose: '朋友圈多图关键词压缩' },
+      );
+      const raw = String(data?.choices?.[0]?.message?.content || '').trim();
+      const parsed = extractJson<{ keywords?: Array<{ index?: unknown; keywords?: unknown[] }> }>(raw);
+      if (Array.isArray(parsed?.keywords)) {
+        for (const item of parsed.keywords) {
+          const index = Number(item?.index);
+          if (!Number.isInteger(index) || !missingKeywordIndexes.includes(index)) continue;
+          const words = Array.isArray(item?.keywords) ? item.keywords.map(String).map(s => s.trim()).filter(Boolean).slice(0, 6) : [];
+          if (words.length) { keywords[index] = words.join('、'); changed = true; }
+        }
+      }
+    } catch (e: any) {
+      console.warn('[Moments] 多图关键词压缩失败:', post.id, e?.message || String(e));
+    }
+  }
+
   if (!changed) return post;
-  return {
-    ...post,
-    imageDescriptions: descriptions.length ? descriptions : undefined,
-    imageKeywords: keywords.length ? keywords : undefined,
-    updatedAt: Date.now(),
-  };
+  return { ...post, imageDescriptions: descriptions.length ? descriptions : undefined, imageKeywords: keywords.length ? keywords : undefined, updatedAt: Date.now() };
 }
 
 /** 创建/更新一条朋友圈即时便利贴。使用固定 ID，重复处理同一动态不会生成多条。 */
