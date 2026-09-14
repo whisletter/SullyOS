@@ -21,6 +21,7 @@ import { formatMessageForPrompt } from './messageFormat';
 import { buildScheduleInjection, type RenderableSchedule } from './scheduleInjection';
 import { generateImage, isImageGenApiReady } from './imageGenApi';
 import { migrateDataUrlToRef } from './blobRef';
+import { describeImageWithVisionApi, isVisionApiReady } from './visionApi';
 
 // ==================== 类型定义 ====================
 
@@ -175,9 +176,57 @@ async function getTodayScheduleText(char: CharacterProfile): Promise<string> {
 }
 
 /**
- * 格式化用户最近的朋友圈动态（供 AI 参考和互动）
+ * 给用户最近的动态（最多 5 条）里没识别过的图片补齐识图描述，写回 imageDescriptions
+ * 缓存字段（跟 images 同索引位）。识图 API 没开就直接跳过，不报错、不影响主流程——
+ * 图片这时候退回 formatUserPosts 里"图片 X 张"的数字提示。
+ *
+ * 返回值：被更新过 imageDescriptions 的动态列表（用于调用方落库缓存，避免下次重复识别）。
  */
-function formatUserPosts(posts: MomentPost[]): string {
+async function describeUserPostImages(
+  posts: MomentPost[],
+  visionApiConfig?: import('../types').VisionApiConfig,
+): Promise<MomentPost[]> {
+  if (!isVisionApiReady(visionApiConfig)) return [];
+
+  const userPosts = posts.filter(p => p.author === 'user').slice(0, 5);
+  const updated: MomentPost[] = [];
+
+  for (const post of userPosts) {
+    if (!post.images || post.images.length === 0) continue;
+    const alreadyDescribed = post.images.every((_, i) => !!post.imageDescriptions?.[i]?.trim());
+    if (alreadyDescribed) continue;
+
+    const descriptions: string[] = [...(post.imageDescriptions || [])];
+    let changed = false;
+    // 串行识别：图片一般不多（朋友圈单条最多 9 张），并发对识图 API 的压力没必要；
+    // 失败的那一张留空，不拖累其他张也不影响这条动态本身正常参与互动。
+    for (let i = 0; i < post.images.length; i++) {
+      if (descriptions[i]?.trim()) continue;
+      try {
+        descriptions[i] = await describeImageWithVisionApi(post.images[i], visionApiConfig!);
+        changed = true;
+      } catch (e: any) {
+        console.warn('[Moments] 识别用户动态图片失败，跳过这一张:', post.id, i, e?.message || String(e));
+      }
+    }
+    if (changed) {
+      updated.push({ ...post, imageDescriptions: descriptions, updatedAt: Date.now() });
+    }
+  }
+
+  return updated;
+}
+
+/**
+ * 格式化用户最近的朋友圈动态（供 AI 参考和互动）。
+ * imageDescriptionOverrides：这一轮刚识别出来、还没真正落库的图片描述（key: postId，
+ * value: 跟 images 同索引位的描述数组）——优先用这份，没有才退回 post.imageDescriptions
+ * 里已经缓存好的旧结果。
+ */
+function formatUserPosts(
+  posts: MomentPost[],
+  imageDescriptionOverrides?: Map<string, string[]>,
+): string {
   const userPosts = posts
     .filter(p => p.author === 'user')
     .slice(0, 5); // 最多 5 条
@@ -189,13 +238,37 @@ function formatUserPosts(posts: MomentPost[]): string {
     const timeStr = `${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}`;
     const alreadyLiked = p.likes.includes(p.charId);
     const alreadyCommented = p.comments.some(c => c.author !== 'user');
+    const descriptions = imageDescriptionOverrides?.get(p.id) || p.imageDescriptions;
+
+    const formatImages = (): string => {
+      if (!p.images || p.images.length === 0) return '';
+      if (!descriptions || descriptions.length === 0) return `\n  [图片 ${p.images.length} 张，暂无法查看内容]`;
+      return p.images.map((_, i) => descriptions[i]?.trim()
+        ? `\n  [图 ${i + 1}] ${descriptions[i].trim().slice(0, 200)}`
+        : `\n  [图 ${i + 1}] （识别失败，看不清）`
+      ).join('');
+    };
+
     let desc = `[id=${p.id}] ${timeStr} `;
     switch (p.type) {
-      case 'text': desc += `文字: "${(p.text || '').slice(0, 100)}"`; break;
-      case 'image': desc += `图片${p.images?.length || 0}张`; break;
-      case 'imageText': desc += `图文: "${(p.text || '').slice(0, 80)}" + 图片${p.images?.length || 0}张`; break;
-      case 'music': desc += `分享音乐: ${p.music?.songName || '未知'} - ${p.music?.artists || ''}`; break;
-      case 'article': desc += `分享文章: ${p.article?.title || '未知'}`; break;
+      case 'text':
+        desc += `文字: "${(p.text || '').slice(0, 100)}"`;
+        break;
+      case 'image':
+        desc += `发了图片：${formatImages()}`;
+        break;
+      case 'imageText':
+        desc += `图文: "${(p.text || '').slice(0, 80)}"${formatImages()}`;
+        break;
+      case 'music':
+        desc += `分享音乐:《${p.music?.songName || '未知'}》— ${p.music?.artists || '未知歌手'}`;
+        if (p.text?.trim()) desc += `，配文: "${p.text.trim().slice(0, 60)}"`;
+        break;
+      case 'article':
+        desc += `分享文章:《${p.article?.title || '未知'}》`;
+        if (p.article?.body?.trim()) desc += `\n  摘要: ${p.article.body.trim().slice(0, 150)}`;
+        if (p.text?.trim()) desc += `\n  配文: "${p.text.trim().slice(0, 60)}"`;
+        break;
     }
     if (alreadyLiked) desc += ' (你已点赞)';
     if (alreadyCommented) desc += ' (你已评论)';
@@ -351,10 +424,19 @@ ${musicCandidatesText}
    - 这条动态要不要配图，由你自己判断（结合人设/日程/最近聊天语境，不是每条都要配）：想配图就在这条里加一个
      "imagePrompt" 字段，写一句简短的英文图片描述（场景/动作/穿着等细节）；不想配图就不要写这个字段` : ''}${musicTaskHint}
 
-2. 看用户的朋友圈，决定是否点赞/评论
+2. 看用户的朋友圈，像刷到朋友的动态一样，决定是否点赞/评论
    - 对标了"(你已点赞)"或"(你已评论)"的动态不要重复互动
-   - 评论要简短自然、符合你和用户的关系
-   - 不是每条都要互动，根据内容和你的性格决定
+   - 不是每条都要互动，根据内容和你的性格决定；真人也不会条条都评论
+   - 评论要基于这条动态的具体内容，不要写成一句放在哪条动态下面都成立的空泛客套话
+   - 不同内容类型，反应方式不一样：
+     · 发了图片/图文的：图片后面 [图 N] 是这张图实际拍到了什么，当真看懂了再接话——
+       可以调侃画面里的细节、问一句相关的话、或者单纯说说这张图给你的感觉，别提"图片"这个词本身
+       （真人不会说"我看到你发的图片里有..."，而是直接聊图里的东西，像亲眼看见一样自然）
+     · 分享文章的：如果给了摘要，说明你真的看了内容再评论——针对文章讲了什么发表一两句真实感想
+       或者提个问题，而不是"这篇文章不错"这种没读过也能说的话；没给摘要就别装作看过全文
+     · 分享音乐的：可以联想这首歌的氛围、歌词大意、或者这首歌让你想起什么，
+       不确定的信息不要瞎编（比如没听过就别说"这段歌词太戳了"）
+   - 评论要简短自然、符合你和用户的关系，别写成小作文
 
 3. 看"用户刚追评、还等你回话的"这部分，逐条决定要不要接话
    - 每条动态下面列出的评论是完整对话串（谁在什么时候说了什么），最后一条一定是用户发的
@@ -452,7 +534,17 @@ export async function generateMoments(input: GenerateMomentsInput): Promise<Gene
     getRecentChatSummary(charId, charName, userName),
     getTodayScheduleText(char),
   ]);
-  const userPostsText = skipInteractions ? '' : formatUserPosts(existingPosts);
+
+  // 1.5 给用户最近动态里没识别过的图片补齐识图描述（供 TA 像真人一样"看懂"再评论）。
+  // 识图 API 没开就静默跳过，不影响主流程；识别出来的这批用来更新 formatUserPosts 的文本，
+  // 也会在最后合并进 updatedUserPosts 让调用方落库缓存，下次不用重新识别。
+  const imageDescribedPosts = skipInteractions ? [] : await describeUserPostImages(existingPosts, apiConfig.visionApi);
+  const imageDescriptionOverrides = new Map<string, string[]>();
+  for (const p of imageDescribedPosts) {
+    if (p.imageDescriptions) imageDescriptionOverrides.set(p.id, p.imageDescriptions);
+  }
+
+  const userPostsText = skipInteractions ? '' : formatUserPosts(existingPosts, imageDescriptionOverrides);
   const taRecentText = formatTaRecentPosts(existingPosts, charId);
   const pendingReplyPosts = skipInteractions ? [] : findPendingReplies(existingPosts, charId);
   const pendingRepliesText = skipInteractions ? '' : formatPendingReplies(pendingReplyPosts, charName);
@@ -654,11 +746,13 @@ export async function generateMoments(input: GenerateMomentsInput): Promise<Gene
     }));
   }
 
-  // 6. 处理互动（更新用户的动态）
-  const updatedUserPosts: MomentPost[] = [];
+  // 6. 处理互动（更新用户的动态）。updatedUserPosts 以 imageDescribedPosts（1.5 步识图结果）
+  // 打底，点赞/评论在这份基础上叠加，避免两处改动互相覆盖同一条动态。
+  const updatedUserPosts: MomentPost[] = [...imageDescribedPosts];
   for (const interaction of (parsed.interactions || [])) {
     if (!interaction.postId) continue;
-    const userPost = existingPosts.find(p => p.id === interaction.postId && p.author === 'user');
+    const alreadyInList = updatedUserPosts.find(p => p.id === interaction.postId);
+    const userPost = alreadyInList || existingPosts.find(p => p.id === interaction.postId && p.author === 'user');
     if (!userPost) continue;
 
     let updated = { ...userPost };
@@ -695,7 +789,12 @@ export async function generateMoments(input: GenerateMomentsInput): Promise<Gene
 
     if (changed) {
       updated.updatedAt = Date.now();
-      updatedUserPosts.push(updated);
+      if (alreadyInList) {
+        const idx = updatedUserPosts.findIndex(p => p.id === interaction.postId);
+        updatedUserPosts[idx] = updated;
+      } else {
+        updatedUserPosts.push(updated);
+      }
     }
   }
 
