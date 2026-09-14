@@ -635,7 +635,10 @@ const MomentsApp: React.FC = () => {
             },
           } as any,
         });
-        addToast('已分享到聊天框', 'success');
+        addToast('已分享到聊天框（点击跳转）', 'success', () => {
+          closeApp();
+          openApp(AppID.Chat);
+        });
         return;
       }
 
@@ -659,7 +662,7 @@ const MomentsApp: React.FC = () => {
     } catch (e: any) {
       addToast(`转发失败: ${e.message?.slice(0, 60) || '未知错误'}`, 'error');
     }
-  }, [settings, userProfile, charName, charAvatar, charId, addToast]);
+  }, [settings, userProfile, charName, charAvatar, charId, addToast, closeApp, openApp]);
 
   const togglePin = useCallback(async (postId: string) => {
     const post = posts.find(p => p.id === postId);
@@ -1431,6 +1434,12 @@ const MomentsApp: React.FC = () => {
           {/* 音乐输入 */}
           {composeType === 'music' && (
             <div className="space-y-3">
+              <textarea
+                value={composeText}
+                onChange={e => setComposeText(e.target.value)}
+                placeholder="配一句话，留空就只发这首歌..."
+                className="w-full min-h-[60px] bg-transparent text-sm text-white/90 placeholder:text-white/25 resize-none border-none outline-none px-1"
+              />
               <div>
                 <input
                   value={composeMusicLinkInput}
