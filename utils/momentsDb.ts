@@ -9,9 +9,10 @@
  */
 
 const DB_NAME = 'SullyOS_Moments';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_POSTS = 'posts';
 const STORE_SETTINGS = 'settings';
+const STORE_AI_TASKS = 'ai_tasks';
 
 // ==================== 类型定义 ====================
 
@@ -120,6 +121,23 @@ export interface MomentPost {
 export type MomentUpdateFrequency = '5min' | '30min' | '1h' | '2h' | 'paused';
 
 /** 每角色的朋友圈设置 */
+export type MomentAiTaskKind = 'pin' | 'image_ai';
+export type MomentAiTaskStatus = 'pending' | 'processing' | 'completed' | 'failed';
+
+/** 朋友圈发布后的本地后台任务。任务只保存 ID/状态，不把 API Key 写进队列。 */
+export interface MomentAiTask {
+  id: string;
+  kind: MomentAiTaskKind;
+  postId: string;
+  charId: string;
+  status: MomentAiTaskStatus;
+  attempts: number;
+  createdAt: number;
+  updatedAt: number;
+  nextRunAt: number;
+  lastError?: string;
+}
+
 export interface MomentSettings {
   id: string;                      // charId
   // 用户封面
@@ -175,6 +193,12 @@ function openDb(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(STORE_SETTINGS)) {
         db.createObjectStore(STORE_SETTINGS, { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains(STORE_AI_TASKS)) {
+        const store = db.createObjectStore(STORE_AI_TASKS, { keyPath: 'id' });
+        store.createIndex('status', 'status', { unique: false });
+        store.createIndex('nextRunAt', 'nextRunAt', { unique: false });
+        store.createIndex('postId', 'postId', { unique: false });
       }
     };
 
@@ -239,6 +263,97 @@ export function createPostId(): string {
 
 export function createCommentId(): string {
   return genId('mcmt');
+}
+
+
+export function createMomentAiTaskId(kind: MomentAiTaskKind, postId: string): string {
+  return `mat_${kind}_${postId}`;
+}
+
+export async function enqueueMomentAiTask(task: MomentAiTask): Promise<void> {
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE_AI_TASKS, 'readwrite');
+    tx.objectStore(STORE_AI_TASKS).put(task);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('enqueueMomentAiTask aborted'));
+  });
+}
+
+export async function getPendingMomentAiTasks(now = Date.now()): Promise<MomentAiTask[]> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_AI_TASKS, 'readonly');
+    const req = tx.objectStore(STORE_AI_TASKS).getAll();
+    req.onsuccess = () => {
+      const tasks = (req.result || []) as MomentAiTask[];
+      resolve(tasks
+        .filter(t => (t.status === 'pending' || (t.status === 'processing' && now - t.updatedAt > 5 * 60_000)) && t.nextRunAt <= now)
+        .sort((a, b) => a.createdAt - b.createdAt));
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+/** 原子地把任务从 pending/stale processing 抢成 processing，避免多实例重复跑。 */
+export async function claimMomentAiTask(taskId: string, now = Date.now()): Promise<MomentAiTask | null> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_AI_TASKS, 'readwrite');
+    const store = tx.objectStore(STORE_AI_TASKS);
+    const req = store.get(taskId);
+    req.onsuccess = () => {
+      const task = req.result as MomentAiTask | undefined;
+      if (!task) { resolve(null); return; }
+      const stale = task.status === 'processing' && now - task.updatedAt > 5 * 60_000;
+      if (task.nextRunAt > now || (task.status !== 'pending' && !stale)) { resolve(null); return; }
+      const claimed = { ...task, status: 'processing' as const, updatedAt: now, attempts: (task.attempts || 0) + 1 };
+      store.put(claimed);
+      tx.oncomplete = () => resolve(claimed);
+    };
+    req.onerror = () => reject(req.error);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function finishMomentAiTask(taskId: string, ok: boolean, error?: string): Promise<void> {
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE_AI_TASKS, 'readwrite');
+    const store = tx.objectStore(STORE_AI_TASKS);
+    const req = store.get(taskId);
+    req.onsuccess = () => {
+      const task = req.result as MomentAiTask | undefined;
+      if (!task) return;
+      const attempts = task.attempts || 0;
+      const retry = !ok && attempts < 8;
+      const delay = Math.min(60 * 60_000, Math.max(5_000, 2 ** Math.min(attempts, 8) * 1_000));
+      store.put({
+        ...task,
+        status: retry ? 'pending' : (ok ? 'completed' : 'failed'),
+        updatedAt: Date.now(),
+        nextRunAt: retry ? Date.now() + delay : 0,
+        lastError: ok ? undefined : String(error || '未知错误').slice(0, 500),
+      });
+    };
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('finishMomentAiTask aborted'));
+  });
+}
+
+export async function deleteMomentAiTasksForPost(postId: string): Promise<void> {
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE_AI_TASKS, 'readwrite');
+    const store = tx.objectStore(STORE_AI_TASKS);
+    const idx = store.index('postId');
+    const req = idx.openCursor(IDBKeyRange.only(postId));
+    req.onsuccess = () => { const cursor = req.result; if (cursor) { cursor.delete(); cursor.continue(); } };
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
 }
 
 // ---- Settings ----
