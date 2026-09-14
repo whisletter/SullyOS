@@ -53,6 +53,68 @@ const cleanDescription = (value: string): string => value
   .slice(0, 4000);
 
 /** 调用 OpenAI 兼容视觉端点，把一张图片变成可交给纯文本模型的描述。 */
+/**
+ * 一次视觉请求最多处理传入的全部图片（朋友圈目前最多 9 张）。
+ * 返回数组与输入图片严格按索引对齐。
+ */
+export async function describeImagesWithVisionApi(
+  imageUrls: string[],
+  config: VisionApiConfig,
+): Promise<string[]> {
+  if (!isVisionApiReady(config)) throw new Error('识图 API 已开启，但 URL、Key 或 Model 尚未填写完整');
+  const urls = imageUrls.filter(canDescribeImage);
+  if (!urls.length) return [];
+  const existingKey = urls.join('\n');
+  const existing = inFlightDescriptions.get(existingKey);
+  if (existing) {
+    const joined = await existing;
+    try { return JSON.parse(joined) as string[]; } catch { return [joined]; }
+  }
+
+  const request = (async () => {
+    const baseUrl = config.baseUrl.trim().replace(/\/+$/, '');
+    const content: any[] = [{
+      type: 'text',
+      text: `${VISION_PROMPT}\n\n这次共有 ${urls.length} 张图片。请逐张识别，并严格按输入顺序输出 JSON：{\"descriptions\":[\"第1张描述\",\"第2张描述\"]}。descriptions 数组长度必须等于图片数量，不要合并图片，不要添加图片外的信息。`,
+    }];
+    for (const url of urls) content.push({ type: 'image_url', image_url: { url } });
+
+    const data = await safeFetchJson(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.apiKey.trim()}` },
+      body: JSON.stringify({
+        model: config.model.trim(),
+        messages: [{ role: 'user', content }],
+        temperature: 0,
+        max_tokens: Math.min(1200 * urls.length, 8000),
+        stream: false,
+      }),
+    }, 1, 90_000, { appName: '朋友圈', purpose: '多图识图' });
+    const raw = extractContent(data).trim();
+    const parsed = (() => { try { return JSON.parse(raw); } catch { return null; } })() || (() => {
+      try {
+        const m = raw.match(/\{[\s\S]*\}/);
+        return m ? JSON.parse(m[0]) : null;
+      } catch { return null; }
+    })();
+    const descriptions = Array.isArray(parsed?.descriptions)
+      ? parsed.descriptions.map((v: unknown) => cleanDescription(String(v || '')))
+      : [];
+    if (descriptions.length !== urls.length || descriptions.some(d => !d)) {
+      throw new Error(`多图识图返回数量异常：需要 ${urls.length} 条，实际 ${descriptions.length} 条`);
+    }
+    const normalized = urls.map((_, i) => descriptions[i] || '');
+    return JSON.stringify(normalized);
+  })();
+  inFlightDescriptions.set(existingKey, request);
+  try {
+    const joined = await request;
+    return JSON.parse(joined) as string[];
+  } finally {
+    inFlightDescriptions.delete(existingKey);
+  }
+}
+
 export async function describeImageWithVisionApi(
   imageUrl: string,
   config: VisionApiConfig,
