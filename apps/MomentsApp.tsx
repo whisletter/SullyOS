@@ -263,6 +263,7 @@ const MomentsApp: React.FC = () => {
 
     try {
       const musicCandidates = await buildMusicCandidates();
+      console.info('[Moments] 本次可分享的候选歌曲池:', musicCandidates.map(c => `${c.name}(${c.source})`));
       const result = await generateMoments({
         char,
         userProfile,
