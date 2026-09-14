@@ -64,7 +64,7 @@ import { expandShortUrl, extractWebpageContent, detectFirstUrl } from '../utils/
 import { generateImage, isImageGenApiReady } from '../utils/imageGenApi';
 import { migrateDataUrlToRef } from '../utils/blobRef';
 import { deleteMomentPin } from '../utils/momentsMemory';
-import { startMomentTaskQueue, enqueuePublishedMomentTasks, deletePublishedMomentTasks } from '../utils/momentsTaskQueue';
+import { startMomentTaskQueue, enqueuePublishedMomentTasks, deletePublishedMomentTasks, triggerDormancySweep } from '../utils/momentsTaskQueue';
 
 // ==================== 样式常量 ====================
 
@@ -194,8 +194,19 @@ const MomentsApp: React.FC = () => {
     startMomentTaskQueue(() => ({
       visionApi: apiConfig.visionApi,
       lightLLM: memoryPalaceConfig?.lightLLM,
+      // 沉寂归档任务要用角色档案（memoryPalaceEnabled / embeddingConfig / systemPrompt）
+      // 和用户昵称，队列本身只存 charId，运行时从这里现取。
+      char,
+      userName: settings?.userNickname || userProfile.name || '我',
     }));
-  }, [apiConfig.visionApi, memoryPalaceConfig?.lightLLM]);
+  }, [apiConfig.visionApi, memoryPalaceConfig?.lightLLM, char, settings?.userNickname, userProfile.name]);
+
+  // 触发点之一：打开朋友圈。扫一遍有没有已经沉寂超过 18 小时、评论区还没归档的动态。
+  // 纯本地时间戳比较，没有 API 成本；真扫到才会入队走 LLM。
+  useEffect(() => {
+    if (!charId) return;
+    void triggerDormancySweep(charId);
+  }, [charId]);
 
   useEffect(() => {
     const refresh = () => { void loadData(); };
@@ -680,7 +691,11 @@ const MomentsApp: React.FC = () => {
     setPosts(prev => prev.map(p => p.id === updated.id ? updated : p));
     setCommentText('');
     setReplyTarget(null);
-  }, [activeCommentPostId, commentText, replyTarget, posts, userProfile, settings]);
+
+    // 触发点之二：评论区产生新互动。顺手看看「别的」动态有没有已经沉寂该归档了
+    // （这条刚被评论，自己肯定还不沉寂）。
+    void triggerDormancySweep(charId);
+  }, [activeCommentPostId, commentText, replyTarget, posts, userProfile, settings, charId]);
 
   const handleDeletePost = useCallback(async (postId: string) => {
     await deletePost(postId);
