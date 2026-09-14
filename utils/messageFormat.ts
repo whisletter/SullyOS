@@ -190,10 +190,16 @@ export function normalizeMessageContent(
     // "[音乐卡片]" 这种没信息量的占位，丢掉"谁因为什么歌做了什么"的语义
     if (type === 'music_card') {
         const song = msg.metadata?.song as { name?: string; artists?: string } | undefined;
-        const intent = msg.metadata?.intent as 'join' | 'add' | 'join_and_add' | undefined;
+        const intent = msg.metadata?.intent as 'join' | 'add' | 'join_and_add' | 'shared' | undefined;
         const addedTo = msg.metadata?.addedToPlaylistTitle as string | undefined;
         if (song?.name) {
             const songDesc = song.artists ? `《${song.name}》— ${song.artists}` : `《${song.name}》`;
+            if (intent === 'shared') {
+                // 从朋友圈/主动分享过来的、能真播放的卡片——不是"TA 对歌做出反应"，
+                // 是把这首歌分享进了聊天。是谁分享的由外层 [sender]: 前缀已经表明，这里不重复；
+                // 怎么接（听过/没听过/要不要一起听）交给 char 自己判断人设和语境。
+                return `[音乐卡片] 分享了${songDesc}`;
+            }
             const action =
                 intent === 'join' ? `决定和${userName}一起听这首`
                 : intent === 'add' ? `把这首收进了自己的歌单${addedTo ? `《${addedTo}》` : ''}`
