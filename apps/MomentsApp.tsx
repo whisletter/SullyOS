@@ -613,6 +613,27 @@ const MomentsApp: React.FC = () => {
   /** 转发这条动态到聊天框：生成一张卡片消息，内容=动态图文（不含评论），大小随内容走。 */
   const handleForwardToChat = useCallback(async (post: MomentPost) => {
     try {
+      // 音乐动态：分享成真能播放的 music_card（intent: 'shared'），不是纯展示的转发卡片。
+      if (post.type === 'music' && post.music) {
+        await DB.saveMessage({
+          charId,
+          role: 'user',
+          type: 'music_card' as any,
+          content: '[分享音乐]',
+          metadata: {
+            intent: 'shared',
+            song: {
+              songId: post.music.songId,
+              name: post.music.songName,
+              artists: post.music.artists,
+              albumPic: post.music.albumPic,
+            },
+          } as any,
+        });
+        addToast('已分享到聊天框', 'success');
+        return;
+      }
+
       const momentData = {
         charId: post.charId,
         charName: post.author === 'user' ? (settings?.userNickname || userProfile.name || '我') : charName,
