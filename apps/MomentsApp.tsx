@@ -45,6 +45,7 @@ import {
   MomentSettings,
   MomentMusicCard,
   MomentArticleCard,
+  FakeCommentThread,
   MomentPostType,
   MomentUpdateFrequency,
   DEFAULT_MOMENT_SETTINGS,
@@ -56,7 +57,7 @@ import {
   createPostId,
   createCommentId,
 } from '../utils/momentsDb';
-import { generateMoments, canGenerate, generateSecretMemory, generateSecretSpaceIdentity, type MusicShareCandidate } from '../utils/momentsAi';
+import { generateMoments, canGenerate, generateSecretMemory, generateSecretSpaceIdentity, generateFakeArticleComments, type MusicShareCandidate } from '../utils/momentsAi';
 import { DB } from '../utils/db';
 import { useMusic, musicApi, toHttps } from '../context/MusicContext';
 import { expandShortUrl, extractWebpageContent, detectFirstUrl } from '../utils/webpageExtractor';
@@ -112,8 +113,9 @@ const MomentsApp: React.FC = () => {
   const [generating, setGenerating] = useState(false);
   const [secretSpaceRefreshing, setSecretSpaceRefreshing] = useState(false);
   const [secretSpaceEditing, setSecretSpaceEditing] = useState(false);
-  /** 点文章卡片展开全文阅读层时，正在看哪篇（null = 没打开）。 */
-  const [readingArticle, setReadingArticle] = useState<MomentArticleCard | null>(null);
+  /** 点文章卡片展开详情页时，正在看哪篇（含所属动态 id，null = 没打开）。 */
+  const [readingArticle, setReadingArticle] = useState<{ postId: string; article: MomentArticleCard } | null>(null);
+  const [articleCommentsGenerating, setArticleCommentsGenerating] = useState(false);
   const [secretSpaceNameDraft, setSecretSpaceNameDraft] = useState('');
   const [secretSpaceSignatureDraft, setSecretSpaceSignatureDraft] = useState('');
   const genAbortRef = useRef<AbortController | null>(null);
@@ -465,6 +467,24 @@ const MomentsApp: React.FC = () => {
         results.push(dataUrl);
       }
       setComposeImages(prev => [...prev, ...results].slice(0, 9));
+    };
+    input.click();
+  }, []);
+
+  /** 文章发布表单里"图片（可选）"的单图上传，不走链接识别，纯本地图片。 */
+  const handleArticleImageUpload = useCallback(() => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      const dataUrl = await new Promise<string>((res) => {
+        reader.onload = () => res(reader.result as string);
+        reader.readAsDataURL(file);
+      });
+      setComposeArticleImage(dataUrl);
     };
     input.click();
   }, []);
@@ -999,7 +1019,7 @@ const MomentsApp: React.FC = () => {
 
   // ==================== 渲染：文章卡片 ====================
 
-  const renderArticleCard = (article: MomentArticleCard) => {
+  const renderArticleCard = (article: MomentArticleCard, postId?: string) => {
     const excerpt = article.body
       ? (article.body.length > 20 ? `${article.body.slice(0, 20)}...` : article.body)
       : '';
@@ -1007,7 +1027,7 @@ const MomentsApp: React.FC = () => {
       <div
         className="flex items-center gap-3 rounded-xl p-3 mt-2 cursor-pointer active:opacity-90 transition-opacity"
         style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)' }}
-        onClick={() => setReadingArticle(article)}
+        onClick={() => { if (postId) setReadingArticle({ postId, article }); }}
       >
         <div className="w-14 h-14 rounded-lg overflow-hidden shrink-0">
           {article.image ? (
@@ -1034,32 +1054,123 @@ const MomentsApp: React.FC = () => {
 
   // ==================== 渲染：文章全文阅读层 ====================
 
+  /**
+   * 点评论区中间那个不明显的"网络不好，刷新试试..."按钮：生成一次虚拟评论区并
+   * 写回这篇文章所属动态的 article.fakeComments 缓存，之后重复打开不用再生成。
+   */
+  const handleGenerateArticleComments = useCallback(async () => {
+    if (!readingArticle || !char) return;
+    if (!apiConfig.apiKey || !apiConfig.baseUrl) {
+      addToast('请先配置 API', 'info');
+      return;
+    }
+    setArticleCommentsGenerating(true);
+    try {
+      const threads = await generateFakeArticleComments({
+        char, userProfile, apiConfig, article: readingArticle.article,
+      });
+      const post = posts.find(p => p.id === readingArticle.postId);
+      if (!post || !post.article) return;
+      const updatedArticle: MomentArticleCard = { ...post.article, fakeComments: threads };
+      const updatedPost: MomentPost = { ...post, article: updatedArticle, updatedAt: Date.now() };
+      await savePost(updatedPost);
+      setPosts(prev => prev.map(p => p.id === updatedPost.id ? updatedPost : p));
+      setReadingArticle({ postId: readingArticle.postId, article: updatedArticle });
+    } catch (e: any) {
+      addToast(`评论加载失败: ${e?.message?.slice(0, 60) || '未知错误'}`, 'error');
+    } finally {
+      setArticleCommentsGenerating(false);
+    }
+  }, [readingArticle, char, apiConfig, userProfile, posts, addToast]);
+
   const renderArticleReader = () => {
     if (!readingArticle) return null;
-    const text = readingArticle.fullText?.trim() || readingArticle.body?.trim() || '（这篇文章没有留下更多内容）';
+    const { article } = readingArticle;
+    const text = article.fullText?.trim() || article.body?.trim() || '（这篇文章没有留下更多内容）';
+    const threads = article.fakeComments;
+
     return (
-      <div className="fixed inset-0 z-50 flex flex-col" style={{ background: '#0f0f1a', color: '#e2e8f0' }}>
-        <div className="flex items-center gap-3 px-4 py-3 border-b border-white/10 shrink-0">
-          <button onClick={() => setReadingArticle(null)} className="text-white/60 active:scale-90">
+      <div className="fixed inset-0 z-50 flex flex-col" style={{ background: '#f5f5f7' }}>
+        <div className="flex items-center gap-3 px-4 py-3 border-b border-black/5 shrink-0 bg-white">
+          <button onClick={() => setReadingArticle(null)} className="text-slate-500 active:scale-90">
             <CaretLeft size={22} />
           </button>
-          <div className="text-sm font-medium truncate flex-1">{readingArticle.title || '未命名文章'}</div>
+          <div className="text-sm font-medium truncate flex-1 text-slate-800">{article.title || '未命名文章'}</div>
+          {article.url && (
+            <button
+              onClick={() => window.open(article.url, '_blank', 'noopener,noreferrer')}
+              className="text-[11px] text-blue-500 active:scale-95 shrink-0 flex items-center gap-0.5"
+            >
+              查看原网页
+            </button>
+          )}
         </div>
-        <div className="flex-1 overflow-y-auto p-4">
-          {readingArticle.image && (
-            <img src={readingArticle.image} alt="" className="w-full rounded-xl mb-4 object-cover max-h-48" />
-          )}
-          <div className="text-lg font-bold mb-2" style={{ color: 'var(--moments-text, #e2e8f0)' }}>
-            {readingArticle.title || '未命名文章'}
-          </div>
-          <div className="text-sm leading-relaxed whitespace-pre-wrap" style={{ color: 'var(--moments-text-secondary, #cbd5e1)' }}>
-            {text}
-          </div>
-          {readingArticle.url && (
-            <div className="mt-6 pt-3 border-t border-white/10 text-xs text-blue-400 break-all">
-              原文链接：{readingArticle.url}
+
+        <div className="flex-1 overflow-y-auto">
+          {/* 正文区：仿公众号推送排版 */}
+          <div className="bg-white px-5 pt-6 pb-5">
+            <div className="text-xl font-bold mb-4 leading-snug text-slate-900">
+              {article.title || '未命名文章'}
             </div>
-          )}
+            {article.image && (
+              <img src={article.image} alt="" className="w-full rounded-lg mb-4 object-cover max-h-56" />
+            )}
+            {article.body && (
+              <div className="text-sm mb-3 text-slate-500">
+                {article.body}
+              </div>
+            )}
+            <div className="text-[15px] leading-[1.9] whitespace-pre-wrap text-slate-700">
+              {text}
+            </div>
+          </div>
+
+          {/* 虚拟评论区 */}
+          <div className="mt-2 bg-white px-4 py-4">
+            <div className="text-sm font-medium text-slate-800 mb-3">精选留言</div>
+            {!threads || threads.length === 0 ? (
+              <button
+                onClick={handleGenerateArticleComments}
+                disabled={articleCommentsGenerating}
+                className="w-full py-8 text-center text-xs text-slate-300 active:scale-[0.99] transition-transform disabled:opacity-60"
+              >
+                {articleCommentsGenerating ? '加载中…' : '网络不好，刷新试试...'}
+              </button>
+            ) : (
+              <div className="space-y-4">
+                {threads.map((thread, i) => (
+                  <div key={i}>
+                    <div className="flex items-start gap-2">
+                      <div
+                        className="w-7 h-7 rounded-full shrink-0 flex items-center justify-center text-[11px] font-medium text-white"
+                        style={{ background: thread.isChar ? '#807c9d' : '#c2c2c8' }}
+                      >
+                        {thread.authorName.slice(0, 1)}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-xs font-medium" style={{ color: thread.isChar ? '#5a49a8' : '#64748b' }}>
+                          {thread.authorName}
+                        </div>
+                        <div className="text-sm text-slate-700 mt-0.5">{thread.content}</div>
+                      </div>
+                    </div>
+                    {thread.replies.length > 0 && (
+                      <div className="ml-9 mt-2 pl-3 border-l border-slate-100 space-y-2">
+                        {thread.replies.map((reply, j) => (
+                          <div key={j} className="text-xs">
+                            <span className="font-medium" style={{ color: reply.isChar ? '#5a49a8' : '#64748b' }}>
+                              {reply.authorName}
+                            </span>
+                            <span className="text-slate-500">：{reply.content}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -1179,7 +1290,7 @@ const MomentsApp: React.FC = () => {
             {post.music && renderMusicCard(post.music)}
 
             {/* 文章卡片 */}
-            {post.article && renderArticleCard(post.article)}
+            {post.article && renderArticleCard(post.article, post.id)}
 
             {/* 时间 + 操作栏 */}
             <div className="flex items-center justify-between mt-3">
@@ -1615,6 +1726,27 @@ const MomentsApp: React.FC = () => {
                 placeholder="正文全文（可选，不在动态卡片上显示；用于点开卡片看全文，也会作为角色能读到的完整内容）"
                 className="w-full min-h-[100px] px-3 py-2 rounded-lg bg-white/10 text-sm text-white/90 border border-white/10 placeholder:text-white/30 resize-none"
               />
+              <div>
+                <label className="text-xs text-white/40 mb-1 block">图片（可选）</label>
+                {composeArticleImage ? (
+                  <div className="relative w-20 h-20">
+                    <img src={composeArticleImage} alt="" className="w-full h-full object-cover rounded-lg" />
+                    <button
+                      onClick={() => setComposeArticleImage('')}
+                      className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-black/60 text-white text-[10px] flex items-center justify-center"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={handleArticleImageUpload}
+                    className="w-20 h-20 rounded-lg border border-dashed border-white/20 flex items-center justify-center text-white/30 active:scale-95 transition"
+                  >
+                    <Plus size={18} />
+                  </button>
+                )}
+              </div>
               {composeArticleTitle && (
                 <div className="mt-2">
                   {renderArticleCard({ title: composeArticleTitle, body: composeArticleBody, url: composeArticleUrl, image: composeArticleImage, fullText: composeArticleFullText })}
