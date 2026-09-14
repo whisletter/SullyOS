@@ -33,6 +33,11 @@ export interface MomentArticleCard {
   body?: string;
   /** 封面图（链接识别抓到的 og:image，或手动没填时留空）。 */
   image?: string;
+  /**
+   * 完整正文，不在动态卡片上展示（卡片只显标题 + 摘要）。用于两处：
+   * 1) 点开卡片展开全文阅读页；2) 作为角色能读到的完整内容注入 prompt。
+   */
+  fullText?: string;
 }
 
 /** 评论 */
@@ -57,6 +62,12 @@ export interface MomentPost {
   type: MomentPostType;
   text?: string;                   // 文字内容
   images?: string[];               // 图片 URL 或 base64
+  /**
+   * images 逐张的识图描述（识图 API 结果缓存，跟 images 一一对应，同索引位）。
+   * 首次生成评论/互动时识别一次并写回这里，之后重复读同一条动态不再重新识别、
+   * 不重复扣识图额度。用户自己发的图和 AI 自动配图共用这套缓存机制。
+   */
+  imageDescriptions?: string[];
   /**
    * 生成这些图片时用的英文描述（仅 AI 自动配图的动态才有）。重新生成失败的图片时
    * 复用同一句描述再调一次生图 API，而不是重新问 AI「这条要不要配图」——避免多打一次
