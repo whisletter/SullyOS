@@ -1232,3 +1232,86 @@ ${coreContext}
         .map(r => ({ authorName: r.authorName.trim(), isChar: !!r.isChar, content: r.content.trim() })),
     }));
 }
+
+// ==================== 后台调度独立入口（MomentsScheduler 用） ====================
+
+/**
+ * MomentsScheduler 到点触发时调用：不依赖 MomentsApp 组件 state，自己从 DB 取数据、
+ * 落库、推进冷却时间戳。是 MomentsApp.tsx handleGenerate 里"生成+落库"那部分的
+ * 无 UI 版本（不含 toast / AbortController / posts state 合并，调度触发时页面很可能
+ * 根本没打开）。
+ *
+ * 音乐候选池逻辑照抄 MomentsApp.tsx 里的 buildMusicCandidates，只是登录态判断从
+ * "neteaseProfile 是否已 setState"换成"cfg.cookie 是否有值"——OSContext 里没有
+ * useMusic()，拿不到 neteaseProfile 这个 state，但 musicApi.call 是纯函数，
+ * 传入 loadMusicCfgStandalone() 读到的 cfg 就能直接调用；cookie 失效时
+ * likelist 接口本身会报错/返回空，走 catch 静默降级，不影响本轮生成。
+ *
+ * 不做 canGenerate 的冷却判断（那是给"打开App/手动按钮"用的固定间隔冷却，语义是
+ * "距上次多久"；这里的节流由 MomentsScheduler 的时段+每日一次机制负责，两套逻辑不叠加）。
+ * 但仍然尊重 updateFrequency === 'paused'——暂停营业的角色不该被后台调度点火。
+ */
+export async function runScheduledMomentsTick(charId: string, deps: {
+  char: CharacterProfile;
+  userProfile: UserProfile;
+  apiConfig: APIConfig;
+  settings: MomentSettings;
+  existingPosts: MomentPost[];
+  /** 从 loadMusicCfgStandalone() 读取，非 React 场景下的独立入口，见 context/MusicContext.tsx */
+  musicCfg?: MusicCfg;
+}): Promise<GenerateMomentsResult | null> {
+  const { char, userProfile, apiConfig, settings, existingPosts, musicCfg } = deps;
+  if (settings.updateFrequency === 'paused') return null;
+  if (!apiConfig.apiKey || !apiConfig.baseUrl) return null;
+
+  const musicCandidates: MusicShareCandidate[] = [];
+  const seenIds = new Set<number>();
+
+  // TA 自己歌单里的歌
+  const taSongs = (char.musicProfile?.playlists || []).flatMap(pl => pl.songs || []);
+  for (const s of taSongs) {
+    if (seenIds.has(s.id)) continue;
+    seenIds.add(s.id);
+    musicCandidates.push({ id: s.id, name: s.name, artists: s.artists, albumPic: s.albumPic, source: 'ta' });
+  }
+
+  // 用户网易云"喜欢的音乐"（需要 cookie 有效 + 这个角色允许读取用户音乐）
+  const canReadUser = char.musicProfile?.canReadUserMusic ?? true;
+  if (musicCfg?.cookie && canReadUser) {
+    try {
+      const likeRes = await musicApi.call(musicCfg, 'likelist', {});
+      const likedIds: number[] = (likeRes?.ids || likeRes?.data?.ids || []).slice(0, 8);
+      if (likedIds.length > 0) {
+        const detail = await musicApi.call(musicCfg, 'song/detail', { ids: likedIds });
+        for (const song of (detail?.songs || [])) {
+          if (seenIds.has(song.id)) continue;
+          seenIds.add(song.id);
+          const artists = (song.ar || song.artists || []).map((a: any) => a.name).filter(Boolean).join(' / ');
+          musicCandidates.push({
+            id: song.id,
+            name: song.name || '',
+            artists: artists || '未知歌手',
+            albumPic: toHttps(song.al?.picUrl || song.album?.picUrl || ''),
+            source: 'user',
+          });
+        }
+      }
+    } catch (e) {
+      // cookie 失效 / 网络错误：静默降级，跟组件版 buildMusicCandidates 行为一致
+      console.warn('[Moments] 后台调度读取用户网易云喜欢列表失败，跳过:', e);
+    }
+  }
+
+  const result = await generateMoments({
+    char,
+    userProfile,
+    apiConfig,
+    settings,
+    existingPosts,
+    musicCandidates,
+    musicCfg,
+    skipInteractions: false,
+  });
+
+  return result;
+}
