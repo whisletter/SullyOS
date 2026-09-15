@@ -812,6 +812,22 @@ export interface ScheduleSlot {
     theater?: SlotTheater; // 该时段的小剧场（窥视演出），按需生成并缓存
 }
 
+/**
+ * 朋友圈异步调度专用："今天大概几点方便刷/发朋友圈"的一个时间区间。
+ * 日程生成时由 AI 顺便判断（见 utils/scheduleGenerator.ts），不额外调用 LLM。
+ *
+ * 刻意不作为 DailySchedule 的字段——DailySchedule 是"角色日程"这个用户可见功能的
+ * 数据模型，可能有专门的界面展示给用户看；这个字段只是朋友圈调度器的内部调度参数，
+ * 混进 DailySchedule 里容易被"查看日程"之类的 UI 意外渲染出来。落盘和读取都在
+ * utils/momentsWindow.ts 里，单独存 localStorage，跟 DailySchedule 完全不共享数据结构，
+ * 结构上就不存在"被日程查看界面带出来"的可能，不用依赖"UI 恰好没写这段渲染代码"。
+ * 调度算法（在区间内挑一个确定性的随机触发分钟数）也在 utils/momentsWindow.ts。
+ */
+export interface MomentsWindow {
+    start: string; // "HH:MM"，24小时制
+    end: string;   // "HH:MM"，严格晚于 start，同一天内，不支持跨零点
+}
+
 export interface DailySchedule {
     id: string;           // `${charId}_${date}`
     charId: string;
