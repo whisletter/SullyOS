@@ -1,7 +1,8 @@
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Camera, Check, X } from '@phosphor-icons/react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { ArrowClockwise, Camera, Check, X } from '@phosphor-icons/react';
 import { useOS } from '../context/OSContext';
+import { DB } from '../utils/db';
 
 const ANNIVERSARY_KEY = 'yuzhou_anniversary_day';
 const USER_MOOD_KEY = 'yuzhou_user_mood';
@@ -147,33 +148,49 @@ const YuZhouApp: React.FC = () => {
   const [userMood, setUserMood] = useState(() => storageGet(USER_MOOD_KEY));
   const [userEmoji, setUserEmoji] = useState(() => storageGet(USER_EMOJI_KEY, '🥰'));
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [taMoodIndex, setTaMoodIndex] = useState(0);
+  const [taMoodText, setTaMoodText] = useState('');
+  const [refreshingTaMood, setRefreshingTaMood] = useState(false);
 
   const fallbackUser = userProfile?.perCharAvatars?.[activeCharacterId || ''] || userProfile?.avatar;
   const fallbackChar = char?.avatar;
-  const taEmoji = useMemo(() => {
-    const seed = `${new Date().toISOString().slice(0,10)}:${char?.id || 'ta'}`;
-    let n = 0; for (const c of seed) n = (n * 31 + c.charCodeAt(0)) >>> 0;
-    return TA_EMOJIS[n % TA_EMOJIS.length];
-  }, [char?.id]);
+  const taEmoji = TA_EMOJIS[taMoodIndex % TA_EMOJIS.length];
 
-  // 头像先使用 localStorage 保存，避免与大型 IndexedDB 模块产生额外依赖，
-  // 这样与昼在首次打开时也能稳定加载；裁剪后的图片已压缩为 JPEG。
+  const refreshTaMood = useCallback(() => {
+    setRefreshingTaMood(true);
+    window.setTimeout(() => {
+      const nextIndex = Math.floor(Math.random() * TA_EMOJIS.length);
+      const name = char?.name || 'TA';
+      const texts = [
+        `${name}今天看起来心情不错，想和你待在一起。`,
+        `${name}今天有一点小情绪，戳一下问问TA吧。`,
+        `${name}今天状态轻松，似乎在期待你的消息。`,
+        `${name}今天有点累，但还是想和你说说话。`,
+        `${name}今天心里藏着一点小开心。`,
+      ];
+      setTaMoodIndex(nextIndex);
+      setTaMoodText(texts[Math.floor(Math.random() * texts.length)]);
+      setRefreshingTaMood(false);
+    }, 220);
+  }, [char?.name]);
+
+
   useEffect(() => {
-    const userKey = 'yuzhou-avatar-user';
-    const charKey = `yuzhou-avatar-char-${activeCharacterId || 'default'}`;
-    setUserAvatar(storageGet(userKey) || null);
-    setCharAvatar(storageGet(charKey) || null);
+    (async () => {
+      try {
+        const [u, c] = await Promise.all([DB.getAsset('yuzhou-avatar-user'), DB.getAsset(`yuzhou-avatar-char-${activeCharacterId || 'default'}`)]);
+        setUserAvatar(u); setCharAvatar(c);
+      } catch (e) { console.warn('[YuZhou] avatar load failed', e); }
+    })();
   }, [activeCharacterId]);
 
-  const saveAvatar = useCallback((kind: 'user' | 'char', dataUrl: string) => {
+  const saveAvatar = useCallback(async (kind: 'user' | 'char', dataUrl: string) => {
     try {
       const id = kind === 'user' ? 'yuzhou-avatar-user' : `yuzhou-avatar-char-${activeCharacterId || 'default'}`;
-      storageSet(id, dataUrl);
+      await DB.saveAsset(id, dataUrl);
       kind === 'user' ? setUserAvatar(dataUrl) : setCharAvatar(dataUrl);
       addToast?.('头像已保存', 'success');
-    } catch {
-      addToast?.('头像保存失败，可能是浏览器存储空间不足', 'error');
-    }
+    } catch { addToast?.('头像保存失败，可能是存储空间不足', 'error'); }
   }, [activeCharacterId, addToast]);
 
   const saveDay = () => {
@@ -191,7 +208,15 @@ const YuZhouApp: React.FC = () => {
         <header className="h-12 px-4 flex items-center justify-between">
           <button onClick={closeApp} className="w-9 h-9 rounded-full bg-white/70 shadow-sm text-rose-400 text-lg">‹</button>
           <div className="font-black tracking-[.22em] text-rose-400 text-sm">与昼</div>
-          <div className="w-9 h-9 rounded-full bg-white/60 flex items-center justify-center text-pink-300">♡</div>
+          <button
+            onClick={refreshTaMood}
+            disabled={refreshingTaMood}
+            aria-label="刷新TA的心情"
+            title="刷新TA的心情"
+            className={`w-9 h-9 rounded-full bg-white/80 border border-rose-100 shadow-sm flex items-center justify-center text-rose-400 active:scale-90 transition-transform ${refreshingTaMood ? 'animate-spin' : ''}`}
+          >
+            <ArrowClockwise size={19} weight="bold" />
+          </button>
         </header>
 
         {/* 顶部 1/3：纪念日 */}
@@ -202,12 +227,11 @@ const YuZhouApp: React.FC = () => {
             </div>
             <div className="absolute left-3 top-[68px] z-20"><AvatarPicker label="我" image={userAvatar} fallback={fallbackUser} onChange={v => saveAvatar('user', v)} /></div>
             <div className="absolute right-3 top-[68px] z-20"><AvatarPicker label={char?.name || 'TA'} image={charAvatar} fallback={fallbackChar} onChange={v => saveAvatar('char', v)} /></div>
-            <div className="absolute left-1/2 top-[46px] -translate-x-1/2 w-[190px] h-[190px] flex items-center justify-center">
-              <div className="absolute w-[172px] h-[155px] bg-[#f9b8c7] shadow-[0_12px_30px_rgba(239,126,153,.2)] rotate-[-2deg]"
-                style={{ clipPath: 'polygon(50% 100%, 5% 53%, 4% 29%, 13% 14%, 27% 8%, 40% 13%, 50% 25%, 60% 13%, 73% 8%, 87% 14%, 96% 29%, 95% 53%)' }} />
-              <div className="relative text-center text-white drop-shadow-[0_2px_2px_rgba(190,90,110,.18)] pt-3">
-                <div className="text-[34px] font-black leading-none tracking-tight">第{day}天</div>
-                <button onClick={() => { setDayDraft(day); setEditingDay(true); }} className="mt-3 text-[10px] px-3 py-1 rounded-full bg-white/30 font-semibold">点击修改天数</button>
+            <div className="absolute left-1/2 top-[27px] -translate-x-1/2 w-[190px] h-[178px] flex items-center justify-center">
+              <div className="absolute text-[112px] leading-none select-none drop-shadow-[0_10px_18px_rgba(239,126,153,.18)]">💗</div>
+              <div className="relative mt-2 text-center text-white drop-shadow-[0_2px_2px_rgba(190,90,110,.22)]">
+                <div className="text-[29px] font-black leading-none tracking-tight">第{day}天</div>
+                <button onClick={() => { setDayDraft(day); setEditingDay(true); }} className="mt-2 text-[9px] px-2.5 py-1 rounded-full bg-white/35 font-semibold">点击修改天数</button>
               </div>
             </div>
             <div className="absolute bottom-4 inset-x-0 text-center text-[10px] tracking-[.16em] text-rose-300">一起走过的每一天，都值得被记住</div>
@@ -222,20 +246,47 @@ const YuZhouApp: React.FC = () => {
           </div>
         </section>
 
-        {/* 底部 1/3：今日心情 */}
-        <section className="mx-4 rounded-[30px] bg-white/70 border border-white shadow-[0_10px_35px_rgba(172,88,108,.08)] overflow-hidden">
-          <div className="pt-5 text-center">
-            <div className="text-[17px] font-black tracking-[.12em] text-rose-500/85">今日心情</div>
-            <div className="text-[9px] text-rose-300 mt-1 tracking-wider">TODAY'S MOOD</div>
+        {/* 底部 1/3：今日心情 / 心情日记 */}
+        <section className="mx-4 rounded-[30px] bg-white/75 border border-white/90 shadow-[0_10px_35px_rgba(172,88,108,.08)] overflow-hidden">
+          <div className="pt-5 pb-1 text-center">
+            <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-rose-50/80 border border-rose-100/70">
+              <span className="text-rose-300">♡</span>
+              <span className="text-[17px] font-black tracking-[.12em] text-rose-500/85">今日心情</span>
+              <span className="text-rose-300">♡</span>
+            </div>
+            <div className="text-[8px] text-rose-300 mt-1.5 tracking-[.2em]">TODAY'S MOOD</div>
           </div>
-          <div className="flex mt-3 pb-5">
-            <MoodCard title={`${char?.name || 'TA'}的心情 · AI`} emoji={taEmoji} text="今天的心情，会根据TA的人设和当天发生的事情慢慢生成。" />
-            <div className="w-px bg-rose-100 self-stretch my-2" />
-            <MoodCard title="我的心情" emoji={userEmoji} text={userMood} editable onEmoji={() => setShowEmojiPicker(v => !v)} onText={setUserMood} />
+
+          <div className="flex mt-2 pb-5 px-2 sm:px-3">
+            {/* 左：用户 */}
+            <div className="flex-1 min-w-0 px-2 sm:px-4 py-2 text-center">
+              <div className="text-[12px] font-bold tracking-wide text-rose-500/75">我的心情</div>
+              <button onClick={() => setShowEmojiPicker(v => !v)} className="mt-2 text-[58px] leading-none active:scale-90 transition-transform">{userEmoji}</button>
+              <div className="relative mt-2 min-h-[86px] rounded-[18px] bg-[#fffaf2] border border-[#f3dfcf] shadow-[0_3px_10px_rgba(120,80,50,.05)] p-3 text-left">
+                <span className="absolute -top-2 left-4 w-10 h-4 rounded-sm bg-rose-200/80 rotate-[-8deg] shadow-sm" />
+                <textarea value={userMood} maxLength={50} onChange={e => setUserMood(e.target.value)} placeholder="写下你的今日心情吧…"
+                  className="w-full h-[58px] resize-none outline-none bg-transparent text-[13px] leading-5 text-slate-700 placeholder:text-slate-300" />
+                <div className="text-[9px] text-right text-slate-300 mt-0.5">{userMood.length}/50</div>
+              </div>
+            </div>
+
+            <div className="w-px bg-rose-100 self-stretch my-3" />
+
+            {/* 右：TA */}
+            <div className="flex-1 min-w-0 px-2 sm:px-4 py-2 text-center">
+              <div className="text-[12px] font-bold tracking-wide text-rose-500/75">{char?.name || 'TA'}的心情</div>
+              <button onClick={refreshTaMood} disabled={refreshingTaMood} className={`mt-2 text-[58px] leading-none active:scale-90 transition-transform ${refreshingTaMood ? 'animate-bounce' : ''}`}>{taEmoji}</button>
+              <div className="relative mt-2 min-h-[86px] rounded-[18px] bg-[#fffaf8] border border-[#f4d9e0] shadow-[0_3px_10px_rgba(120,80,50,.05)] p-3 text-left">
+                <span className="absolute -top-2 left-4 w-10 h-4 rounded-sm bg-pink-200/80 rotate-[8deg] shadow-sm" />
+                <div className="min-h-[58px] flex items-center justify-center text-center text-[13px] leading-5 text-slate-600 break-words">
+                  {taMoodText || 'TA的心情是什么？戳一下TA问问吧。'}
+                </div>
+              </div>
+            </div>
           </div>
+
           {showEmojiPicker && <div className="border-t border-rose-100 bg-[#fffaf8] p-3 grid grid-cols-6 gap-2">{EMOJIS.map(e => <button key={e} onClick={() => { setUserEmoji(e); setShowEmojiPicker(false); }} className="text-2xl h-10 rounded-xl hover:bg-white active:scale-90">{e}</button>)}</div>}
         </section>
-
         <div className="h-6" />
       </div>
 
