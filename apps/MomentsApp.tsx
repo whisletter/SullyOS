@@ -1795,26 +1795,41 @@ const MomentsApp: React.FC = () => {
                 { value: '1h', label: '1h' },
                 { value: '2h', label: '2h' },
                 { value: 'paused', label: '暂停营业' },
-              ] as { value: MomentUpdateFrequency; label: string }[]).map(({ value, label }) => (
-                <button
-                  key={value}
-                  onClick={() => setSettings({ ...settings, updateFrequency: value })}
-                  className="px-3.5 py-2 rounded-lg text-xs transition"
-                  style={{
-                    background: settings.updateFrequency === value ? (value === 'paused' ? '#ef4444' : '#3b82f6') : 'rgba(255,255,255,0.08)',
-                    color: settings.updateFrequency === value ? 'white' : '#94a3b8',
-                  }}
-                >
-                  {label}
-                </button>
-              ))}
+              ] as { value: MomentUpdateFrequency; label: string }[]).map(({ value, label }) => {
+                // 异步延时互动开启后，后台节流完全由日程窗口决定，5min/30min/1h/2h 这几档
+                // 原本控制的"打开App时隔多久能再触发"对后台路径不产生任何效果——继续留着能点
+                // 容易让人误以为在控制后台节奏。只有 paused 例外：它是独立的"完全不生成"总开关，
+                // 不管异步开没开都生效，所以不锁。
+                const locked = settings.asyncInteraction && value !== 'paused';
+                return (
+                  <button
+                    key={value}
+                    disabled={locked}
+                    onClick={() => setSettings({ ...settings, updateFrequency: value })}
+                    className="px-3.5 py-2 rounded-lg text-xs transition"
+                    style={{
+                      background: settings.updateFrequency === value ? (value === 'paused' ? '#ef4444' : '#3b82f6') : 'rgba(255,255,255,0.08)',
+                      color: settings.updateFrequency === value ? 'white' : '#94a3b8',
+                      opacity: locked ? 0.35 : 1,
+                      cursor: locked ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
             </div>
-            {settings.updateFrequency === 'paused' && (
+            {settings.updateFrequency === 'paused' ? (
               <div className="text-[11px] text-white/40 mt-1.5 leading-relaxed">
                 暂停营业期间，打开朋友圈 / 从查手机跳转都不会触发 TA 更新动态或回复评论。
                 TA 朋友圈页面的🔄按钮也会禁用；但🌼秘密空间依然可以查看 TA 更早以前的心事。
               </div>
-            )}
+            ) : settings.asyncInteraction ? (
+              <div className="text-[11px] text-white/40 mt-1.5 leading-relaxed">
+                开启异步延时互动后，TA 什么时候更新由今天的日程决定，这几档节奏选项暂时不生效；
+                "暂停营业"仍是独立的总开关，随时可以用它临时叫停。
+              </div>
+            ) : null}
           </div>
 
           {/* 异步延时互动 */}
