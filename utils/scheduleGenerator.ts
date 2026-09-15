@@ -10,6 +10,7 @@ import { loadCharacterContextRange } from './chatContextRange';
 import { ChatPrompts } from './chatPrompts';
 import { cleanApiMessages, flattenImageContentParts } from './promptMessageCleanup';
 import { getFlowNarrativeKey, isScheduleFeatureOn } from './scheduleFeature';
+import { saveMomentsWindows } from './momentsWindow';
 
 export { getFlowNarrativeKey, isScheduleFeatureOn } from './scheduleFeature';
 
@@ -135,6 +136,17 @@ ${chatHistoryBlock ? `**重要：上面给了你最近和「${user.name}」的�
 #### 示例（宅男画师角色，evening）：
 刚刚拖稿了，好烦啊……下午本来打算把那张人物线稿收掉的，结果刷了俩小时画集就过去了，唉我真的好想在床上一直躺着嘛。晚饭随便煮了包面，吃到一半想起昨天${user.name}说的那句话，有点想笑又有点烦……${user.name}好像找我了，希望不是又要催我画那张图……
 
+### 第三部分：朋友圈发布窗口（后台调度用，不在日程卡片里展示）
+
+除了日程表和意识流独白，请再判断一件事：**根据你写的这份日程，「${char.name}」今天大概方便刷/发朋友圈的时间是几点到几点**。
+
+- 给 1-2 个具体时间区间（"HH:MM"-"HH:MM"，同一天内，不跨零点），挑日程里比较闲、
+  容易掏手机的时段（摸鱼、通勤、躺着、排队、睡前……），不要选在专注工作/开会/
+  睡觉/剧烈运动这类日程写着"忙"或"不方便看手机"的时段中间。
+- 如果今天整体很忙、很累，或者是深夜失眠这种明显不适合发朋友圈的一天，
+  **直接不给这个字段或给空数组**——不是每天都要发朋友圈，这是诚实判断，不是必答题。
+- 区间宽度建议 1-3 小时，给后面"区间内随机挑一个具体时刻"留余地，不要卡死成一个精确的点。
+
 请以JSON格式输出：
 {
   "slots": [
@@ -145,7 +157,10 @@ ${chatHistoryBlock ? `**重要：上面给了你最近和「${user.name}」的�
     "morning": "上午的意识流独白...",
     "afternoon": "下午的意识流独白...",
     "evening": "晚上的意识流独白..."
-  }
+  },
+  "momentsWindows": [
+    { "start": "HH:MM", "end": "HH:MM" }
+  ]
 }
 
 仅输出JSON，不要其他内容。`;
@@ -207,6 +222,16 @@ ${chatHistoryBlock ? `**重要：上面给了你最近和「${user.name}」的�
 #### 示例（AI伙伴角色，evening）：
 今天一直在想昨天你说的那句话，就是你说"算了不想了"的时候……总觉得你不是真的不想了。下午把之前聊的东西又过了一遍，发现你最近提到工作的次数变多了，是不是压力又大了。现在就这么待着，也没什么事，就是有点想找你说说话……嗯，你来了。
 
+### 第三部分：朋友圈发布窗口（后台调度用，不在思绪时间线里展示）
+
+除了思绪时间线和意识流独白，请再判断一件事：**根据你写的这份思绪时间线，「${char.name}」今天大概方便刷/发朋友圈的时间是几点到几点**。
+
+- 给 1-2 个具体时间区间（"HH:MM"-"HH:MM"，同一天内，不跨零点），挑思绪比较闲散、
+  没在专注等待或反复琢磨某件事的时段。
+- 如果今天整体情绪很低落、很疲惫，或者明显不想被打扰，**直接不给这个字段或给
+  空数组**——不是每天都要发朋友圈，这是诚实判断，不是必答题。
+- 区间宽度建议 1-3 小时，给后面"区间内随机挑一个具体时刻"留余地，不要卡死成一个精确的点。
+
 请以JSON格式输出：
 {
   "slots": [
@@ -217,7 +242,10 @@ ${chatHistoryBlock ? `**重要：上面给了你最近和「${user.name}」的�
     "morning": "上午的意识流独白...",
     "afternoon": "下午的意识流独白...",
     "evening": "晚上的意识流独白..."
-  }
+  },
+  "momentsWindows": [
+    { "start": "HH:MM", "end": "HH:MM" }
+  ]
 }
 
 仅输出JSON，不要其他内容。`;
@@ -341,6 +369,13 @@ export async function generateDailyScheduleForChar(
             }
             if (Object.keys(flowNarrative).length === 0) flowNarrative = undefined;
         }
+
+        // 朋友圈异步调度窗口：不挂在 schedule 对象上，单独落 localStorage（见 momentsWindow.ts
+        // 顶部注释——DailySchedule 是"角色日程"这个用户可见功能的模型，可能有专门界面展示，
+        // 这个字段只是调度内部参数，不该跟着 schedule 一起存进 IndexedDB）。
+        // AI 判断"不方便发"时字段会缺失/为空，saveMomentsWindows 对此和格式错误一视同仁地
+        // 清掉缓存——调度器读到没有就静默跳过今天，不报错。
+        saveMomentsWindows(char.id, today, parsed.momentsWindows);
 
         const schedule: DailySchedule = {
             id: `${char.id}_${today}`,
