@@ -11,7 +11,6 @@
  * 生成侧（scheduleGenerator.ts）和调度侧（momentsScheduler.ts）都只通过这里的函数
  * 读写，不直接碰 localStorage key，避免两边校验口径分叉。
  */
-
 import type { MomentsWindow } from '../types';
 
 export type { MomentsWindow };
