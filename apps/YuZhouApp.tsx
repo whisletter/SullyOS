@@ -137,6 +137,49 @@ const MoodCard: React.FC<{
   </div>
 );
 
+const YuZhouGamePage: React.FC<{ onBack: () => void }> = ({ onBack }) => {
+  const games = ['大富翁', 'T&D', '女巫的毒药', '海龟汤', 'Tarot', '猜猜看'];
+
+  return (
+    <div className="absolute inset-0 z-[60] bg-[#fff7f5] text-slate-800">
+      <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_15%_10%,rgba(255,190,205,.42),transparent_28%),radial-gradient(circle_at_90%_25%,rgba(255,220,224,.5),transparent_30%),linear-gradient(180deg,#fffafa_0%,#fff4f1_100%)]" />
+      <div className="relative h-full overflow-y-auto overscroll-none" style={{ paddingTop: 'var(--safe-top)' }}>
+        <header className="h-14 px-4 flex items-center justify-between">
+          <button onClick={onBack} className="w-9 h-9 rounded-full bg-white/80 shadow-sm text-rose-400 text-xl active:scale-90 transition-transform">‹</button>
+          <div className="text-center">
+            <div className="font-black tracking-[.18em] text-rose-500 text-base">游戏</div>
+            <div className="text-[8px] tracking-[.22em] text-rose-300 mt-0.5">PLAY TOGETHER</div>
+          </div>
+          <div className="w-9 h-9" />
+        </header>
+
+        <main className="px-5 pt-4 pb-10">
+          <div className="text-center mb-7">
+            <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white/75 border border-white shadow-sm text-[11px] font-bold text-rose-400">
+              <span>🎮</span><span>一起玩点什么？</span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-3 gap-x-4 gap-y-7 max-w-md mx-auto">
+            {games.map((name) => (
+              <button
+                key={name}
+                onClick={() => {}}
+                className="flex flex-col items-center active:scale-95 transition-transform"
+              >
+                <div className="w-full aspect-square rounded-[22px] bg-white/85 border border-white shadow-[0_8px_24px_rgba(172,88,108,.10)] flex items-center justify-center">
+                  <span className="text-[52px] leading-none">🎮</span>
+                </div>
+                <div className="mt-2.5 text-[12px] font-bold text-slate-700 whitespace-nowrap">{name}</div>
+              </button>
+            ))}
+          </div>
+        </main>
+      </div>
+    </div>
+  );
+};
+
 const YuZhouApp: React.FC = () => {
   const { activeCharacterId, characters, userProfile, closeApp, addToast } = useOS();
   const char = characters.find(c => c.id === activeCharacterId) ?? null;
@@ -148,6 +191,7 @@ const YuZhouApp: React.FC = () => {
   const [userMood, setUserMood] = useState(() => storageGet(USER_MOOD_KEY));
   const [userEmoji, setUserEmoji] = useState(() => storageGet(USER_EMOJI_KEY, '🥰'));
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [showGamePage, setShowGamePage] = useState(false);
   const [taMoodIndex, setTaMoodIndex] = useState(0);
   const [taMoodText, setTaMoodText] = useState('');
   const [refreshingTaMood, setRefreshingTaMood] = useState(false);
@@ -296,13 +340,15 @@ const YuZhouApp: React.FC = () => {
           {[
             ['📝', '便签'], ['🎮', '游戏'], ['💍', '与昼'], ['💰', '金钱'], ['🎁', '礼物']
           ].map(([icon, label], i) => (
-            <button key={label} onClick={() => i === 2 ? undefined : addToast?.(`${label}入口已预留，之后继续做`, 'info')} className={`w-[18%] flex flex-col items-center gap-1 py-1 rounded-2xl ${i === 2 ? 'text-rose-500' : 'text-slate-400'} active:scale-90 transition-transform`}>
+            <button key={label} onClick={() => { if (i === 1) setShowGamePage(true); else if (i !== 2) addToast?.(`${label}入口已预留，之后继续做`, 'info'); }} className={`w-[18%] flex flex-col items-center gap-1 py-1 rounded-2xl ${i === 2 ? 'text-rose-500' : 'text-slate-400'} active:scale-90 transition-transform`}>
               <span className={`${i === 2 ? 'text-[29px]' : 'text-[23px]'} leading-none`}>{icon}</span>
               <span className="text-[9px] font-bold">{label}</span>
             </button>
           ))}
         </div>
       </nav>
+
+      {showGamePage && <YuZhouGamePage onBack={() => setShowGamePage(false)} />}
 
       {editingDay && <div className="absolute inset-0 z-[70] bg-black/25 flex items-center justify-center px-8">
         <div className="w-full max-w-xs rounded-[28px] bg-white p-5 shadow-2xl">
