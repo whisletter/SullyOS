@@ -1769,7 +1769,7 @@ const MomentsApp: React.FC = () => {
           <div>
             <label className="text-xs text-white/50 mb-1 block">TA 每次最多发几条</label>
             <div className="flex items-center gap-3">
-              {[1, 2, 3].map(n => (
+              {[1, 2, 3, 5].map(n => (
                 <button
                   key={n}
                   onClick={() => setSettings({ ...settings, taPostFrequency: n })}
