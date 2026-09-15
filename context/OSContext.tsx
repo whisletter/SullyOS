@@ -27,6 +27,9 @@ import { VR_DEFAULT_INTERVAL_MIN } from '../utils/vrWorld/constants';
 import { WorldScheduler, toTickEntries } from '../utils/worldHome/scheduler';
 import { runWorldEpisode, rerollWorldCharBeat } from '../utils/worldHome/engine';
 import { migrateWorldDaySegs } from '../utils/worldHome/prompts';
+import { MomentsScheduler, toMomentsTickEntries, loadMomentSettingsMap } from '../utils/momentsScheduler';
+import { runScheduledMomentsTick } from '../utils/momentsAi';
+import { getPostsByCharId, savePost, getMomentSettings, saveMomentSettings } from '../utils/momentsDb';
 import { ChatParser } from '../utils/chatParser';
 import { safeFetchJson, isImageGenerationUrl } from '../utils/safeApi';
 import { captureApiRequestOnce, getApiCallAmbientContext, recordApiCall, setApiCallAmbientContext, updateApiRequestCaptureUsage } from '../utils/apiCallLog';
@@ -64,7 +67,7 @@ import { resolveCharTimeZone } from '../utils/timezone';
 import { ActiveMsgStore, exportAmsg2GlobalConfig } from '../utils/activeMsgStore';
 import { charMayHaveCloudState, purgeCharCloudState } from '../utils/amsg2CharCleanup';
 import { markAmsgStateDirty, markAmsgStateDirtyForAll, resumePendingAmsgStateSync, syncAmsgToolConfigAndPrompts } from '../utils/amsgStateSync';
-import { loadMusicPlaybackSnapshot } from './MusicContext';
+import { loadMusicPlaybackSnapshot, loadMusicCfgStandalone } from './MusicContext';
 import { setCharNameRegistry } from '../utils/charNameRegistry';
 import { setMinimaxRegion } from '../utils/minimaxEndpoint';
 import { setElevenLabsModel, setTtsProvider, setVoicePromptOverrides } from '../utils/ttsProvider';
@@ -2691,6 +2694,39 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       };
       WorldScheduler.onTrigger((worldId, trigger) => { void runWorld(worldId, trigger); });
 
+      // 朋友圈「异步延时互动」——原理同家园：到点触发一轮生成，不依赖 MomentsApp
+      // 组件是否挂载。只对 MomentSettings.asyncInteraction=true 的角色生效；
+      // 没开这个开关的角色继续走 MomentsApp.tsx 里"打开App自动生成"的旧路径。
+      const runMoments = async (charId: string) => {
+          try {
+              const char = charactersRef.current.find(c => c.id === charId);
+              if (!char || !userProfileRef.current) return;
+              const [settings, existingPosts] = await Promise.all([
+                  getMomentSettings(charId),
+                  getPostsByCharId(charId),
+              ]);
+              // 双重确认：对账表可能滞后于用户刚关闭的开关（reconcile 是异步的）
+              if (!settings.asyncInteraction) return;
+              const result = await runScheduledMomentsTick(charId, {
+                  char,
+                  userProfile: userProfileRef.current,
+                  apiConfig: apiConfigRef.current,
+                  settings,
+                  existingPosts,
+                  musicCfg: loadMusicCfgStandalone(),
+              });
+              if (!result) return;
+              for (const post of result.newPosts) await savePost(post);
+              for (const post of result.updatedUserPosts) await savePost(post);
+              for (const post of result.updatedTaPosts) await savePost(post);
+              await saveMomentSettings({ ...settings, lastGeneratedAt: Date.now() });
+              try { window.dispatchEvent(new CustomEvent('moments-task-updated', { detail: { charId } })); } catch {}
+          } catch (e) {
+              console.error('[Moments] scheduled tick error', e);
+          }
+      };
+      MomentsScheduler.onTrigger((charId) => { void runMoments(charId); });
+
       // 单个角色重 roll（家园 WorldView 派发 world-reroll-request 事件，带 worldId/charId/direction）
       const onRerollRequest = async (e: Event) => {
           const d = (e as CustomEvent).detail || {};
@@ -2727,11 +2763,22 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           })
           .catch(() => {});
 
+      // 朋友圈调度表同样存 localStorage、不随备份迁移，按 IndexedDB 里各角色的
+      // MomentSettings.asyncInteraction 对账。设置页保存开关时也要调一次 reconcile
+      // （见 MomentsApp.tsx），这里只负责应用启动时的初始对账。
+      void (async () => {
+          const charIds = charactersRef.current.map(c => c.id);
+          if (charIds.length === 0) return;
+          const settingsMap = await loadMomentSettingsMap(charIds);
+          MomentsScheduler.reconcile(toMomentsTickEntries(charIds, settingsMap));
+      })().catch(() => {});
+
       return () => {
           // Cleanup: detach proactive listeners when OSContext unmounts (unlikely but safe)
           ProactiveChat.onTrigger(() => {});
           VRScheduler.onTrigger(() => {});
           WorldScheduler.onTrigger(() => {});
+          MomentsScheduler.onTrigger(() => {});
           window.removeEventListener('world-reroll-request', onRerollRequest as EventListener);
       };
   // eslint-disable-next-line react-hooks/exhaustive-deps
