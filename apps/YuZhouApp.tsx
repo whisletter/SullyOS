@@ -1,8 +1,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Camera, Check, PencilSimple, X } from '@phosphor-icons/react';
+import { Camera, Check, X } from '@phosphor-icons/react';
 import { useOS } from '../context/OSContext';
-import { DB } from '../utils/db';
 
 const ANNIVERSARY_KEY = 'yuzhou_anniversary_day';
 const USER_MOOD_KEY = 'yuzhou_user_mood';
@@ -157,22 +156,24 @@ const YuZhouApp: React.FC = () => {
     return TA_EMOJIS[n % TA_EMOJIS.length];
   }, [char?.id]);
 
+  // 头像先使用 localStorage 保存，避免与大型 IndexedDB 模块产生额外依赖，
+  // 这样与昼在首次打开时也能稳定加载；裁剪后的图片已压缩为 JPEG。
   useEffect(() => {
-    (async () => {
-      try {
-        const [u, c] = await Promise.all([DB.getAsset('yuzhou-avatar-user'), DB.getAsset(`yuzhou-avatar-char-${activeCharacterId || 'default'}`)]);
-        setUserAvatar(u); setCharAvatar(c);
-      } catch (e) { console.warn('[YuZhou] avatar load failed', e); }
-    })();
+    const userKey = 'yuzhou-avatar-user';
+    const charKey = `yuzhou-avatar-char-${activeCharacterId || 'default'}`;
+    setUserAvatar(storageGet(userKey) || null);
+    setCharAvatar(storageGet(charKey) || null);
   }, [activeCharacterId]);
 
-  const saveAvatar = useCallback(async (kind: 'user' | 'char', dataUrl: string) => {
+  const saveAvatar = useCallback((kind: 'user' | 'char', dataUrl: string) => {
     try {
       const id = kind === 'user' ? 'yuzhou-avatar-user' : `yuzhou-avatar-char-${activeCharacterId || 'default'}`;
-      await DB.saveAsset(id, dataUrl);
+      storageSet(id, dataUrl);
       kind === 'user' ? setUserAvatar(dataUrl) : setCharAvatar(dataUrl);
       addToast?.('头像已保存', 'success');
-    } catch { addToast?.('头像保存失败，可能是存储空间不足', 'error'); }
+    } catch {
+      addToast?.('头像保存失败，可能是浏览器存储空间不足', 'error');
+    }
   }, [activeCharacterId, addToast]);
 
   const saveDay = () => {
