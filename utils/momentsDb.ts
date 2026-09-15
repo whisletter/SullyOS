@@ -169,12 +169,6 @@ export interface MomentSettings {
    */
   updateFrequency: MomentUpdateFrequency;
   asyncInteraction: boolean;       // 异步延时互动开关
-  /**
-   * asyncInteraction=true 时，TA 允许在哪些时段自动发朋友圈/回评论；未设置=四个时段都允许。
-   * 值域同 utils/worldHome/scheduler.ts 的 WorldTickSlot。第一版用简单布尔矩阵，
-   * 不做"按人设推断作息"的复杂 LLM 推理。
-   */
-  activeSlots?: ('latenight' | 'morning' | 'noon' | 'evening')[];
   lastGeneratedAt: number;         // 上次 AI 生成时间戳
   // 秘密空间（🌼）：TA 自己的独立小天地，背景/名字/签名由 AI 生成，只有头像继承本体
   secretSpaceCoverImage?: string;
