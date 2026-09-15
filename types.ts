@@ -40,6 +40,7 @@ export enum AppID {
   CharCreatorDev = 'char_creator_dev', // 捏脸系统开发模式 — 仅开发模式可见，向捏人器指定类目追加自定义部件
   WorldHome = 'world_home', // 家园 — 同世界观多角色共同生活的大世界（观测驱动演绎，每角色独立 LLM 调用 + NPC 世界引擎）
   Moments = 'moments', // 朋友圈 — 用户和角色的朋友圈动态，点赞评论互动
+  YuZhou = 'yuzhou', // 与昼 — 情侣空间主界面
 }
 
 export interface SystemLog {

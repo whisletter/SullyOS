@@ -80,6 +80,7 @@ export const Icons: Record<string, React.FC<{ className?: string }>> = {
   CharCreatorDev: ({ className }) => <Wrench className={className} weight="regular" />,
   WorldHome: ({ className }) => <HouseLine className={className} weight="regular" />,
   Moments: ({ className }) => <ChatsCircle className={className} weight="regular" />,
+  YuZhou: ({ className }) => <span className={className} style={{ fontSize: '1.15em', lineHeight: 1 }}>❤️</span>,
 };
 
 export const INSTALLED_APPS: AppConfig[] = [
@@ -104,6 +105,7 @@ export const INSTALLED_APPS: AppConfig[] = [
   { id: AppID.Novel, name: '笔友会', icon: 'Novel', color: 'amber' },
   { id: AppID.Reading, name: '眠光', icon: 'Reading', color: 'amber' },
   { id: AppID.Moments, name: '朋友圈', icon: 'Moments', color: 'violet' },
+  { id: AppID.YuZhou, name: '与昼', icon: 'YuZhou', color: 'pink' },
   { id: AppID.Songwriting, name: '写歌', icon: 'Songwriting', color: 'fuchsia' },
   { id: AppID.VRWorld, name: '彼方', icon: 'VRWorld', color: 'indigo' },
   { id: AppID.Schedule, name: '时光契约', icon: 'Schedule', color: 'cyan' },
