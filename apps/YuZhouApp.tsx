@@ -259,10 +259,10 @@ const YuZhouApp: React.FC = () => {
 
           <div className="flex mt-2 pb-5 px-2 sm:px-3">
             {/* 左：用户 */}
-            <div className="flex-1 min-w-0 px-2 sm:px-4 py-2 text-center">
+            <div className="flex-1 min-w-0 px-2 sm:px-4 py-2 text-center flex flex-col">
               <div className="text-[12px] font-bold tracking-wide text-rose-500/75">我的心情</div>
-              <button onClick={() => setShowEmojiPicker(v => !v)} className="mt-2 text-[58px] leading-none active:scale-90 transition-transform">{userEmoji}</button>
-              <div className="relative mt-2 min-h-[86px] rounded-[18px] bg-[#fffaf2] border border-[#f3dfcf] shadow-[0_3px_10px_rgba(120,80,50,.05)] p-3 text-left">
+              <button onClick={() => setShowEmojiPicker(v => !v)} className="mt-4 text-[58px] leading-none active:scale-90 transition-transform">{userEmoji}</button>
+              <div className="relative mt-8 min-h-[86px] rounded-[18px] bg-[#fffaf2] border border-[#f3dfcf] shadow-[0_3px_10px_rgba(120,80,50,.05)] p-3 text-left">
                 <span className="absolute -top-2 left-4 w-10 h-4 rounded-sm bg-rose-200/80 rotate-[-8deg] shadow-sm" />
                 <textarea value={userMood} maxLength={50} onChange={e => setUserMood(e.target.value)} placeholder="写下你的今日心情吧…"
                   className="w-full h-[58px] resize-none outline-none bg-transparent text-[13px] leading-5 text-slate-700 placeholder:text-slate-300" />
@@ -273,10 +273,10 @@ const YuZhouApp: React.FC = () => {
             <div className="w-px bg-rose-100 self-stretch my-3" />
 
             {/* 右：TA */}
-            <div className="flex-1 min-w-0 px-2 sm:px-4 py-2 text-center">
+            <div className="flex-1 min-w-0 px-2 sm:px-4 py-2 text-center flex flex-col">
               <div className="text-[12px] font-bold tracking-wide text-rose-500/75">{char?.name || 'TA'}的心情</div>
-              <button onClick={refreshTaMood} disabled={refreshingTaMood} className={`mt-2 text-[58px] leading-none active:scale-90 transition-transform ${refreshingTaMood ? 'animate-bounce' : ''}`}>{taEmoji}</button>
-              <div className="relative mt-2 min-h-[86px] rounded-[18px] bg-[#fffaf8] border border-[#f4d9e0] shadow-[0_3px_10px_rgba(120,80,50,.05)] p-3 text-left">
+              <button onClick={refreshTaMood} disabled={refreshingTaMood} className={`mt-4 text-[58px] leading-none active:scale-90 transition-transform ${refreshingTaMood ? 'animate-bounce' : ''}`}>{taEmoji}</button>
+              <div className="relative mt-8 min-h-[86px] rounded-[18px] bg-[#fffaf8] border border-[#f4d9e0] shadow-[0_3px_10px_rgba(120,80,50,.05)] p-3 text-left">
                 <span className="absolute -top-2 left-4 w-10 h-4 rounded-sm bg-pink-200/80 rotate-[8deg] shadow-sm" />
                 <div className="min-h-[58px] flex items-center justify-center text-center text-[13px] leading-5 text-slate-600 break-words">
                   {taMoodText || 'TA的心情是什么？戳一下TA问问吧。'}
