@@ -7,7 +7,6 @@
  *   compose  — 发布面板（发图/发文/发图文/分享音乐/分享文章）
  *   settings — 朋友圈设置（发布频率、异步互动等）
  */
-
 import React, {
   useState,
   useEffect,
