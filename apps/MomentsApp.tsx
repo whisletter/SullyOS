@@ -63,6 +63,7 @@ import { expandShortUrl, extractWebpageContent, detectFirstUrl } from '../utils/
 import { generateImage, isImageGenApiReady } from '../utils/imageGenApi';
 import { migrateDataUrlToRef } from '../utils/blobRef';
 import { deleteMomentPin } from '../utils/momentsMemory';
+import { MomentsScheduler, toMomentsTickEntries } from '../utils/momentsScheduler';
 import { startMomentTaskQueue, enqueuePublishedMomentTasks, deletePublishedMomentTasks, triggerDormancySweep } from '../utils/momentsTaskQueue';
 
 // ==================== 样式常量 ====================
@@ -402,10 +403,13 @@ const MomentsApp: React.FC = () => {
     }
   }, [char, settings, apiConfig, userProfile, secretSpaceRefreshing, addToast]);
 
-  // 打开 App 时自动触发一次 AI 生成
+  // 打开 App 时自动触发一次 AI 生成。
+  // asyncInteraction=true 的角色已交给全局 MomentsScheduler 在后台按时段触发，
+  // 这里不再重复点火（否则会跟调度器各发一份）；页面打开只负责展示。
+  // 手动刷新按钮（handleGenerate(true)）不受此限制，两个角色都能用。
   const autoGenTriggered = useRef(false);
   useEffect(() => {
-    if (!loading && settings && !autoGenTriggered.current && apiConfig.apiKey) {
+    if (!loading && settings && !autoGenTriggered.current && apiConfig.apiKey && !settings.asyncInteraction) {
       autoGenTriggered.current = true;
       handleGenerate(false);
     }
@@ -1835,6 +1839,10 @@ const MomentsApp: React.FC = () => {
           <button
             onClick={async () => {
               await saveMomentSettings(settings);
+              // 异步延时互动开关/时段刚变化，立即对账一次调度表，不等下次刷新页面才生效。
+              // （应用启动时的初始对账在 OSContext.tsx 里，这里是设置变更后的即时对账。）
+              const settingsMap = new Map([[charId, settings]]);
+              MomentsScheduler.reconcile(toMomentsTickEntries([charId], settingsMap));
               addToast('设置已保存', 'success');
               setView('main');
             }}
