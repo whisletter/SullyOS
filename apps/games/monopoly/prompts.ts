@@ -197,6 +197,7 @@ export function parseTaActions(g: GameState, reply: string): { text: string; com
       default: rejected.push(`[[${tag}]]：不认识的标签`);
     }
   });
+  
   return { text, commands, rejected };
 }
 
