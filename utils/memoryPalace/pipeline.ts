@@ -2648,3 +2648,102 @@ export async function processMessageRange(
         processingLocks.delete(charId);
     }
 }
+
+// ─── 与昼「便利贴」收藏归档 ──────────────────────
+
+/** 与昼便利贴入宫的入参：一张便利贴 = 一次归档 */
+export interface YuZhouNoteIngestInput {
+    noteId: string;
+    /** 用户贴的还是 TA 贴的 */
+    authorIsUser: boolean;
+    text: string;
+    createdAt: number;
+    /** TA 这张是在回应用户哪张便利贴（原文），用户贴的留空 */
+    replyToText?: string;
+}
+
+/**
+ * 把一张被收藏的与昼便利贴塞进记忆宫殿。便利贴离开木板（被挤掉 / 被删除）时才调用。
+ *
+ * 套路和 ingestMomentThreadToPalace 一致（fake Message → extractMemoriesFromBuffer →
+ * vectorizeAndStore → applyMemorySideEffects，origin 标 system，不动聊天水位），
+ * 只是来源说明换成「贴在两人共用的木板上的便利贴」，避免被写成当面说的话。
+ */
+export async function ingestYuZhouNoteToPalace(
+    char: { id: string; name: string; memoryPalaceEnabled?: boolean; embeddingConfig?: any; systemPrompt?: string; worldview?: string },
+    input: YuZhouNoteIngestInput,
+    lightLLMConfig: LightLLMConfig | null | undefined,
+    userName: string,
+): Promise<MomentIngestResult> {
+    if (!char.memoryPalaceEnabled) return { status: 'palace_disabled' };
+    if (!lightLLMConfig?.baseUrl || !lightLLMConfig?.apiKey) return { status: 'lightllm_missing' };
+    const embeddingConfig = getEmbeddingConfig(char.embeddingConfig);
+    if (!embeddingConfig) return { status: 'embedding_missing' };
+
+    const text = (input.text || '').trim();
+    if (!text) return { status: 'empty_input' };
+    const name = userName || '用户';
+    const createdAt = input.createdAt || Date.now();
+
+    const fakeMessages: Message[] = [];
+    if (!input.authorIsUser && input.replyToText?.trim()) {
+        fakeMessages.push({
+            id: -Math.floor(Math.random() * 1e9),
+            charId: char.id,
+            role: 'user',
+            type: 'text',
+            content: `【与昼便利贴】${name}贴在木板上的便利贴：${input.replyToText.trim()}`,
+            timestamp: createdAt - 1000,
+        } as Message);
+    }
+    fakeMessages.push({
+        id: -Math.floor(Math.random() * 1e9),
+        charId: char.id,
+        role: input.authorIsUser ? 'user' : 'assistant',
+        type: 'text',
+        content: input.authorIsUser
+            ? `【与昼便利贴】${name}贴在木板上给我的便利贴：${text}`
+            : `【与昼便利贴】我（${char.name}）贴在木板上给${name}的便利贴：${text}`,
+        timestamp: createdAt,
+    } as Message);
+
+    let charContext = `[角色档案]\n名字: ${char.name}\n核心设定:\n${char.systemPrompt || '无'}\n`;
+    if (char.worldview?.trim()) charContext += `世界观: ${char.worldview}\n`;
+    charContext += `\n[用户档案]\n名字: ${name}\n`;
+    charContext += `\n[来源说明]\n这是来自【与昼】app 里两人共用的便利贴木板，${name}特意收藏了这张便利贴。\n`;
+    charContext += `便利贴是贴在木板上留给对方看的短句，不是面对面聊天 —— 叙述时不要写成「当面对我说」。\n`;
+
+    let relatedMemoryRefs: RelatedMemoryRef[] = [];
+    try {
+        let snippets = splitMessagesToSpikes(fakeMessages);
+        if (snippets.length === 0) snippets = sampleSnippetsFromMessages(fakeMessages, 2, 200);
+        relatedMemoryRefs = await fetchRelatedMemoriesForExtraction(snippets, char.id, embeddingConfig);
+    } catch (e: any) {
+        console.warn(`🏰 [YuZhouNoteIngest] 相关记忆检索失败（降级为无上下文提取）: ${e.message}`);
+    }
+
+    const extracted = await extractMemoriesFromBuffer(
+        fakeMessages, char.id, char.name, lightLLMConfig, charContext, name, relatedMemoryRefs, [],
+    );
+    if (extracted.memories.length === 0) return { status: 'extracted_none', stored: 0, skipped: 0 };
+
+    for (const node of extracted.memories) {
+        node.createdAt = createdAt;
+        node.lastAccessedAt = createdAt;
+        node.origin = 'system';
+        (node as any).sourceId = input.noteId;
+    }
+
+    const result = await vectorizeAndStore(extracted.memories, embeddingConfig, getRemoteVectorConfig());
+    console.log(`🏰 [YuZhouNoteIngest] 便利贴 ${input.noteId} 入宫：提取 ${extracted.memories.length} 条，存储 ${result.stored}`);
+    await applyMemorySideEffects(
+        char.id, char.name, extracted.memories, extracted.crossTimeLinks, extracted.eventBoxHints,
+        extracted.corrections, embeddingConfig, lightLLMConfig, name,
+    );
+    return {
+        status: 'done',
+        stored: result.stored,
+        skipped: result.skipped,
+        nodes: extracted.memories.map(n => ({ content: n.content, room: n.room })),
+    };
+}
