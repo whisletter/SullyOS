@@ -11,6 +11,7 @@ import * as scheduler from '../utils/forumScheduler';
 import * as ai from '../utils/forumAi';
 import { resolveActiveIdentityAccount, ensureCharMainAccount } from '../utils/forumBootstrap';
 import { FORUM_DEFAULTS } from '../utils/forumConstants';
+import { ForumLogo, FORUM_APP_NAME } from '../utils/forumLogo';
 import ForumHome from './forum/ForumHome';
 import ForumTopicPage from './forum/ForumTopicPage';
 import ForumPostDetail from './forum/ForumPostDetail';
@@ -84,10 +85,11 @@ const ForumApp: React.FC = () => {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      for (const char of characters) {
+     try {
+      for (const char of characters || []) {
         if (char.id) await ensureCharMainAccount(char.id, char.name, char.avatar);
       }
-      const account = await resolveActiveIdentityAccount(userProfile.name || '我', userProfile.avatar);
+      const account = await resolveActiveIdentityAccount(userProfile?.name || '我', userProfile?.avatar);
       if (cancelled) return;
       setActiveAccount(account);
 
@@ -96,8 +98,8 @@ const ForumApp: React.FC = () => {
       setHeatLevel(settings.heatLevel || FORUM_DEFAULTS.defaultHeatLevel);
       setDarkMode(!!settings.darkMode);
 
-      // 打开App顺手做的免费维护：物理清扫过期内容 + 扫一遍沉寂归档（零API成本，扫不到就不触发）
-      await feed.sweepExpiredContent();
+      // 打开App顺手做的免费维护：物理清扫过期内容（失败不影响进入）
+      await feed.sweepExpiredContent().catch(e => console.warn('[Forum] 清扫失败:', e));
 
       // 自然触发批量生成：当前 slot 缺批次就生成一批
       try {
@@ -117,7 +119,12 @@ const ForumApp: React.FC = () => {
         console.warn('[Forum] 自然触发批量生成失败:', e?.message || String(e));
       }
 
+     } catch (e: any) {
+      console.error('[Forum] 初始化失败:', e);
+      addToast(`${FORUM_APP_NAME}初始化失败: ${e?.message?.slice(0, 60) || '未知错误'}`, 'error');
+     } finally {
       if (!cancelled) setReady(true);
+     }
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -233,7 +240,9 @@ const ForumApp: React.FC = () => {
           <ArrowLeft size={20} weight="bold" />
         </button>
         <div className="font-bold text-base">
-          {section.kind === 'home' && '论坛'}
+          {section.kind === 'home' && (
+            <span className="flex items-center gap-1.5"><ForumLogo size={20} />{FORUM_APP_NAME}</span>
+          )}
           {section.kind === 'topic' && '分区'}
           {section.kind === 'post' && '帖子'}
           {section.kind === 'search' && '搜索'}
@@ -288,6 +297,7 @@ const ForumApp: React.FC = () => {
 
         <div className="flex-1 min-w-0 overflow-y-auto no-scrollbar">
           {!ready && <div className="text-center py-16 text-sm opacity-50">加载中…</div>}
+          {ready && !activeAccount && <div className="text-center py-16 text-sm opacity-50">初始化失败，请退出重进或查看控制台报错</div>}
           {content}
         </div>
       </div>
