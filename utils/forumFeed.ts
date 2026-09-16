@@ -248,7 +248,45 @@ export function pickFloorsForRefresh(
   return { mustReply, randomlyPicked, stillPending };
 }
 
-// ==================== 六、involvesCharInteraction 落地 [交接4 四] ====================
+// ==================== 七、点赞 / 编辑 / 删除（用户方账号自己管理自己的内容） ====================
+
+/** 点赞不算保留理由，不影响三天水线判断 [用户确认]。 */
+export async function toggleLike(postId: string, accountId: string): Promise<ForumPost | null> {
+  const post = await db.getForumPost(postId);
+  if (!post) return null;
+  const liked = post.likes.includes(accountId);
+  const updated: ForumPost = {
+    ...post,
+    likes: liked ? post.likes.filter(id => id !== accountId) : [...post.likes, accountId],
+  };
+  await db.saveForumPost(updated);
+  return updated;
+}
+
+/**
+ * 编辑帖子：只允许改 title/content/topicTag，不改 authorAccountId/postKind/来源等结构性字段。
+ * 调用方负责校验"这条帖子是不是用户方账号发的"，这里不重复查account，保持函数纯粹。
+ */
+export async function editPost(postId: string, updates: { title?: string; content?: string; topicTag?: string }): Promise<ForumPost | null> {
+  const post = await db.getForumPost(postId);
+  if (!post) return null;
+  const updated: ForumPost = {
+    ...post,
+    title: updates.title !== undefined ? updates.title : post.title,
+    content: updates.content !== undefined ? updates.content : post.content,
+    topicTag: updates.topicTag !== undefined ? updates.topicTag : post.topicTag,
+  };
+  await db.saveForumPost(updated);
+  return updated;
+}
+
+/** 删除帖子+其所有评论。 */
+export async function deletePostWithComments(postId: string): Promise<void> {
+  await db.deleteCommentsByPost(postId);
+  await db.deleteForumPost(postId);
+}
+
+// ==================== 八、involvesCharInteraction 落地 [交接4 四] ====================
 
 /**
  * 某条回复生成/落库之后，判断要不要把父帖子标记为"角色互动过"。

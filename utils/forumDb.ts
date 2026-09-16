@@ -33,6 +33,11 @@ export interface ForumAccount {
   handle: string;
   displayName: string;
   avatar?: string;
+  /** 背景图/封面图 [用户确认新增]，仅用户方账号(主号/小号/共管账号)可编辑，
+   *  TA自己的号和NPC账号目前没有编辑入口，不代表不能有值。 */
+  banner?: string;
+  /** 个性签名 [用户确认新增]，同上仅用户方账号可编辑。 */
+  bio?: string;
   status: 'active' | 'deactivated';
 
   // ---- 以下四个字段是 [交接3] NPC 人设/圈子/职业/认证的落地，仅 ownerType==='npc' 时有意义 ----
@@ -94,6 +99,12 @@ export interface ForumPost {
   isCollected: boolean;
   involvesCharInteraction: boolean;
   isOwnedByUserSide: boolean;
+
+  /**
+   * 点赞 [用户确认新增]：账号id数组，谁点过赞。跟 isCollected 是两件事——
+   * 点赞不算保留理由，三天水线判断时不看这个字段 [用户确认]。
+   */
+  likes: string[];
 
   /**
    * [交接5 4.9] 共管账号的"专属动态"（系统按4档节奏自动生成）只在共管账号自己的独立

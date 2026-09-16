@@ -284,6 +284,7 @@ export async function runBatchGeneration(params: RunBatchGenerationParams): Prom
       isCollected: false,
       involvesCharInteraction: false,
       isOwnedByUserSide: false, // 批量层只生成NPC内容，用户/TA内容走别的路径
+      likes: [],
       visibility: 'public',
     };
     await feed.createPost(post);
@@ -525,6 +526,7 @@ ${buildSharedForumHardRules()}
     isCollected: false,
     involvesCharInteraction: false,
     isOwnedByUserSide: true, // [交接5 4.9] 系统自动生成的专属动态同样 isOwnedByUserSide=true
+    likes: [],
     visibility: 'sharedAccountExclusive',
   };
   await feed.createPost(post);
