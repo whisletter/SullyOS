@@ -4,6 +4,7 @@ import * as db from '../../utils/forumDb';
 import { isUserSideAccount } from '../../utils/forumFeed';
 import ForumPostCard from './ForumPostCard';
 import ForumEditProfile from './ForumEditProfile';
+import TokenImg from '../../components/os/TokenImg';
 
 interface Props {
   accountId: string;
@@ -39,11 +40,11 @@ const ForumProfile: React.FC<Props> = ({ accountId, onOpenPost }) => {
   return (
     <div className="pb-8">
       {account.banner && (
-        <img src={account.banner} className="w-full h-28 object-cover" onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+        <TokenImg value={account.banner} className="w-full h-28 object-cover" onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }} />
       )}
       <div className="flex items-start gap-3 px-4 py-4 border-b" style={{ borderColor: 'rgba(127,127,127,0.15)' }}>
         {account.avatar
-          ? <img src={account.avatar} className="w-14 h-14 rounded-full object-cover" />
+          ? <TokenImg value={account.avatar} className="w-14 h-14 rounded-full object-cover" />
           : <div className="w-14 h-14 rounded-full flex items-center justify-center text-lg font-bold" style={{ background: 'rgba(127,127,127,0.2)' }}>{account.displayName?.[0]}</div>}
         <div className="flex-1 min-w-0">
           <div className="font-bold text-base flex items-center gap-1">

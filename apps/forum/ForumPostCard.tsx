@@ -2,6 +2,7 @@ import React from 'react';
 import { Newspaper, Heart } from '@phosphor-icons/react';
 import type { ForumAccount, ForumPost } from '../../utils/forumDb';
 import { getTopicLabel, type ForumTopicTag } from '../../utils/forumConstants';
+import TokenImg from '../../components/os/TokenImg';
 
 interface Props {
   post: ForumPost;
@@ -25,7 +26,7 @@ const ForumPostCard: React.FC<Props> = ({ post, author, commentCount, onClick })
             style={{ borderColor: 'rgba(127,127,127,0.15)' }}>
       <div className="flex gap-2.5">
         {author?.avatar
-          ? <img src={author.avatar} className="w-9 h-9 rounded-full object-cover shrink-0" onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+          ? <TokenImg value={author.avatar} className="w-9 h-9 rounded-full object-cover shrink-0" onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }} />
           : <AvatarFallback name={author?.displayName || '?'} />}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5 text-[13px] opacity-70">
@@ -41,6 +42,22 @@ const ForumPostCard: React.FC<Props> = ({ post, author, commentCount, onClick })
           </div>
           {post.title && <div className="font-bold text-[15px] mt-0.5 truncate">{post.title}</div>}
           <div className="text-[13px] opacity-80 mt-0.5 line-clamp-2">{post.content}</div>
+          {/* 配图预览：列表里最多露三张，剩下的用 +N 收起，避免一条帖子占满整屏 */}
+          {post.images && post.images.length > 0 && (
+            <div className="flex gap-1.5 mt-1.5">
+              {post.images.slice(0, 3).map((img, i) => (
+                <div key={`${img}-${i}`} className="relative w-16 h-16 rounded-lg overflow-hidden shrink-0" style={{ background: 'rgba(127,127,127,0.12)' }}>
+                  <TokenImg value={img} className="w-full h-full object-cover" />
+                  {i === 2 && post.images!.length > 3 && (
+                    <div className="absolute inset-0 flex items-center justify-center text-[13px] font-bold"
+                         style={{ background: 'rgba(0,0,0,0.45)', color: '#fff' }}>
+                      +{post.images!.length - 3}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
           <div className="text-[11px] opacity-50 mt-1 flex items-center gap-3">
             <span>{commentCount} 条评论</span>
             {post.likes.length > 0 && (

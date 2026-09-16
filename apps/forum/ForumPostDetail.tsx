@@ -5,6 +5,7 @@ import * as feed from '../../utils/forumFeed';
 import { isUserSideAccount } from '../../utils/forumFeed';
 import * as ai from '../../utils/forumAi';
 import { FORUM_TOPIC_TAGS, getTopicLabel, type ForumTopicTag } from '../../utils/forumConstants';
+import TokenImg from '../../components/os/TokenImg';
 import { useOS } from '../../context/OSContext';
 
 interface Props {
@@ -187,6 +188,23 @@ const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, ap
           <>
             {post.title && <div className="font-bold text-[17px] mt-2">{post.title}</div>}
             <div className="text-[14px] mt-1.5 whitespace-pre-wrap leading-relaxed">{post.content}</div>
+            {/* 配图：一张时铺开，多张走九宫格，跟朋友圈一个观感 */}
+            {post.images && post.images.length > 0 && (
+              <div className={post.images.length === 1 ? 'mt-2' : 'mt-2 grid grid-cols-3 gap-1.5'}>
+                {post.images.map((img, i) => (
+                  <div
+                    key={`${img}-${i}`}
+                    className={`overflow-hidden rounded-xl ${post.images!.length === 1 ? 'max-w-[70%]' : 'aspect-square'}`}
+                    style={{ background: 'rgba(127,127,127,0.12)' }}
+                  >
+                    <TokenImg
+                      value={img}
+                      className={post.images!.length === 1 ? 'w-full h-auto object-contain' : 'w-full h-full object-cover'}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
             {post.postKind === 'news' && post.sourceNewsUrl && (
               <a href={post.sourceNewsUrl} target="_blank" rel="noreferrer" className="text-[12px] opacity-50 mt-1.5 block underline">
                 原文：{post.sourceNewsTitle || post.sourceNewsUrl}

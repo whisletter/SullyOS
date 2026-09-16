@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { Lightning, MagnifyingGlass, ArrowLeft } from '@phosphor-icons/react';
+import TokenImg from '../../components/os/TokenImg';
 import * as db from '../../utils/forumDb';
 import * as ai from '../../utils/forumAi';
 import { useOS } from '../../context/OSContext';
@@ -142,7 +143,7 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig }) => {
         return (
           <button key={t.counterpartAccountId} onClick={() => openThread(t.counterpartAccountId)} className="w-full flex items-center gap-3 px-3 py-3 border-b text-left" style={{ borderColor: 'rgba(127,127,127,0.1)' }}>
             {counterpart?.avatar
-              ? <img src={counterpart.avatar} className="w-11 h-11 rounded-full object-cover" />
+              ? <TokenImg value={counterpart.avatar} className="w-11 h-11 rounded-full object-cover" />
               : <div className="w-11 h-11 rounded-full flex items-center justify-center font-bold" style={{ background: 'rgba(127,127,127,0.2)' }}>{counterpart?.displayName?.[0]}</div>}
             <div className="flex-1 min-w-0">
               <div className="font-semibold text-sm">{counterpart?.displayName || '未知账号'}</div>
