@@ -1,9 +1,19 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowClockwise, Camera, Check, X } from '@phosphor-icons/react';
+import { ArrowClockwise, CalendarBlank, CaretLeft, CaretRight, Camera, Check, X } from '@phosphor-icons/react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
 import { GAMES } from './games/registry';
+import {
+  YUZHOU_MOOD_EVENT,
+  loadDayMood,
+  loadMonthMoods,
+  saveDayMood,
+  generateTaDailyMood,
+  type MonthMoods,
+  type MoodSide,
+  type YuZhouMoodEventDetail,
+} from '../utils/yuzhouMood';
 
 const ANNIVERSARY_KEY = 'yuzhou_anniversary_day';
 // 记录"保存天数"那天的本地日期（YYYY-MM-DD），用于之后每天自动累加
@@ -12,7 +22,30 @@ const USER_MOOD_KEY = 'yuzhou_user_mood';
 const USER_EMOJI_KEY = 'yuzhou_user_emoji';
 
 const EMOJIS = ['😊', '🥰', '😸', '😠', '😢', '😣', '😾', '😎', '😳', '🤧', '😈', '😼'];
-const TA_EMOJIS = ['😊', '🥰', '😸', '😠', '😢', '😣', '😾', '😎', '😳', '🤧', '😈', '😼'];
+const USER_MOOD_MIGRATED_KEY = 'yuzhou_user_mood_migrated';
+const DEFAULT_USER_EMOJI = '🥰';
+
+// 戳一下 TA 的 emoji：只播动画，不改内容
+const POKE_CSS = `
+@keyframes yz-poke {
+  0% { transform: scale(1) rotate(0); }
+  20% { transform: scale(.82) rotate(-10deg); }
+  45% { transform: scale(1.14) rotate(8deg); }
+  65% { transform: scale(.96) rotate(-4deg); }
+  85% { transform: scale(1.03) rotate(2deg); }
+  100% { transform: scale(1) rotate(0); }
+}
+@keyframes yz-heart {
+  0% { opacity: 0; transform: translate(-50%, 0) scale(.6); }
+  25% { opacity: 1; }
+  100% { opacity: 0; transform: translate(-50%, -34px) scale(1.1); }
+}
+.yz-poke { animation: yz-poke .55s ease-out; display: inline-block; }
+.yz-heart { animation: yz-heart .8s ease-out forwards; }
+`;
+
+const MONTH_ABBR = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+const WEEK_LABELS = ['日', '一', '二', '三', '四', '五', '六'];
 
 const storageGet = (key: string, fallback = '') => {
   try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; }
@@ -221,8 +254,180 @@ const YuZhouGamePage: React.FC<{ onBack: () => void }> = ({ onBack }) => {
   );
 };
 
+// ==================== 月度心情日历 ====================
+
+const YuZhouMonthCalendar: React.FC<{
+  charId: string;
+  charName: string;
+  todayKey: string;
+  onBack: () => void;
+}> = ({ charId, charName, todayKey, onBack }) => {
+  const [ty, tm] = todayKey.split('-').map(Number);
+  const [year, setYear] = useState(ty);
+  const [month, setMonth] = useState(tm - 1); // 0-based
+  const [moods, setMoods] = useState<MonthMoods>({});
+  const [selected, setSelected] = useState<string>(todayKey);
+  const touchX = useRef<number | null>(null);
+
+  const monthKey = `${year}-${String(month + 1).padStart(2, '0')}`;
+  const isCurrentMonth = year === ty && month === tm - 1;
+
+  const reload = useCallback(async () => {
+    setMoods(await loadMonthMoods(charId, monthKey));
+  }, [charId, monthKey]);
+
+  useEffect(() => { void reload(); }, [reload]);
+
+  // 与朋友圈相同：监听写入事件，同步刷新
+  useEffect(() => {
+    const onUpdate = (e: Event) => {
+      const d = (e as CustomEvent<YuZhouMoodEventDetail>).detail;
+      if (!d || (d.charId !== (charId || 'default')) || !d.dateKey.startsWith(monthKey)) return;
+      void reload();
+    };
+    window.addEventListener(YUZHOU_MOOD_EVENT, onUpdate);
+    return () => window.removeEventListener(YUZHOU_MOOD_EVENT, onUpdate);
+  }, [charId, monthKey, reload]);
+
+  const shiftMonth = (delta: number) => {
+    const d = new Date(year, month + delta, 1);
+    setYear(d.getFullYear());
+    setMonth(d.getMonth());
+    const inToday = d.getFullYear() === ty && d.getMonth() === tm - 1;
+    setSelected(inToday ? todayKey : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`);
+  };
+
+  const goToday = () => { setYear(ty); setMonth(tm - 1); setSelected(todayKey); };
+
+  // 固定 6 行 × 7 列，切换月份时高度不跳
+  const cells = React.useMemo(() => {
+    const firstWeekday = new Date(year, month, 1).getDay();
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const prevDays = new Date(year, month, 0).getDate();
+    return Array.from({ length: 42 }, (_, i) => {
+      const n = i - firstWeekday + 1;
+      if (n < 1) return { day: prevDays + n, inMonth: false, key: '' };
+      if (n > daysInMonth) return { day: n - daysInMonth, inMonth: false, key: '' };
+      return { day: n, inMonth: true, key: `${monthKey}-${String(n).padStart(2, '0')}` };
+    });
+  }, [year, month, monthKey]);
+
+  const sel = moods[selected] || {};
+  const [, sm, sd] = selected.split('-').map(Number);
+  const selWeek = WEEK_LABELS[new Date(year, (sm || 1) - 1, sd || 1).getDay()];
+
+  return (
+    <div className="absolute inset-0 z-[60] bg-[#fff7f5] text-slate-800 flex flex-col">
+      <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_15%_10%,rgba(255,190,205,.42),transparent_28%),radial-gradient(circle_at_90%_25%,rgba(255,220,224,.5),transparent_30%),linear-gradient(180deg,#fffafa_0%,#fff4f1_100%)]" />
+
+      <header className="relative h-14 px-4 flex items-center justify-between shrink-0" style={{ marginTop: 'var(--safe-top)' }}>
+        <button onClick={onBack} className="w-9 h-9 rounded-full bg-white/80 shadow-sm text-rose-400 text-xl active:scale-90 transition-transform">‹</button>
+        <div className="text-center">
+          <div className="font-black tracking-[.18em] text-rose-500 text-base">本月心情</div>
+          <div className="text-[8px] tracking-[.22em] text-rose-300 mt-0.5">MOOD CALENDAR</div>
+        </div>
+        <div className="w-9 h-9" />
+      </header>
+
+      {/* 内容整体垂直居中；屏幕太矮时可滚动 */}
+      <div className="relative flex-1 min-h-0 overflow-y-auto overscroll-none">
+        <div className="min-h-full flex flex-col justify-center px-4 py-4" style={{ paddingBottom: 'max(16px, var(--safe-bottom))' }}>
+          <div
+            className="w-full max-w-md mx-auto rounded-[30px] bg-white/80 border border-white shadow-[0_12px_40px_rgba(172,88,108,.10)] px-3 pt-4 pb-4"
+            onTouchStart={e => { touchX.current = e.touches[0].clientX; }}
+            onTouchEnd={e => {
+              if (touchX.current == null) return;
+              const dx = e.changedTouches[0].clientX - touchX.current;
+              touchX.current = null;
+              if (Math.abs(dx) > 50) shiftMonth(dx < 0 ? 1 : -1);
+            }}
+          >
+            {/* SEP  2026 */}
+            <div className="flex items-center justify-between px-1">
+              <button onClick={() => shiftMonth(-1)} aria-label="上个月" className="w-9 h-9 rounded-full bg-rose-50 text-rose-400 flex items-center justify-center active:scale-90 transition-transform"><CaretLeft size={16} weight="bold" /></button>
+              <div className="flex flex-col items-center">
+                <div className="flex items-baseline gap-3 text-rose-500">
+                  <span className="text-[26px] font-black tracking-[.08em] leading-none">{MONTH_ABBR[month]}</span>
+                  <span className="text-[26px] font-black tracking-[.04em] leading-none">{year}</span>
+                </div>
+                <button onClick={goToday} className={`mt-1 h-4 text-[9px] font-bold tracking-wider text-rose-300 ${isCurrentMonth ? 'invisible' : ''}`}>回到本月</button>
+              </div>
+              <button onClick={() => shiftMonth(1)} aria-label="下个月" className="w-9 h-9 rounded-full bg-rose-50 text-rose-400 flex items-center justify-center active:scale-90 transition-transform"><CaretRight size={16} weight="bold" /></button>
+            </div>
+
+            <div className="grid grid-cols-7 mt-2 mb-1">
+              {WEEK_LABELS.map((w, i) => (
+                <div key={w} className={`text-center text-[10px] font-bold py-1 ${i === 0 || i === 6 ? 'text-rose-300' : 'text-slate-400'}`}>{w}</div>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-7 gap-1">
+              {cells.map((c, i) => {
+                if (!c.inMonth) {
+                  return (
+                    <div key={`o${i}`} className="aspect-[4/5] rounded-2xl flex flex-col items-center pt-1.5">
+                      <span className="text-[11px] font-semibold text-slate-200">{c.day}</span>
+                    </div>
+                  );
+                }
+                const m = moods[c.key];
+                const isToday = c.key === todayKey;
+                const isSel = c.key === selected;
+                const isFuture = c.key > todayKey;
+                return (
+                  <button
+                    key={c.key}
+                    onClick={() => setSelected(c.key)}
+                    className={`aspect-[4/5] rounded-2xl flex flex-col items-center pt-1.5 transition-colors active:scale-95
+                      ${isSel ? 'bg-rose-100/80 ring-1 ring-rose-300' : m ? 'bg-rose-50/60' : 'bg-transparent'}`}
+                  >
+                    <span className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold
+                      ${isToday ? 'bg-rose-400 text-white' : isFuture ? 'text-slate-300' : 'text-slate-600'}`}>{c.day}</span>
+                    <div className="mt-auto mb-1.5 flex items-center justify-center gap-px text-[13px] leading-none min-h-[14px]">
+                      {m?.user && <span title="我">{m.user.emoji}</span>}
+                      {m?.ta && <span title={charName}>{m.ta.emoji}</span>}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="mt-2 flex justify-center gap-4 text-[9px] text-slate-400">
+              <span>左：我</span><span>右：{charName}</span>
+            </div>
+
+            {/* 选中日期详情：固定最小高度，避免切换时整体跳动 */}
+            <div className="mt-3 rounded-[22px] bg-[#fffaf8] border border-[#f4d9e0] p-3 min-h-[128px]">
+              <div className="text-[11px] font-bold text-rose-400 mb-2">{sm}月{sd}日 · 周{selWeek}</div>
+              {!sel.user && !sel.ta ? (
+                <div className="h-[80px] flex items-center justify-center text-[12px] text-slate-300">这天还没有心情记录</div>
+              ) : (
+                <div className="space-y-2">
+                  {[
+                    { label: '我', v: sel.user },
+                    { label: charName, v: sel.ta },
+                  ].map(({ label, v }) => (
+                    <div key={label} className="flex items-start gap-2">
+                      <span className="text-[22px] leading-none w-7 text-center shrink-0">{v?.emoji || '·'}</span>
+                      <div className="min-w-0">
+                        <div className="text-[10px] font-bold text-rose-400/80">{label}</div>
+                        <div className="text-[12px] leading-5 text-slate-600 break-words">{v?.text || <span className="text-slate-300">没有留下文字</span>}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const YuZhouApp: React.FC = () => {
-  const { activeCharacterId, characters, userProfile, closeApp, addToast } = useOS();
+  const { activeCharacterId, characters, userProfile, apiConfig, closeApp, addToast } = useOS();
+  const moodCharId = activeCharacterId || 'default';
   const char = characters.find(c => c.id === activeCharacterId) ?? null;
   // baseDay：用户保存时填写的天数；baseDate：保存那天的日期
   const [baseDay, setBaseDay] = useState(() => storageGet(ANNIVERSARY_KEY, '520'));
@@ -235,39 +440,136 @@ const YuZhouApp: React.FC = () => {
     return today;
   });
   const [day, setDay] = useState(() => calcCurrentDay(baseDay, baseDate));
+  const [todayKey, setTodayKey] = useState(() => toLocalDateStr());
   const [editingDay, setEditingDay] = useState(false);
   const [dayDraft, setDayDraft] = useState(day);
   const [userAvatar, setUserAvatar] = useState<string | null>(null);
   const [charAvatar, setCharAvatar] = useState<string | null>(null);
-  const [userMood, setUserMood] = useState(() => storageGet(USER_MOOD_KEY));
-  const [userEmoji, setUserEmoji] = useState(() => storageGet(USER_EMOJI_KEY, '🥰'));
+  const [userMood, setUserMood] = useState('');
+  const [userEmoji, setUserEmoji] = useState(DEFAULT_USER_EMOJI);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showGamePage, setShowGamePage] = useState(false);
-  const [taMoodIndex, setTaMoodIndex] = useState(0);
-  const [taMoodText, setTaMoodText] = useState('');
-  const [refreshingTaMood, setRefreshingTaMood] = useState(false);
+  const [showCalendar, setShowCalendar] = useState(false);
+  const [taMood, setTaMood] = useState<MoodSide | null>(null);
+  const [generatingTa, setGeneratingTa] = useState(false);
+  const [pokeCount, setPokeCount] = useState(0);
+  const genAbortRef = useRef<AbortController | null>(null);
 
   const fallbackUser = userProfile?.perCharAvatars?.[activeCharacterId || ''] || userProfile?.avatar;
   const fallbackChar = char?.avatar;
-  const taEmoji = TA_EMOJIS[taMoodIndex % TA_EMOJIS.length];
 
-  const refreshTaMood = useCallback(() => {
-    setRefreshingTaMood(true);
-    window.setTimeout(() => {
-      const nextIndex = Math.floor(Math.random() * TA_EMOJIS.length);
-      const name = char?.name || 'TA';
-      const texts = [
-        `${name}今天看起来心情不错，想和你待在一起。`,
-        `${name}今天有一点小情绪，戳一下问问TA吧。`,
-        `${name}今天状态轻松，似乎在期待你的消息。`,
-        `${name}今天有点累，但还是想和你说说话。`,
-        `${name}今天心里藏着一点小开心。`,
-      ];
-      setTaMoodIndex(nextIndex);
-      setTaMoodText(texts[Math.floor(Math.random() * texts.length)]);
-      setRefreshingTaMood(false);
-    }, 220);
-  }, [char?.name]);
+  // ==================== 今日心情：读库 / 保存 / 同步 ====================
+
+  // 用户心情的最新值 + 防抖保存（打字时不每个字都写库）
+  const userLatestRef = useRef({ emoji: DEFAULT_USER_EMOJI, text: '' });
+  const userSaveTimer = useRef<number | undefined>(undefined);
+  const pendingUserSave = useRef<{ charId: string; dateKey: string } | null>(null);
+
+  const flushUserSave = useCallback(() => {
+    window.clearTimeout(userSaveTimer.current);
+    const target = pendingUserSave.current;
+    if (!target) return;
+    pendingUserSave.current = null;
+    const { emoji, text } = userLatestRef.current;
+    saveDayMood(target.charId, target.dateKey, 'user', { emoji, text, updatedAt: Date.now() })
+      .catch(() => addToast?.('心情保存失败，可能是存储空间不足', 'error'));
+  }, [addToast]);
+
+  const scheduleUserSave = useCallback((delay: number) => {
+    pendingUserSave.current = { charId: moodCharId, dateKey: todayKey };
+    window.clearTimeout(userSaveTimer.current);
+    userSaveTimer.current = window.setTimeout(flushUserSave, delay);
+  }, [moodCharId, todayKey, flushUserSave]);
+
+  const handleUserText = (v: string) => {
+    setUserMood(v);
+    userLatestRef.current = { ...userLatestRef.current, text: v };
+    scheduleUserSave(600);
+  };
+
+  const handleUserEmoji = (e: string) => {
+    setUserEmoji(e);
+    setShowEmojiPicker(false);
+    userLatestRef.current = { ...userLatestRef.current, emoji: e };
+    scheduleUserSave(0);
+  };
+
+  // 切换角色 / 跨天 / 卸载前，把没写完的先落盘
+  useEffect(() => () => flushUserSave(), [moodCharId, todayKey, flushUserSave]);
+
+  // 读取今天的记录（切角色、跨零点时重新读）
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const rec = await loadDayMood(moodCharId, todayKey);
+      if (cancelled) return;
+      let user = rec.user;
+      // 旧版本心情存在 localStorage：只迁移一次，放进今天
+      if (!user && !storageGet(USER_MOOD_MIGRATED_KEY)) {
+        const legacyText = storageGet(USER_MOOD_KEY);
+        const legacyEmoji = storageGet(USER_EMOJI_KEY);
+        storageSet(USER_MOOD_MIGRATED_KEY, '1');
+        if (legacyText || legacyEmoji) {
+          user = { emoji: legacyEmoji || DEFAULT_USER_EMOJI, text: legacyText, updatedAt: Date.now() };
+          void saveDayMood(moodCharId, todayKey, 'user', user);
+        }
+      }
+      const emoji = user?.emoji || DEFAULT_USER_EMOJI;
+      const text = user?.text || '';
+      userLatestRef.current = { emoji, text };
+      setUserEmoji(emoji);
+      setUserMood(text);
+      setTaMood(rec.ta || null);
+    })();
+    return () => { cancelled = true; };
+  }, [moodCharId, todayKey]);
+
+  // 其他地方写入 TA 心情时同步过来（用户侧以本页输入为准，不回读，避免打字被覆盖）
+  useEffect(() => {
+    const onUpdate = (e: Event) => {
+      const d = (e as CustomEvent<YuZhouMoodEventDetail>).detail;
+      if (!d || d.charId !== moodCharId || d.dateKey !== todayKey || d.side !== 'ta') return;
+      void loadDayMood(moodCharId, todayKey).then(rec => setTaMood(rec.ta || null));
+    };
+    window.addEventListener(YUZHOU_MOOD_EVENT, onUpdate);
+    return () => window.removeEventListener(YUZHOU_MOOD_EVENT, onUpdate);
+  }, [moodCharId, todayKey]);
+
+  // ==================== TA 今日心情：手动生成（一次 API 调用） ====================
+
+  const handleGenerateTa = useCallback(async () => {
+    if (generatingTa) return;
+    if (!char) { addToast?.('请先选择一个角色', 'info'); return; }
+    if (!apiConfig?.apiKey || !apiConfig?.baseUrl) { addToast?.('请先配置 API', 'info'); return; }
+
+    genAbortRef.current?.abort();
+    const ac = new AbortController();
+    genAbortRef.current = ac;
+    const dateKey = todayKey;
+    const charIdAtStart = moodCharId;
+    setGeneratingTa(true);
+    try {
+      const result = await generateTaDailyMood({ char, userProfile, apiConfig, signal: ac.signal });
+      if (ac.signal.aborted) return;
+      await saveDayMood(charIdAtStart, dateKey, 'ta', result);
+      setTaMood(result);
+      addToast?.(`${char.name}写下了今天的心情`, 'success');
+    } catch (e: any) {
+      if (ac.signal.aborted) return;
+      console.error('[YuZhou] generate TA mood failed', e);
+      addToast?.(`生成失败: ${e?.message?.slice(0, 60) || '未知错误'}`, 'error');
+    } finally {
+      if (!ac.signal.aborted) setGeneratingTa(false);
+    }
+  }, [generatingTa, char, apiConfig, userProfile, todayKey, moodCharId, addToast]);
+
+  // 切换角色或离开页面时取消进行中的请求
+  useEffect(() => () => { genAbortRef.current?.abort(); }, [moodCharId]);
+
+  const pokeTa = () => {
+    setPokeCount(n => n + 1);
+    if (!taMood && !generatingTa) addToast?.('点右上角 ↻ 让TA写下今天的心情', 'info');
+  };
 
 
   useEffect(() => {
@@ -300,7 +602,7 @@ const YuZhouApp: React.FC = () => {
   // 计时器：每到本地零点自动 +1；从后台切回 / 窗口重新聚焦时也重新计算
   useEffect(() => {
     let timer: number | undefined;
-    const refresh = () => setDay(calcCurrentDay(baseDay, baseDate));
+    const refresh = () => { setDay(calcCurrentDay(baseDay, baseDate)); setTodayKey(toLocalDateStr()); };
     const schedule = () => {
       timer = window.setTimeout(() => { refresh(); schedule(); }, msUntilNextMidnight());
     };
@@ -321,22 +623,21 @@ const YuZhouApp: React.FC = () => {
     };
   }, [baseDay, baseDate]);
 
-  useEffect(() => { storageSet(USER_MOOD_KEY, userMood); }, [userMood]);
-  useEffect(() => { storageSet(USER_EMOJI_KEY, userEmoji); }, [userEmoji]);
 
   return (
     <div className="relative h-full w-full overflow-hidden bg-[#fff7f5] text-slate-800">
+      <style>{POKE_CSS}</style>
       <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_15%_10%,rgba(255,190,205,.42),transparent_28%),radial-gradient(circle_at_90%_25%,rgba(255,220,224,.5),transparent_30%),linear-gradient(180deg,#fffafa_0%,#fff4f1_100%)]" />
       <div className="relative h-full overflow-y-auto overscroll-none pb-[94px]" style={{ paddingTop: 'var(--safe-top)' }}>
         <header className="h-12 px-4 flex items-center justify-between">
           <button onClick={closeApp} className="w-9 h-9 rounded-full bg-white/70 shadow-sm text-rose-400 text-lg">‹</button>
           <div className="font-black tracking-[.22em] text-rose-400 text-sm">与昼</div>
           <button
-            onClick={refreshTaMood}
-            disabled={refreshingTaMood}
-            aria-label="刷新TA的心情"
-            title="刷新TA的心情"
-            className={`w-9 h-9 rounded-full bg-white/80 border border-rose-100 shadow-sm flex items-center justify-center text-rose-400 active:scale-90 transition-transform ${refreshingTaMood ? 'animate-spin' : ''}`}
+            onClick={handleGenerateTa}
+            disabled={generatingTa}
+            aria-label="生成TA的今日心情"
+            title="生成TA的今日心情（调用一次 API）"
+            className={`w-9 h-9 rounded-full bg-white/80 border border-rose-100 shadow-sm flex items-center justify-center text-rose-400 active:scale-90 transition-transform disabled:opacity-70 ${generatingTa ? 'animate-spin' : ''}`}
           >
             <ArrowClockwise size={19} weight="bold" />
           </button>
@@ -378,6 +679,12 @@ const YuZhouApp: React.FC = () => {
               <span className="text-rose-300">♡</span>
             </div>
             <div className="text-[8px] text-rose-300 mt-1.5 tracking-[.2em]">TODAY'S MOOD</div>
+            <button
+              onClick={() => { flushUserSave(); setShowCalendar(true); }}
+              className="mt-2 inline-flex items-center gap-1 px-3 py-1 rounded-full bg-white border border-rose-100 shadow-sm text-[10px] font-bold text-rose-400 active:scale-95 transition-transform"
+            >
+              <CalendarBlank size={12} weight="bold" />本月
+            </button>
           </div>
 
           <div className="flex mt-2 pb-5 px-2 sm:px-3">
@@ -387,7 +694,7 @@ const YuZhouApp: React.FC = () => {
               <button onClick={() => setShowEmojiPicker(v => !v)} className="mt-4 text-[58px] leading-none active:scale-90 transition-transform">{userEmoji}</button>
               <div className="relative mt-8 min-h-[86px] rounded-[18px] bg-[#fffaf2] border border-[#f3dfcf] shadow-[0_3px_10px_rgba(120,80,50,.05)] p-3 text-left">
                 <span className="absolute -top-2 left-4 w-10 h-4 rounded-sm bg-rose-200/80 rotate-[-8deg] shadow-sm" />
-                <textarea value={userMood} maxLength={50} onChange={e => setUserMood(e.target.value)} placeholder="写下你的今日心情吧…"
+                <textarea value={userMood} maxLength={50} onChange={e => handleUserText(e.target.value)} onBlur={flushUserSave} placeholder="写下你的今日心情吧…"
                   className="w-full h-[58px] resize-none outline-none bg-transparent text-[13px] leading-5 text-slate-700 placeholder:text-slate-300" />
                 <div className="text-[9px] text-right text-slate-300 mt-0.5">{userMood.length}/50</div>
               </div>
@@ -398,17 +705,24 @@ const YuZhouApp: React.FC = () => {
             {/* 右：TA */}
             <div className="flex-1 min-w-0 px-2 sm:px-4 py-2 text-center flex flex-col">
               <div className="text-[12px] font-bold tracking-wide text-rose-500/75">{char?.name || 'TA'}的心情</div>
-              <button onClick={refreshTaMood} disabled={refreshingTaMood} className={`mt-4 text-[58px] leading-none active:scale-90 transition-transform ${refreshingTaMood ? 'animate-bounce' : ''}`}>{taEmoji}</button>
+              <button onClick={pokeTa} aria-label="戳一下TA" className="relative mt-4 mx-auto text-[58px] leading-none">
+                <span key={pokeCount} className={pokeCount > 0 ? 'yz-poke' : 'inline-block'}>
+                  {generatingTa ? '💭' : (taMood?.emoji || '🙂')}
+                </span>
+                {pokeCount > 0 && <span key={`h${pokeCount}`} className="yz-heart absolute left-1/2 -top-1 text-[16px] pointer-events-none">💗</span>}
+              </button>
               <div className="relative mt-8 min-h-[86px] rounded-[18px] bg-[#fffaf8] border border-[#f4d9e0] shadow-[0_3px_10px_rgba(120,80,50,.05)] p-3 text-left">
                 <span className="absolute -top-2 left-4 w-10 h-4 rounded-sm bg-pink-200/80 rotate-[8deg] shadow-sm" />
                 <div className="min-h-[58px] flex items-center justify-center text-center text-[13px] leading-5 text-slate-600 break-words">
-                  {taMoodText || 'TA的心情是什么？戳一下TA问问吧。'}
+                  {generatingTa
+                    ? <span className="text-rose-300">{char?.name || 'TA'}正在想今天的心情…</span>
+                    : taMood?.text || <span className="text-slate-400">还没有写今天的心情，点右上角 ↻ 让TA写一条吧。</span>}
                 </div>
               </div>
             </div>
           </div>
 
-          {showEmojiPicker && <div className="border-t border-rose-100 bg-[#fffaf8] p-3 grid grid-cols-6 gap-2">{EMOJIS.map(e => <button key={e} onClick={() => { setUserEmoji(e); setShowEmojiPicker(false); }} className="text-2xl h-10 rounded-xl hover:bg-white active:scale-90">{e}</button>)}</div>}
+          {showEmojiPicker && <div className="border-t border-rose-100 bg-[#fffaf8] p-3 grid grid-cols-6 gap-2">{EMOJIS.map(e => <button key={e} onClick={() => handleUserEmoji(e)} className="text-2xl h-10 rounded-xl hover:bg-white active:scale-90">{e}</button>)}</div>}
         </section>
         <div className="h-6" />
       </div>
@@ -428,6 +742,14 @@ const YuZhouApp: React.FC = () => {
       </nav>
 
       {showGamePage && <YuZhouGamePage onBack={() => setShowGamePage(false)} />}
+      {showCalendar && (
+        <YuZhouMonthCalendar
+          charId={moodCharId}
+          charName={char?.name || 'TA'}
+          todayKey={todayKey}
+          onBack={() => setShowCalendar(false)}
+        />
+      )}
 
       {editingDay && <div className="absolute inset-0 z-[70] bg-black/25 flex items-center justify-center px-8">
         <div className="w-full max-w-xs rounded-[28px] bg-white p-5 shadow-2xl">
