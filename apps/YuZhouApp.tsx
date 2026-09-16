@@ -5,6 +5,7 @@ import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
 import { processImage } from '../utils/file';
 import { GAMES } from './games/registry';
+import YuZhouNoteBoard from './yuzhou/YuZhouNoteBoard';
 import {
   YUZHOU_MOOD_EVENT,
   loadDayMood,
@@ -519,6 +520,7 @@ const YuZhouApp: React.FC = () => {
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showGamePage, setShowGamePage] = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
+  const [showNotes, setShowNotes] = useState(false);
   const [taMood, setTaMood] = useState<MoodSide | null>(null);
   const [generatingTa, setGeneratingTa] = useState(false);
   const [pokeCount, setPokeCount] = useState(0);
@@ -890,6 +892,7 @@ const YuZhouApp: React.FC = () => {
             const isHome = key === 'home';
             const onClick = () => {
               if (key === 'game') setShowGamePage(true);
+              else if (key === 'note') setShowNotes(true);
               else if (!isHome) addToast?.(`${label}入口已预留，之后继续做`, 'info');
             };
             return (
@@ -911,6 +914,7 @@ const YuZhouApp: React.FC = () => {
       </nav>
 
       {showGamePage && <YuZhouGamePage onBack={() => setShowGamePage(false)} />}
+      {showNotes && <YuZhouNoteBoard todayKey={todayKey} onBack={() => setShowNotes(false)} />}
       {showCalendar && (
         <YuZhouMonthCalendar
           charId={moodCharId}
