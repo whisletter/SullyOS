@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowClockwise, Camera, Check, X } from '@phosphor-icons/react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
+import { GAMES } from './games/registry';
 
 const ANNIVERSARY_KEY = 'yuzhou_anniversary_day';
 const USER_MOOD_KEY = 'yuzhou_user_mood';
@@ -137,154 +138,11 @@ const MoodCard: React.FC<{
   </div>
 );
 
-// ---------------------------------------------------------------------------
-// 大富翁：纯 UI 骨架（无内容逻辑）
-// 头像左右各一、中间骰子、下方卡牌区。卡牌内容留空占位，由团队后续接入数据源。
-// ---------------------------------------------------------------------------
-
-const DICE_FACES = ['⚀', '⚁', '⚂', '⚃', '⚄', '⚅'];
-const PLACEHOLDER_CARDS = [
-  '卡牌内容占位 · 待接入任务库',
-  '卡牌内容占位 · 待接入任务库',
-  '卡牌内容占位 · 待接入任务库',
-];
-
-const MonopolyAvatarSlot: React.FC<{
-  label: string;
-  image?: string | null;
-  fallback?: string;
-  active: boolean;
-  coins: number;
-}> = ({ label, image, fallback, active, coins }) => (
-  <div className="flex flex-col items-center gap-1.5">
-    <div className={`relative w-[64px] h-[64px] sm:w-[72px] sm:h-[72px] rounded-full overflow-hidden bg-white ring-4 transition-all ${active ? 'ring-rose-300 shadow-[0_0_0_5px_rgba(251,207,220,.5)]' : 'ring-white shadow-[0_6px_20px_rgba(126,65,85,.12)]'}`}>
-      {image ? <img src={image} alt={label} className="w-full h-full object-cover" /> : fallback ? <img src={fallback} alt={label} className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-2xl bg-rose-50 text-rose-300">♡</div>}
-    </div>
-    <span className={`text-[11px] font-bold ${active ? 'text-rose-500' : 'text-slate-400'}`}>{label}</span>
-    <span className="text-[10px] text-amber-500 font-semibold flex items-center gap-0.5">🪙 {coins}</span>
-  </div>
-);
-
-const MonopolyGamePage: React.FC<{ onBack: () => void }> = ({ onBack }) => {
-  const { activeCharacterId, characters, userProfile } = useOS();
-  const char = characters.find(c => c.id === activeCharacterId) ?? null;
-  const [userAvatar, setUserAvatar] = useState<string | null>(null);
-  const [charAvatar, setCharAvatar] = useState<string | null>(null);
-  const fallbackUser = userProfile?.perCharAvatars?.[activeCharacterId || ''] || userProfile?.avatar;
-  const fallbackChar = char?.avatar;
-
-  const [turn, setTurn] = useState<'user' | 'ta'>('user');
-  const [coins, setCoins] = useState({ user: 0, ta: 0 });
-  const [diceFace, setDiceFace] = useState(0);
-  const [rolling, setRolling] = useState(false);
-  const [card, setCard] = useState<string | null>(null);
-  const [round, setRound] = useState(1);
-  const rollTimer = useRef<number | null>(null);
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const [u, c] = await Promise.all([DB.getAsset('yuzhou-avatar-user'), DB.getAsset(`yuzhou-avatar-char-${activeCharacterId || 'default'}`)]);
-        setUserAvatar(u); setCharAvatar(c);
-      } catch (e) { console.warn('[Monopoly] avatar load failed', e); }
-    })();
-  }, [activeCharacterId]);
-
-  useEffect(() => () => { if (rollTimer.current) window.clearInterval(rollTimer.current); }, []);
-
-  const handleRoll = useCallback(() => {
-    if (rolling || card) return;
-    setRolling(true);
-    let ticks = 0;
-    rollTimer.current = window.setInterval(() => {
-      setDiceFace(Math.floor(Math.random() * 6));
-      ticks += 1;
-      if (ticks >= 9) {
-        if (rollTimer.current) window.clearInterval(rollTimer.current);
-        setRolling(false);
-        setCard(PLACEHOLDER_CARDS[Math.floor(Math.random() * PLACEHOLDER_CARDS.length)]);
-      }
-    }, 80);
-  }, [rolling, card]);
-
-  const finishTurn = useCallback((delta: number) => {
-    setCoins(prev => ({ ...prev, [turn]: prev[turn] + delta }));
-    setCard(null);
-    setTurn(prev => {
-      const next = prev === 'user' ? 'ta' : 'user';
-      if (next === 'user') setRound(r => r + 1);
-      return next;
-    });
-  }, [turn]);
-
-  return (
-    <div className="absolute inset-0 z-[70] bg-[#fff7f5] text-slate-800">
-      <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_15%_10%,rgba(255,190,205,.42),transparent_28%),radial-gradient(circle_at_90%_25%,rgba(255,220,224,.5),transparent_30%),linear-gradient(180deg,#fffafa_0%,#fff4f1_100%)]" />
-      <div className="relative h-full overflow-y-auto overscroll-none" style={{ paddingTop: 'var(--safe-top)' }}>
-        <header className="h-14 px-4 flex items-center justify-between">
-          <button onClick={onBack} className="w-9 h-9 rounded-full bg-white/80 shadow-sm text-rose-400 text-xl active:scale-90 transition-transform">‹</button>
-          <div className="text-center">
-            <div className="font-black tracking-[.18em] text-rose-500 text-base">大富翁</div>
-            <div className="text-[8px] tracking-[.22em] text-rose-300 mt-0.5">第 {round} 回合 · UI 占位版</div>
-          </div>
-          <div className="w-9 h-9" />
-        </header>
-
-        <main className="px-5 pt-2 pb-12 max-w-md mx-auto">
-          {/* 头像 + 骰子 */}
-          <section className="rounded-[30px] bg-white/70 border border-white/90 shadow-[0_12px_40px_rgba(172,88,108,.09)] px-5 py-7">
-            <div className="flex items-center justify-between">
-              <MonopolyAvatarSlot label="我" image={userAvatar} fallback={fallbackUser} active={turn === 'user'} coins={coins.user} />
-
-              <button
-                onClick={handleRoll}
-                disabled={rolling || !!card}
-                className={`w-20 h-20 rounded-3xl bg-white shadow-[0_8px_24px_rgba(172,88,108,.18)] border-2 flex items-center justify-center text-[44px] leading-none transition-transform ${rolling ? 'animate-bounce border-rose-200' : 'border-rose-100 active:scale-90'} ${card ? 'opacity-60' : ''}`}
-              >
-                {DICE_FACES[diceFace]}
-              </button>
-
-              <MonopolyAvatarSlot label={char?.name || 'TA'} image={charAvatar} fallback={fallbackChar} active={turn === 'ta'} coins={coins.ta} />
-            </div>
-
-            <div className="text-center mt-5 text-[11px] font-semibold text-rose-400">
-              {card ? '抽到了一张卡牌 · 完成后换TA' : rolling ? '骰子转动中…' : `轮到${turn === 'user' ? '我' : (char?.name || 'TA')}掷骰子`}
-            </div>
-          </section>
-
-          {/* 卡牌区 */}
-          <section className="mt-5">
-            <div className="text-center mb-3">
-              <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white/75 border border-white shadow-sm text-[11px] font-bold text-rose-400">
-                <span>🎴</span><span>本回合卡牌</span>
-              </div>
-            </div>
-
-            {card ? (
-              <div className="rounded-[26px] bg-white border border-rose-100 shadow-[0_10px_30px_rgba(172,88,108,.12)] p-6 text-center">
-                <div className="text-[13px] leading-6 text-slate-500">{card}</div>
-                <div className="mt-6 flex gap-3">
-                  <button onClick={() => finishTurn(-5)} className="flex-1 h-11 rounded-2xl bg-slate-100 text-slate-500 font-bold active:scale-95 transition-transform">跳过 -5</button>
-                  <button onClick={() => finishTurn(10)} className="flex-1 h-11 rounded-2xl bg-rose-400 text-white font-bold active:scale-95 transition-transform">完成 +10</button>
-                </div>
-              </div>
-            ) : (
-              <div className="rounded-[26px] border border-dashed border-rose-200 bg-white/30 p-8 text-center text-rose-300">
-                <div className="text-3xl mb-2">🎴</div>
-                <div className="text-[11px] tracking-wide">点击上方骰子抽取卡牌</div>
-                <div className="text-[9px] mt-1 text-rose-200">（卡牌内容待团队接入）</div>
-              </div>
-            )}
-          </section>
-        </main>
-      </div>
-    </div>
-  );
-};
 
 const YuZhouGamePage: React.FC<{ onBack: () => void }> = ({ onBack }) => {
-  const games = ['大富翁', 'T&D', '女巫的毒药', '海龟汤', 'Tarot', '猜猜看'];
-  const [openGame, setOpenGame] = useState<string | null>(null);
+  const [openId, setOpenId] = useState<string | null>(null);
+  const opened = GAMES.find(game => game.id === openId);
+  const OpenedGame = opened?.component;
 
   return (
     <div className="absolute inset-0 z-[60] bg-[#fff7f5] text-slate-800">
@@ -307,23 +165,27 @@ const YuZhouGamePage: React.FC<{ onBack: () => void }> = ({ onBack }) => {
           </div>
 
           <div className="grid grid-cols-3 gap-x-4 gap-y-7 max-w-md mx-auto">
-            {games.map((name) => (
+            {GAMES.map(game => (
               <button
-                key={name}
-                onClick={() => { if (name === '大富翁') setOpenGame('大富翁'); }}
+                key={game.id}
+                onClick={() => { if (game.component) setOpenId(game.id); }}
                 className="flex flex-col items-center active:scale-95 transition-transform"
               >
                 <div className="w-full aspect-square rounded-[22px] bg-white/85 border border-white shadow-[0_8px_24px_rgba(172,88,108,.10)] flex items-center justify-center">
-                  <span className="text-[52px] leading-none">🎮</span>
+                  <span className="text-[52px] leading-none">{game.icon}</span>
                 </div>
-                <div className="mt-2.5 text-[12px] font-bold text-slate-700 whitespace-nowrap">{name}</div>
+                <div className="mt-2.5 text-[12px] font-bold text-slate-700 whitespace-nowrap">{game.name}</div>
               </button>
             ))}
           </div>
         </main>
       </div>
 
-      {openGame === '大富翁' && <MonopolyGamePage onBack={() => setOpenGame(null)} />}
+      {OpenedGame && (
+        <React.Suspense fallback={<div className="absolute inset-0 z-[70] bg-[#fff7f5] flex items-center justify-center text-[12px] text-rose-300">加载中…</div>}>
+          <OpenedGame onBack={() => setOpenId(null)} />
+        </React.Suspense>
+      )}
     </div>
   );
 };
