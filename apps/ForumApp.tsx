@@ -189,6 +189,7 @@ const ForumApp: React.FC = () => {
             activeAccount={activeAccount}
             heatLevel={heatLevel}
             apiConfig={apiConfig}
+            onDeleted={() => { setSection({ kind: 'home' }); setHistory([]); setFeedRefreshKey(k => k + 1); }}
           />
         );
       case 'search':
