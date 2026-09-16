@@ -9,7 +9,8 @@
 // 删除不可逆，走那条已经带着安全阀（新鲜豁免、整轮放弃）的老路，比在这里现删稳当。
 //
 // ─── 引用面与 GC 同源 ───
-// 面的清单直接复用 blobGc 的 REF_SOURCE_STORES + localStorage 全量，两边永远一致：
+// 面的清单直接复用 blobGc 的 REF_SOURCE_STORES + 论坛库 FORUM_BLOB_REF_STORES +
+// localStorage 全量，两边永远一致：
 // GC 能 mark 到的地方，这里就能改写到（blobDedupe.test.ts 有守卫钉这条）。
 // 万一漏了某个面，那个面会继续指着旧令牌 —— 旧 Blob 因此仍被引用、GC 也不会删它，
 // 方向是安全的（少省一点空间，不会破图）。
@@ -29,6 +30,7 @@
 import { DB } from './db';
 import { BLOBREF_PREFIX, getBlobForRef } from './blobRef';
 import { REF_SOURCE_STORES } from './blobGc';
+import { FORUM_BLOB_REF_STORES, getForumRowsPage, putForumRows } from './forumDb';
 
 // 与 blobGc 的分页大小同值：批间事务各自独立，内存峰值只有一批。
 const PAGE_SIZE = 200;
@@ -157,6 +159,28 @@ export async function rewriteBlobRefs(
             }
             if (dirty.length > 0) {
                 await DB.putStoreRows(storeName, dirty);
+                result.rewrittenRows += dirty.length;
+            }
+            opts.onProgress?.(result.scannedRows);
+            if (lastKey === null || rows.length < PAGE_SIZE) break;
+            afterKey = lastKey;
+        }
+    }
+
+    // ── 论坛面：自己的 IndexedDB（SullyOS_Forum），不走 DB.getStoreRowsPage ──
+    // 合并时漏改这里，论坛里那份被合并掉的令牌就会指向一个随后被 GC 回收的 Blob，变成裂图。
+    for (const storeName of FORUM_BLOB_REF_STORES) {
+        let afterKey: IDBValidKey | null = null;
+        for (;;) {
+            const { rows, lastKey } = await getForumRowsPage(storeName, afterKey, PAGE_SIZE);
+            const dirty: unknown[] = [];
+            for (const row of rows) {
+                result.scannedRows++;
+                if (!row || typeof row !== 'object') continue;
+                if (rewriteRefsDeep(row as object, mapping, new WeakSet(), result.mergedRefs)) dirty.push(row);
+            }
+            if (dirty.length > 0) {
+                await putForumRows(storeName, dirty);
                 result.rewrittenRows += dirty.length;
             }
             opts.onProgress?.(result.scannedRows);

@@ -112,6 +112,15 @@ export interface ForumPost {
    */
   visibility: 'public' | 'sharedAccountExclusive';
 
+  /**
+   * 图片附件，最多 9 张，与朋友圈同规格。存的是 blobref 令牌（本地相册选图，见
+   * utils/blobRef.ts）或 http(s) 外链，渲染统一走 TokenImg。
+   * 图不塞进 content——content 只放正文，喂给 AI 的上下文才不会被一长串令牌污染。
+   * 注意：令牌写进了论坛自己的库（SullyOS_Forum），所以 utils/blobGc.ts 与
+   * utils/blobDedupe.ts 必须把论坛这几张表也当引用面扫（已接入，见 FORUM_BLOB_REF_STORES）。
+   */
+  images?: string[];
+
   /** 轨道A长期归档水位，语义与 MomentPost.memoryArchivedUntil 一致 [交接5 2.2]。 */
   memoryArchivedUntil?: number;
 }
@@ -293,6 +302,72 @@ function reqResult<T>(req: IDBRequest): Promise<T> {
     req.onsuccess = () => resolve(req.result as T);
     req.onerror = () => reject(req.error);
   });
+}
+
+// ==================== Blob 引用面（给 blobGc / blobDedupe 用） ====================
+
+/**
+ * 论坛库里「可能存着 blobref 令牌」的表。
+ *
+ * 论坛用的是自己的 IndexedDB（SullyOS_Forum），不在主库里，所以 utils/blobGc.ts 的
+ * REF_SOURCE_STORES 那份清单**扫不到这里**。account.avatar / account.banner /
+ * post.images 存的是令牌，这几张表要是不单独吐给 GC，用户自己选的相册图会在下一轮
+ * 「孤儿图片清理」里被判成没人引用直接删掉，且不可逆。
+ *
+ * 往论坛里加新表、或者把令牌写进新字段时，先回来过一眼这份清单。
+ * 枚举是整行 JSON.stringify，字段增删自动覆盖，不用按字段维护。
+ */
+export const FORUM_BLOB_REF_STORES = [
+  STORE_ACCOUNTS,
+  STORE_POSTS,
+  STORE_COMMENTS,
+  STORE_DM_MESSAGES,
+] as const;
+
+export type ForumBlobRefStore = typeof FORUM_BLOB_REF_STORES[number];
+
+/**
+ * 按主键分页读一页原始行，口径对齐主库的 DB.getStoreRowsPage：
+ * afterKey 为 null 从头开始，返回 lastKey 供下一页续读，读完返回 lastKey: null。
+ * 分页而不是 getAll，是因为帖子表可能很大，一次全量拉进内存会顶爆低端机。
+ */
+export async function getForumRowsPage(
+  storeName: ForumBlobRefStore,
+  afterKey: IDBValidKey | null,
+  limit: number,
+): Promise<{ rows: unknown[]; lastKey: IDBValidKey | null }> {
+  const db = await openDb();
+  if (!db.objectStoreNames.contains(storeName)) return { rows: [], lastKey: null };
+  const tx = db.transaction(storeName, 'readonly');
+  const store = tx.objectStore(storeName);
+  const range = afterKey === null ? undefined : IDBKeyRange.lowerBound(afterKey, true);
+  const rows: unknown[] = [];
+  let lastKey: IDBValidKey | null = null;
+
+  await new Promise<void>((resolve, reject) => {
+    const req = store.openCursor(range);
+    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      const cursor = req.result;
+      if (!cursor || rows.length >= limit) { resolve(); return; }
+      rows.push(cursor.value);
+      lastKey = cursor.key;
+      cursor.continue();
+    };
+  });
+
+  return { rows, lastKey: rows.length < limit ? null : lastKey };
+}
+
+/** 整行写回（令牌合并用）。这几张表都是 inline keyPath: 'id'，可以直接 put。 */
+export async function putForumRows(storeName: ForumBlobRefStore, rows: unknown[]): Promise<void> {
+  if (rows.length === 0) return;
+  const db = await openDb();
+  if (!db.objectStoreNames.contains(storeName)) return;
+  const tx = db.transaction(storeName, 'readwrite');
+  const store = tx.objectStore(storeName);
+  for (const row of rows) store.put(row as any);
+  return txDone(tx);
 }
 
 // ==================== Accounts ====================

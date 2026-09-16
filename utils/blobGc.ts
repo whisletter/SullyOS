@@ -43,6 +43,8 @@
 // 上面从 user_profile 到 life_sim 这几张，装的都是**从角色/用户头像复制过去的副本**。
 // 头像本身在 characters 表，但它会被抄进帖子、卡片、面具、群资料里长期留着。GC 扫不到
 // 这些面，就会把还被老帖子引用着的图判成孤儿删掉——所以它们必须在清单里，哪怕平时为空。
+// | 论坛库 SullyOS_Forum | accounts(avatar/banner) / posts(images) / comments / dm_messages |
+// |                     | 论坛自己的 IndexedDB，不在主库里，单独分页逐行吐 |
 // | localStorage 全量值 | tama_board_img_<charId> 与旧单键 / acnh_wallpaper_backup /
 // |                     | sully-call-fake-camera-image-v1 / os_theme（JSON，令牌不剥）等 | 先同步快照再逐条吐 value |
 //
@@ -55,6 +57,7 @@
 
 import { DB } from './db';
 import { blobStore } from './blobStore';
+import { FORUM_BLOB_REF_STORES, getForumRowsPage } from './forumDb';
 import { tryAcquireMaintenanceLock, releaseMaintenanceLock, currentMaintenanceHolder } from './maintenanceLock';
 
 // 引用面里的 17 张表。名字与 db.ts 的 STORE_* 常量值一一对应
@@ -102,6 +105,22 @@ async function* iterateRefSources(): AsyncGenerator<string> {
             for (const row of rows) {
                 const text = JSON.stringify(row);
                 // JSON.stringify(undefined) 是 undefined（不是字符串），跳过这类空洞行
+                if (typeof text === 'string') yield text;
+            }
+            if (lastKey === null || rows.length < PAGE_SIZE) break;
+            afterKey = lastKey;
+        }
+    }
+
+    // 论坛面：论坛在自己的 IndexedDB（SullyOS_Forum）里，不走 DB.getStoreRowsPage，
+    // 所以上面那圈扫不到。账号头像/背景图与帖子配图存的都是令牌，漏掉这里=用户自己
+    // 从相册选的图会被当孤儿删掉。表清单在 forumDb 的 FORUM_BLOB_REF_STORES。
+    for (const storeName of FORUM_BLOB_REF_STORES) {
+        let afterKey: IDBValidKey | null = null;
+        for (;;) {
+            const { rows, lastKey } = await getForumRowsPage(storeName, afterKey, PAGE_SIZE);
+            for (const row of rows) {
+                const text = JSON.stringify(row);
                 if (typeof text === 'string') yield text;
             }
             if (lastKey === null || rows.length < PAGE_SIZE) break;
