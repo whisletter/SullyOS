@@ -103,7 +103,7 @@ export async function compressForumThreadForArchive(
         }),
       },
       0, 30_000,
-      { appName: '论坛', purpose: '论坛帖子归档前压缩' },
+      { appName: '杂波频段', purpose: '论坛帖子归档前压缩' },
     );
     const summary = String(data?.choices?.[0]?.message?.content || '').trim();
     if (summary) return summary.length > SUMMARY_MAX_CHARS ? `${summary.slice(0, SUMMARY_MAX_CHARS)}…` : summary;

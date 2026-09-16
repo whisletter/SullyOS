@@ -53,7 +53,7 @@ async function callForumAI(apiConfig: ForumApiConfig, systemPrompt: string, purp
             response_format: { type: 'json_object' },
           }),
         },
-        2, 0, { appName: '论坛', purpose },
+        2, 0, { appName: '杂波频段', purpose },
       );
       return data?.choices?.[0]?.message?.content?.trim() || '';
     } catch (e: any) {
