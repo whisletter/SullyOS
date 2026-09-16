@@ -4,6 +4,7 @@
 //   这个组件只依赖 App 的 useOS / DB，在游戏大厅里由 ../registry.ts 打开。
 // ═══════════════════════════════════════════════════════════════════════════
 
+
 import React, { useEffect, useRef, useState } from 'react';
 import { useOS } from '../../../context/OSContext';
 import { DB } from '../../../utils/db';
