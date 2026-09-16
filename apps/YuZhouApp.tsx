@@ -1,8 +1,9 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowClockwise, CalendarBlank, CaretLeft, CaretRight, Camera, Check, X } from '@phosphor-icons/react';
+import { ArrowClockwise, CalendarBlank, CaretLeft, CaretRight, Camera, Check, Coins, GameController, Gift, NotePencil, Plus, X } from '@phosphor-icons/react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
+import { processImage } from '../utils/file';
 import { GAMES } from './games/registry';
 import {
   YUZHOU_MOOD_EVENT,
@@ -23,7 +24,7 @@ const USER_EMOJI_KEY = 'yuzhou_user_emoji';
 
 const EMOJIS = ['😊', '🥰', '😸', '😠', '😢', '😣', '😾', '😎', '😳', '🤧', '😈', '😼'];
 const USER_MOOD_MIGRATED_KEY = 'yuzhou_user_mood_migrated';
-const DEFAULT_USER_EMOJI = '🥰';
+const DEFAULT_USER_EMOJI = ''; // 空 = 今天还没选，显示虚线圆圈 +
 
 // 戳一下 TA 的 emoji：只播动画，不改内容
 const POKE_CSS = `
@@ -164,14 +165,15 @@ const AvatarPicker: React.FC<{
   };
   return (
     <>
-      <button onClick={() => inputRef.current?.click()} className="flex flex-col items-center gap-1.5 active:scale-95 transition-transform">
-        <div className="relative w-[76px] h-[76px] sm:w-[84px] sm:h-[84px] rounded-full overflow-hidden bg-white ring-4 ring-white shadow-[0_6px_20px_rgba(126,65,85,.15)]">
-          {image ? <img src={image} alt={label} className="w-full h-full object-cover" /> : fallback ? <img src={fallback} alt={label} className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-3xl">♡</div>}
-          <div className="absolute inset-0 bg-black/0 hover:bg-black/10 flex items-end justify-end p-1.5">
-            <span className="w-6 h-6 rounded-full bg-white/90 text-pink-500 flex items-center justify-center shadow"><Camera size={13}/></span>
+      <button onClick={() => inputRef.current?.click()} aria-label={`更换${label}的头像`} className="relative active:scale-95 transition-transform">
+        <div className="rounded-full p-[3px] bg-gradient-to-br from-rose-200 to-pink-100 shadow-[0_6px_18px_rgba(226,120,150,.22)]">
+          <div className="rounded-full p-[3px] bg-white">
+            <div className="w-[74px] h-[74px] sm:w-[82px] sm:h-[82px] rounded-full overflow-hidden bg-rose-50">
+              {image ? <img src={image} alt={label} className="w-full h-full object-cover" /> : fallback ? <img src={fallback} alt={label} className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-3xl text-rose-200">♡</div>}
+            </div>
           </div>
         </div>
-        <span className="text-[11px] font-semibold text-rose-500/80">{label}</span>
+        <HeartBadge className="absolute -right-0.5 bottom-1 w-6 h-6" />
       </button>
       <input ref={inputRef} type="file" accept="image/*" className="hidden" onChange={e => handleFile(e.target.files?.[0])}/>
       {pending && <CropModal source={pending} onCancel={() => setPending(null)} onSave={data => { onChange(data); setPending(null); }}/>} 
@@ -179,29 +181,96 @@ const AvatarPicker: React.FC<{
   );
 };
 
-const MoodCard: React.FC<{
-  title: string;
-  emoji: string;
-  text: string;
-  editable?: boolean;
-  onEmoji?: () => void;
-  onText?: (v: string) => void;
-}> = ({ title, emoji, text, editable, onEmoji, onText }) => (
-  <div className="flex-1 min-w-0 px-3 sm:px-5 py-2 text-center">
-    <div className="text-[12px] font-bold tracking-wide text-rose-500/75">{title}</div>
-    <button disabled={!editable} onClick={onEmoji} className={`mt-2 text-[52px] leading-none ${editable ? 'active:scale-90 transition-transform' : ''}`}>{emoji}</button>
-    <div className="mt-2 min-h-[82px] rounded-[18px] bg-[#fffaf2] border border-[#f3dfcf] shadow-[0_3px_10px_rgba(120,80,50,.05)] p-3 text-left">
-      {editable ? (
-        <textarea value={text} maxLength={50} onChange={e => onText?.(e.target.value)} placeholder="写下今天的心情…"
-          className="w-full h-[56px] resize-none outline-none bg-transparent text-[13px] leading-5 text-slate-700 placeholder:text-slate-300" />
-      ) : (
-        <div className="text-[13px] leading-5 text-slate-600 break-words">{text || '今天没有留下文字。'}</div>
-      )}
+// ==================== 首页装饰（纯 SVG / CSS，不依赖图片） ====================
+
+/** 小光线：三条短线，flip=true 朝右 */
+const SparkLines: React.FC<{ flip?: boolean; className?: string }> = ({ flip, className = '' }) => (
+  <svg viewBox="0 0 18 18" className={`${className} ${flip ? '-scale-x-100' : ''}`} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
+    <path d="M5 3.5 L9 7" /><path d="M2.5 9.5 L8.5 9.5" /><path d="M5 15.5 L9 12" />
+  </svg>
+);
+
+const HeartBadge: React.FC<{ className?: string }> = ({ className = '' }) => (
+  <svg viewBox="0 0 24 24" className={className} aria-hidden>
+    <path d="M12 21 C6 16.5 2.5 13.4 2.5 9.2 C2.5 6.3 4.7 4 7.4 4 C9.4 4 11 5.1 12 6.8 C13 5.1 14.6 4 16.6 4 C19.3 4 21.5 6.3 21.5 9.2 C21.5 13.4 18 16.5 12 21 Z"
+      fill="#f9a8c0" stroke="#fff" strokeWidth="2" strokeLinejoin="round" />
+  </svg>
+);
+
+/** 纪念日大爱心 */
+const AnniversaryHeart: React.FC<{ day: string; onClick: () => void }> = ({ day, onClick }) => {
+  const size = day.length <= 2 ? 'text-[38px]' : day.length <= 4 ? 'text-[28px]' : 'text-[21px]';
+  return (
+    <button onClick={onClick} aria-label="修改纪念日天数" className="relative w-[156px] h-[142px] sm:w-[176px] sm:h-[160px] shrink-0 active:scale-95 transition-transform">
+      <svg viewBox="0 0 200 180" className="absolute inset-0 w-full h-full drop-shadow-[0_10px_16px_rgba(236,120,150,.28)]" aria-hidden>
+        <defs>
+          <radialGradient id="yz-heart-fill" cx="38%" cy="30%" r="80%">
+            <stop offset="0%" stopColor="#ffe3ea" />
+            <stop offset="55%" stopColor="#fbb9cb" />
+            <stop offset="100%" stopColor="#f58fae" />
+          </radialGradient>
+        </defs>
+        <path d="M100 170 C40 125 8 92 8 55 C8 26 30 8 56 8 C76 8 92 20 100 36 C108 20 124 8 144 8 C170 8 192 26 192 55 C192 92 160 125 100 170 Z"
+          fill="url(#yz-heart-fill)" stroke="#f38aa9" strokeWidth="3.5" strokeLinejoin="round" />
+        <ellipse cx="52" cy="42" rx="20" ry="11" fill="#fff" opacity=".55" transform="rotate(-32 52 42)" />
+        <path d="M150 30 L153 40 L163 43 L153 46 L150 56 L147 46 L137 43 L147 40 Z" fill="#fff" opacity=".9" />
+        <circle cx="166" cy="62" r="2.5" fill="#fff" opacity=".8" />
+      </svg>
+      <div className="absolute inset-x-0 top-[34%] flex items-baseline justify-center gap-1.5 text-[#e2577f]">
+        <span className="text-[19px] font-black">第</span>
+        <span className={`${size} font-black leading-none italic`}>{day}</span>
+        <span className="text-[19px] font-black">天</span>
+      </div>
+    </button>
+  );
+};
+
+/** 底栏中间的钻戒 */
+const RingIcon: React.FC<{ className?: string }> = ({ className = '' }) => (
+  <svg viewBox="0 0 64 64" className={className} fill="none" aria-hidden>
+    <circle cx="32" cy="40" r="16" stroke="#ee6f93" strokeWidth="5" />
+    <circle cx="32" cy="40" r="16" stroke="#fff" strokeWidth="1.2" opacity=".55" />
+    <path d="M22 13 L27 7 H37 L42 13 L32 25 Z" fill="#fcc3d2" stroke="#ee6f93" strokeWidth="2.4" strokeLinejoin="round" />
+    <path d="M22 13 H42 M27 7 L32 13 L37 7 M32 13 V25" stroke="#ee6f93" strokeWidth="1.4" strokeLinejoin="round" />
+    <path d="M11 12 L12 15 L15 16 L12 17 L11 20 L10 17 L7 16 L10 15 Z" fill="#f9a8c0" />
+    <path d="M53 10 L54 13 L57 14 L54 15 L53 18 L52 15 L49 14 L52 13 Z" fill="#f9a8c0" />
+  </svg>
+);
+
+/** 伪随机毛边：固定种子，每次渲染形状一致 */
+const makeTornClip = (seed: number) => {
+  let x = seed;
+  const rnd = () => { x = (x * 9301 + 49297) % 233280; return x / 233280; };
+  const pts: string[] = [];
+  const steps = 14;
+  for (let i = 0; i <= steps; i++) pts.push(`${(i / steps) * 100}% ${rnd() * 2.2}%`);
+  for (let i = 1; i <= steps; i++) pts.push(`${100 - rnd() * 1.6}% ${(i / steps) * 100}%`);
+  for (let i = steps - 1; i >= 0; i--) pts.push(`${(i / steps) * 100}% ${100 - rnd() * 2.2}%`);
+  for (let i = steps - 1; i >= 1; i--) pts.push(`${rnd() * 1.6}% ${(i / steps) * 100}%`);
+  return `polygon(${pts.join(',')})`;
+};
+const TORN_CLIP_A = makeTornClip(7);
+const TORN_CLIP_B = makeTornClip(23);
+
+/** 毛边便签纸 + 胶带 */
+const NotePaper: React.FC<{ tone: 'pink' | 'cream'; tape: 'pink' | 'blue'; tilt?: number; children: React.ReactNode }> = ({ tone, tape, tilt = 0, children }) => (
+  <div className="relative mt-5 drop-shadow-[0_4px_8px_rgba(160,100,110,.12)]" style={{ transform: `rotate(${tilt}deg)` }}>
+    <div
+      className={`min-h-[104px] p-3.5 pt-4 ${tone === 'pink' ? 'bg-[#fdebef]' : 'bg-[#fff6e6]'}`}
+      style={{ clipPath: tone === 'pink' ? TORN_CLIP_A : TORN_CLIP_B }}
+    >
+      {children}
     </div>
-    {editable && <div className="text-[9px] text-right text-slate-300 mt-1">{text.length}/50</div>}
+    <span className={`absolute -top-2.5 left-3 w-12 h-5 rotate-[-14deg] rounded-[3px] opacity-90 shadow-sm ${tape === 'pink' ? 'bg-[#f7b8c6]' : 'bg-[#b9d3f2]'}`} />
   </div>
 );
 
+/** 还没选 emoji / TA 还没生成时的虚线圆圈 */
+const DashedCircle: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <span className="w-[74px] h-[74px] rounded-full border-2 border-dashed border-rose-300/80 bg-white/40 flex items-center justify-center text-rose-300">
+    {children}
+  </span>
+);
 
 const YuZhouGamePage: React.FC<{ onBack: () => void }> = ({ onBack }) => {
   const [openId, setOpenId] = useState<string | null>(null);
@@ -384,7 +453,7 @@ const YuZhouMonthCalendar: React.FC<{
                     <span className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold
                       ${isToday ? 'bg-rose-400 text-white' : isFuture ? 'text-slate-300' : 'text-slate-600'}`}>{c.day}</span>
                     <div className="mt-auto mb-1.5 flex items-center justify-center gap-px text-[13px] leading-none min-h-[14px]">
-                      {m?.user && <span title="我">{m.user.emoji}</span>}
+                      {m?.user && <span title="我">{m.user.emoji || '✏️'}</span>}
                       {m?.ta && <span title={charName}>{m.ta.emoji}</span>}
                     </div>
                   </button>
@@ -454,6 +523,9 @@ const YuZhouApp: React.FC = () => {
   const [generatingTa, setGeneratingTa] = useState(false);
   const [pokeCount, setPokeCount] = useState(0);
   const genAbortRef = useRef<AbortController | null>(null);
+  const [homeBg, setHomeBg] = useState<string | null>(null);
+  const bgInputRef = useRef<HTMLInputElement>(null);
+  const homeBgId = `yuzhou-home-bg-${moodCharId}`;
 
   const fallbackUser = userProfile?.perCharAvatars?.[activeCharacterId || ''] || userProfile?.avatar;
   const fallbackChar = char?.avatar;
@@ -581,6 +653,30 @@ const YuZhouApp: React.FC = () => {
     })();
   }, [activeCharacterId]);
 
+  // 中间卡片背景：点一下上传，存 IndexedDB（和头像同一套）
+  useEffect(() => {
+    let cancelled = false;
+    DB.getAsset(homeBgId).then(v => { if (!cancelled) setHomeBg(v || null); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [homeBgId]);
+
+  const handleBgFile = async (file?: File) => {
+    if (!file) return;
+    try {
+      const dataUrl = await processImage(file, { maxWidth: 1200, quality: 0.85 });
+      await DB.saveAsset(homeBgId, dataUrl);
+      setHomeBg(dataUrl);
+      addToast?.('背景已更换', 'success');
+    } catch {
+      addToast?.('背景保存失败，可能是存储空间不足', 'error');
+    }
+  };
+
+  const resetBg = async () => {
+    try { await DB.saveAsset(homeBgId, ''); } catch { /* ignore */ }
+    setHomeBg(null);
+  };
+
   const saveAvatar = useCallback(async (kind: 'user' | 'char', dataUrl: string) => {
     try {
       const id = kind === 'user' ? 'yuzhou-avatar-user' : `yuzhou-avatar-char-${activeCharacterId || 'default'}`;
@@ -624,120 +720,193 @@ const YuZhouApp: React.FC = () => {
   }, [baseDay, baseDate]);
 
 
+  const NAV_ITEMS = [
+    { key: 'note', label: '便签', Icon: NotePencil, circle: 'bg-[#fde2e8]', icon: 'text-[#ef7f9c]' },
+    { key: 'game', label: '游戏', Icon: GameController, circle: 'bg-[#ece3fb]', icon: 'text-[#9b7fe0]' },
+    { key: 'home', label: '与昼', Icon: null, circle: '', icon: '' },
+    { key: 'money', label: '金钱', Icon: Coins, circle: 'bg-[#fdf0d3]', icon: 'text-[#e3a53c]' },
+    { key: 'gift', label: '礼物', Icon: Gift, circle: 'bg-[#dff3e6]', icon: 'text-[#5fb887]' },
+  ] as const;
+
   return (
-    <div className="relative h-full w-full overflow-hidden bg-[#fff7f5] text-slate-800">
+    <div className="relative h-full w-full overflow-hidden bg-[#fdf3f2] text-slate-700">
       <style>{POKE_CSS}</style>
-      <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_15%_10%,rgba(255,190,205,.42),transparent_28%),radial-gradient(circle_at_90%_25%,rgba(255,220,224,.5),transparent_30%),linear-gradient(180deg,#fffafa_0%,#fff4f1_100%)]" />
-      <div className="relative h-full overflow-y-auto overscroll-none pb-[94px]" style={{ paddingTop: 'var(--safe-top)' }}>
-        <header className="h-12 px-4 flex items-center justify-between">
-          <button onClick={closeApp} className="w-9 h-9 rounded-full bg-white/70 shadow-sm text-rose-400 text-lg">‹</button>
-          <div className="font-black tracking-[.22em] text-rose-400 text-sm">与昼</div>
-          <button
-            onClick={handleGenerateTa}
-            disabled={generatingTa}
-            aria-label="生成TA的今日心情"
-            title="生成TA的今日心情（调用一次 API）"
-            className={`w-9 h-9 rounded-full bg-white/80 border border-rose-100 shadow-sm flex items-center justify-center text-rose-400 active:scale-90 transition-transform disabled:opacity-70 ${generatingTa ? 'animate-spin' : ''}`}
-          >
-            <ArrowClockwise size={19} weight="bold" />
-          </button>
+      <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_12%_8%,rgba(255,214,224,.55),transparent_30%),radial-gradient(circle_at_88%_20%,rgba(255,228,232,.6),transparent_32%),radial-gradient(circle_at_50%_100%,rgba(250,225,230,.7),transparent_45%),linear-gradient(180deg,#fff9f8_0%,#fdf1f0_100%)]" />
+      <div className="relative h-full overflow-y-auto overscroll-none pb-[124px]" style={{ paddingTop: 'var(--safe-top)' }}>
+
+        {/* 顶栏：返回 / 纪念日 / 生成TA心情 */}
+        <header className="h-14 px-3 flex items-center justify-between">
+          <button onClick={closeApp} aria-label="返回" className="w-9 h-9 rounded-full bg-white/60 text-rose-400 text-xl active:scale-90 transition-transform">‹</button>
+          <div className="flex items-center gap-2 text-rose-400">
+            <SparkLines className="w-4 h-4" />
+            <span className="text-[24px] font-black tracking-[.3em] pl-[.3em] text-[#e2577f]">纪念日</span>
+            <SparkLines flip className="w-4 h-4" />
+          </div>
+          <div className="flex items-center">
+            <SparkLines className="w-3.5 h-3.5 text-rose-300 -mr-0.5" />
+            <button
+              onClick={handleGenerateTa}
+              disabled={generatingTa}
+              aria-label="生成TA的今日心情"
+              title="生成TA的今日心情（调用一次 API）"
+              className="w-10 h-10 rounded-full bg-gradient-to-br from-[#fb9fb6] to-[#f37c9c] text-white shadow-[0_6px_14px_rgba(240,110,145,.35)] flex items-center justify-center active:scale-90 transition-transform disabled:opacity-80"
+            >
+              <ArrowClockwise size={20} weight="bold" className={generatingTa ? 'animate-spin' : ''} />
+            </button>
+          </div>
         </header>
 
-        {/* 顶部 1/3：纪念日 */}
-        <section className="px-4 pt-2">
-          <div className="relative min-h-[250px] rounded-[34px] bg-white/60 border border-white/90 shadow-[0_12px_40px_rgba(172,88,108,.09)] overflow-hidden">
-            <div className="absolute inset-x-0 top-4 text-center z-10">
-              <div className="text-[13px] tracking-[.28em] font-bold text-rose-400">纪念日</div>
-            </div>
-            <div className="absolute left-3 top-[68px] z-20"><AvatarPicker label="我" image={userAvatar} fallback={fallbackUser} onChange={v => saveAvatar('user', v)} /></div>
-            <div className="absolute right-3 top-[68px] z-20"><AvatarPicker label={char?.name || 'TA'} image={charAvatar} fallback={fallbackChar} onChange={v => saveAvatar('char', v)} /></div>
-            <div className="absolute left-1/2 top-[27px] -translate-x-1/2 w-[190px] h-[178px] flex items-center justify-center">
-              <div className="absolute text-[112px] leading-none select-none drop-shadow-[0_10px_18px_rgba(239,126,153,.18)]">💗</div>
-              <div className="relative mt-2 text-center text-white drop-shadow-[0_2px_2px_rgba(190,90,110,.22)]">
-                <div className="text-[29px] font-black leading-none tracking-tight">第{day}天</div>
-                <button onClick={() => { setDayDraft(day); setEditingDay(true); }} className="mt-2 text-[9px] px-2.5 py-1 rounded-full bg-white/35 font-semibold">点击修改天数</button>
+        {/* 头像 + 爱心 */}
+        <section className="px-4">
+          <div className="flex items-center justify-between">
+            <AvatarPicker label="我" image={userAvatar} fallback={fallbackUser} onChange={v => saveAvatar('user', v)} />
+            <AnniversaryHeart day={day} onClick={() => { setDayDraft(day); setEditingDay(true); }} />
+            <AvatarPicker label={char?.name || 'TA'} image={charAvatar} fallback={fallbackChar} onChange={v => saveAvatar('char', v)} />
+          </div>
+          <div className="mt-1 flex items-center justify-center gap-3 text-[#e2577f]">
+            <HeartBadge className="w-4 h-4 -rotate-12" />
+            <span className="text-[14px] font-bold tracking-[.3em] pl-[.3em]">一起走过的每一天</span>
+            <HeartBadge className="w-4 h-4 rotate-12" />
+          </div>
+        </section>
+
+        {/* 中间：两个人的小世界（点一下换背景） */}
+        <section className="mx-4 mt-4">
+          <div
+            role="button"
+            tabIndex={0}
+            onClick={() => bgInputRef.current?.click()}
+            className="relative h-[200px] sm:h-[230px] rounded-[26px] overflow-hidden border-2 border-white shadow-[0_10px_30px_rgba(160,130,190,.18)] active:scale-[.99] transition-transform"
+          >
+            {homeBg ? (
+              <img src={homeBg} alt="背景" className="absolute inset-0 w-full h-full object-cover" />
+            ) : (
+              <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_15%_35%,rgba(255,255,255,.75),transparent_28%),radial-gradient(ellipse_at_85%_45%,rgba(255,236,244,.9),transparent_30%),radial-gradient(ellipse_at_50%_105%,rgba(214,200,240,.9),transparent_45%),linear-gradient(180deg,#d9d6f5_0%,#ecd9f0_45%,#fbe2ea_100%)]" />
+            )}
+            <div className="absolute inset-0 flex items-center justify-center p-6">
+              <div className="px-8 py-5 rounded-[22px] border-2 border-dashed border-white/80 bg-white/15 text-center text-[#8e7aa8] backdrop-blur-[1px]">
+                <div className="text-[15px] font-bold tracking-[.3em] pl-[.3em]">两个人的小世界</div>
+                <div className="mt-2 text-[12px] tracking-[.22em]">· 待加入像素家园 ·</div>
               </div>
             </div>
-            <div className="absolute bottom-4 inset-x-0 text-center text-[10px] tracking-[.16em] text-rose-300">一起走过的每一天，都值得被记住</div>
-          </div>
-        </section>
-
-        {/* 中间先留白，后续接入像素小人 / 背景 */}
-        <section className="mx-4 my-4 h-[250px] rounded-[30px] border border-dashed border-rose-100/80 bg-white/20 flex items-center justify-center">
-          <div className="text-center text-rose-200 select-none">
-            <div className="text-4xl mb-2">♡</div>
-            <div className="text-[11px] tracking-[.16em]">两个人的小世界 · 待加入像素家园</div>
-          </div>
-        </section>
-
-        {/* 底部 1/3：今日心情 / 心情日记 */}
-        <section className="mx-4 rounded-[30px] bg-white/75 border border-white/90 shadow-[0_10px_35px_rgba(172,88,108,.08)] overflow-hidden">
-          <div className="pt-5 pb-1 text-center">
-            <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-rose-50/80 border border-rose-100/70">
-              <span className="text-rose-300">♡</span>
-              <span className="text-[17px] font-black tracking-[.12em] text-rose-500/85">今日心情</span>
-              <span className="text-rose-300">♡</span>
+            <div className="absolute right-2.5 bottom-2.5 flex gap-1.5">
+              {homeBg && (
+                <button
+                  onClick={e => { e.stopPropagation(); void resetBg(); }}
+                  className="h-7 px-2.5 rounded-full bg-white/75 text-[10px] font-bold text-slate-500 shadow-sm active:scale-95"
+                >恢复默认</button>
+              )}
+              <span className="h-7 px-2.5 rounded-full bg-white/75 text-[10px] font-bold text-rose-400 shadow-sm flex items-center gap-1">
+                <Camera size={12} weight="bold" />{homeBg ? '换背景' : '点击上传背景'}
+              </span>
             </div>
-            <div className="text-[8px] text-rose-300 mt-1.5 tracking-[.2em]">TODAY'S MOOD</div>
+            <input ref={bgInputRef} type="file" accept="image/*" className="hidden"
+              onClick={e => e.stopPropagation()}
+              onChange={e => { void handleBgFile(e.target.files?.[0]); e.target.value = ''; }} />
+          </div>
+        </section>
+
+        {/* 今日心情 */}
+        <section className="mx-4 mt-4 rounded-[28px] bg-white/65 border-2 border-white shadow-[0_10px_30px_rgba(172,88,108,.08)]">
+          <div className="pt-4 text-center">
+            <div className="flex items-center justify-center gap-3 text-[#e2577f]">
+              <HeartBadge className="w-4 h-4 -rotate-12" />
+              <span className="text-[24px] font-black tracking-[.2em] pl-[.2em]">今日心情</span>
+              <HeartBadge className="w-4 h-4 rotate-12" />
+            </div>
             <button
               onClick={() => { flushUserSave(); setShowCalendar(true); }}
-              className="mt-2 inline-flex items-center gap-1 px-3 py-1 rounded-full bg-white border border-rose-100 shadow-sm text-[10px] font-bold text-rose-400 active:scale-95 transition-transform"
+              className="mt-1.5 inline-flex items-center gap-1 px-3 py-1 rounded-full bg-[#fdebef] text-[10px] font-bold text-rose-400 active:scale-95 transition-transform"
             >
               <CalendarBlank size={12} weight="bold" />本月
             </button>
           </div>
 
-          <div className="flex mt-2 pb-5 px-2 sm:px-3">
-            {/* 左：用户 */}
-            <div className="flex-1 min-w-0 px-2 sm:px-4 py-2 text-center flex flex-col">
-              <div className="text-[12px] font-bold tracking-wide text-rose-500/75">我的心情</div>
-              <button onClick={() => setShowEmojiPicker(v => !v)} className="mt-4 text-[58px] leading-none active:scale-90 transition-transform">{userEmoji}</button>
-              <div className="relative mt-8 min-h-[86px] rounded-[18px] bg-[#fffaf2] border border-[#f3dfcf] shadow-[0_3px_10px_rgba(120,80,50,.05)] p-3 text-left">
-                <span className="absolute -top-2 left-4 w-10 h-4 rounded-sm bg-rose-200/80 rotate-[-8deg] shadow-sm" />
-                <textarea value={userMood} maxLength={50} onChange={e => handleUserText(e.target.value)} onBlur={flushUserSave} placeholder="写下你的今日心情吧…"
-                  className="w-full h-[58px] resize-none outline-none bg-transparent text-[13px] leading-5 text-slate-700 placeholder:text-slate-300" />
-                <div className="text-[9px] text-right text-slate-300 mt-0.5">{userMood.length}/50</div>
+          <div className="relative flex px-3 pt-3 pb-5">
+            {/* 虚线分隔 */}
+            <div className="absolute left-1/2 top-5 bottom-7 border-l-2 border-dashed border-rose-200/80" />
+
+            {/* 左：我 */}
+            <div className="flex-1 min-w-0 pr-3 flex flex-col">
+              <div className="h-[92px] flex items-center justify-center">
+                <button onClick={() => setShowEmojiPicker(v => !v)} aria-label="选择我的心情" className="active:scale-90 transition-transform">
+                  {userEmoji ? (
+                    <span className="flex items-center gap-1">
+                      <SparkLines className="w-4 h-4 text-rose-300" />
+                      <span className="text-[62px] leading-none">{userEmoji}</span>
+                      <SparkLines flip className="w-4 h-4 text-rose-300" />
+                    </span>
+                  ) : (
+                    <DashedCircle><Plus size={30} weight="bold" /></DashedCircle>
+                  )}
+                </button>
               </div>
+              <NotePaper tone="pink" tape="pink" tilt={-1}>
+                <textarea value={userMood} maxLength={50} onChange={e => handleUserText(e.target.value)} onBlur={flushUserSave} placeholder="写下你的今日心情吧…"
+                  className="w-full h-[64px] resize-none outline-none bg-transparent text-[13px] leading-5 text-slate-600 placeholder:text-slate-400/80" />
+                <div className="text-[10px] text-right text-slate-400">{userMood.length}/50</div>
+              </NotePaper>
             </div>
 
-            <div className="w-px bg-rose-100 self-stretch my-3" />
-
             {/* 右：TA */}
-            <div className="flex-1 min-w-0 px-2 sm:px-4 py-2 text-center flex flex-col">
-              <div className="text-[12px] font-bold tracking-wide text-rose-500/75">{char?.name || 'TA'}的心情</div>
-              <button onClick={pokeTa} aria-label="戳一下TA" className="relative mt-4 mx-auto text-[58px] leading-none">
-                <span key={pokeCount} className={pokeCount > 0 ? 'yz-poke' : 'inline-block'}>
-                  {generatingTa ? '💭' : (taMood?.emoji || '🙂')}
-                </span>
-                {pokeCount > 0 && <span key={`h${pokeCount}`} className="yz-heart absolute left-1/2 -top-1 text-[16px] pointer-events-none">💗</span>}
-              </button>
-              <div className="relative mt-8 min-h-[86px] rounded-[18px] bg-[#fffaf8] border border-[#f4d9e0] shadow-[0_3px_10px_rgba(120,80,50,.05)] p-3 text-left">
-                <span className="absolute -top-2 left-4 w-10 h-4 rounded-sm bg-pink-200/80 rotate-[8deg] shadow-sm" />
-                <div className="min-h-[58px] flex items-center justify-center text-center text-[13px] leading-5 text-slate-600 break-words">
+            <div className="flex-1 min-w-0 pl-3 flex flex-col">
+              <div className="h-[92px] flex items-center justify-center">
+                <button onClick={pokeTa} aria-label="戳一下TA" className="relative">
+                  {taMood || generatingTa ? (
+                    <span className="flex items-center gap-1">
+                      <SparkLines className="w-4 h-4 text-rose-300" />
+                      <span key={pokeCount} className={`text-[62px] leading-none ${pokeCount > 0 ? 'yz-poke' : 'inline-block'}`}>
+                        {generatingTa ? '💭' : taMood?.emoji}
+                      </span>
+                      <SparkLines flip className="w-4 h-4 text-rose-300" />
+                    </span>
+                  ) : (
+                    <span key={pokeCount} className={pokeCount > 0 ? 'yz-poke' : 'inline-block'}>
+                      <DashedCircle><span className="text-[30px] font-black">?</span></DashedCircle>
+                    </span>
+                  )}
+                  {pokeCount > 0 && <span key={`h${pokeCount}`} className="yz-heart absolute left-1/2 -top-1 text-[16px] pointer-events-none">💗</span>}
+                </button>
+              </div>
+              <NotePaper tone="cream" tape="blue" tilt={1}>
+                <div className="min-h-[80px] flex items-center justify-center text-center text-[13px] leading-5 text-slate-600 break-words">
                   {generatingTa
                     ? <span className="text-rose-300">{char?.name || 'TA'}正在想今天的心情…</span>
-                    : taMood?.text || <span className="text-slate-400">还没有写今天的心情，点右上角 ↻ 让TA写一条吧。</span>}
+                    : taMood?.text || <span className="text-slate-400">{char?.name || 'TA'}的心情是什么？<br />点右上角 ↻ 问问吧。</span>}
                 </div>
-              </div>
+              </NotePaper>
             </div>
           </div>
 
-          {showEmojiPicker && <div className="border-t border-rose-100 bg-[#fffaf8] p-3 grid grid-cols-6 gap-2">{EMOJIS.map(e => <button key={e} onClick={() => handleUserEmoji(e)} className="text-2xl h-10 rounded-xl hover:bg-white active:scale-90">{e}</button>)}</div>}
+          {showEmojiPicker && <div className="border-t border-rose-100 bg-[#fffaf8] rounded-b-[26px] p-3 grid grid-cols-6 gap-2">{EMOJIS.map(e => <button key={e} onClick={() => handleUserEmoji(e)} className="text-2xl h-10 rounded-xl hover:bg-white active:scale-90">{e}</button>)}</div>}
         </section>
-        <div className="h-6" />
+        <div className="h-4" />
       </div>
 
-      {/* 五入口导航 */}
-      <nav className="absolute bottom-0 inset-x-0 z-50 px-4 pt-2 bg-white/90 backdrop-blur-xl border-t border-rose-100" style={{ paddingBottom: 'max(10px, var(--safe-bottom))' }}>
-        <div className="max-w-md mx-auto flex items-end justify-between">
-          {[
-            ['📝', '便签'], ['🎮', '游戏'], ['💍', '与昼'], ['💰', '金钱'], ['🎁', '礼物']
-          ].map(([icon, label], i) => (
-            <button key={label} onClick={() => { if (i === 1) setShowGamePage(true); else if (i !== 2) addToast?.(`${label}入口已预留，之后继续做`, 'info'); }} className={`w-[18%] flex flex-col items-center gap-1 py-1 rounded-2xl ${i === 2 ? 'text-rose-500' : 'text-slate-400'} active:scale-90 transition-transform`}>
-              <span className={`${i === 2 ? 'text-[29px]' : 'text-[23px]'} leading-none`}>{icon}</span>
-              <span className="text-[9px] font-bold">{label}</span>
-            </button>
-          ))}
+      {/* 底部导航 */}
+      <nav className="absolute bottom-0 inset-x-0 z-50 px-2" style={{ paddingBottom: 'max(8px, var(--safe-bottom))' }}>
+        <div className="max-w-md mx-auto rounded-[34px] bg-white/85 backdrop-blur-xl border-2 border-white shadow-[0_-4px_24px_rgba(172,88,108,.10)] px-2 pt-2.5 pb-2 flex items-end justify-between">
+          {NAV_ITEMS.map(({ key, label, Icon, circle, icon }) => {
+            const isHome = key === 'home';
+            const onClick = () => {
+              if (key === 'game') setShowGamePage(true);
+              else if (!isHome) addToast?.(`${label}入口已预留，之后继续做`, 'info');
+            };
+            return (
+              <button key={key} onClick={onClick} className="w-[19%] flex flex-col items-center gap-1 active:scale-90 transition-transform">
+                {isHome ? (
+                  <span className="-mt-7 w-[70px] h-[70px] rounded-full bg-gradient-to-br from-[#fde4ea] to-[#fbd0dc] ring-4 ring-white shadow-[0_6px_16px_rgba(240,110,145,.22)] flex items-center justify-center">
+                    <RingIcon className="w-11 h-11" />
+                  </span>
+                ) : (
+                  <span className={`w-[50px] h-[50px] rounded-full ${circle} flex items-center justify-center`}>
+                    {Icon && <Icon size={27} weight="duotone" className={icon} />}
+                  </span>
+                )}
+                <span className={`text-[11px] font-bold ${isHome ? 'text-[#e2577f]' : 'text-slate-500'}`}>{label}</span>
+              </button>
+            );
+          })}
         </div>
       </nav>
 
