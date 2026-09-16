@@ -6,6 +6,8 @@ import { DB } from '../utils/db';
 import { GAMES } from './games/registry';
 
 const ANNIVERSARY_KEY = 'yuzhou_anniversary_day';
+// 记录"保存天数"那天的本地日期（YYYY-MM-DD），用于之后每天自动累加
+const ANNIVERSARY_BASE_DATE_KEY = 'yuzhou_anniversary_base_date';
 const USER_MOOD_KEY = 'yuzhou_user_mood';
 const USER_EMOJI_KEY = 'yuzhou_user_emoji';
 
@@ -17,6 +19,35 @@ const storageGet = (key: string, fallback = '') => {
 };
 const storageSet = (key: string, value: string) => {
   try { localStorage.setItem(key, value); } catch { /* ignore */ }
+};
+
+// ---- 纪念日自动计数 ----
+const toLocalDateStr = (d: Date = new Date()) => {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+};
+
+// 按本地日历日计算相差天数（用 UTC 数字比较，避免夏令时导致的 23/25 小时误差）
+const diffLocalDays = (fromStr: string, to: Date = new Date()) => {
+  const [y, m, d] = fromStr.split('-').map(Number);
+  if (!y || !m || !d) return 0;
+  const from = Date.UTC(y, m - 1, d);
+  const now = Date.UTC(to.getFullYear(), to.getMonth(), to.getDate());
+  return Math.max(0, Math.round((now - from) / 86400000));
+};
+
+const calcCurrentDay = (baseDay: string, baseDate: string) => {
+  const n = parseInt(baseDay, 10) || 0;
+  return String(n + diffLocalDays(baseDate));
+};
+
+// 距离下一个本地零点的毫秒数（多加 1 秒缓冲）
+const msUntilNextMidnight = () => {
+  const now = new Date();
+  const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 1);
+  return next.getTime() - now.getTime();
 };
 
 function fileToDataUrl(file: File): Promise<string> {
@@ -193,7 +224,17 @@ const YuZhouGamePage: React.FC<{ onBack: () => void }> = ({ onBack }) => {
 const YuZhouApp: React.FC = () => {
   const { activeCharacterId, characters, userProfile, closeApp, addToast } = useOS();
   const char = characters.find(c => c.id === activeCharacterId) ?? null;
-  const [day, setDay] = useState(() => storageGet(ANNIVERSARY_KEY, '520'));
+  // baseDay：用户保存时填写的天数；baseDate：保存那天的日期
+  const [baseDay, setBaseDay] = useState(() => storageGet(ANNIVERSARY_KEY, '520'));
+  const [baseDate, setBaseDate] = useState(() => {
+    const saved = storageGet(ANNIVERSARY_BASE_DATE_KEY);
+    if (saved) return saved;
+    // 兼容旧数据：以前只存了天数，从今天开始计时
+    const today = toLocalDateStr();
+    storageSet(ANNIVERSARY_BASE_DATE_KEY, today);
+    return today;
+  });
+  const [day, setDay] = useState(() => calcCurrentDay(baseDay, baseDate));
   const [editingDay, setEditingDay] = useState(false);
   const [dayDraft, setDayDraft] = useState(day);
   const [userAvatar, setUserAvatar] = useState<string | null>(null);
@@ -249,8 +290,36 @@ const YuZhouApp: React.FC = () => {
 
   const saveDay = () => {
     const cleaned = dayDraft.replace(/\D/g, '').slice(0, 7) || '0';
-    setDay(cleaned); storageSet(ANNIVERSARY_KEY, cleaned); setEditingDay(false);
+    const today = toLocalDateStr();
+    setBaseDay(cleaned); setBaseDate(today); setDay(cleaned);
+    storageSet(ANNIVERSARY_KEY, cleaned);
+    storageSet(ANNIVERSARY_BASE_DATE_KEY, today);
+    setEditingDay(false);
   };
+
+  // 计时器：每到本地零点自动 +1；从后台切回 / 窗口重新聚焦时也重新计算
+  useEffect(() => {
+    let timer: number | undefined;
+    const refresh = () => setDay(calcCurrentDay(baseDay, baseDate));
+    const schedule = () => {
+      timer = window.setTimeout(() => { refresh(); schedule(); }, msUntilNextMidnight());
+    };
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      refresh();
+      window.clearTimeout(timer);
+      schedule(); // 手机休眠后 setTimeout 可能不准，回到前台时重新排一次
+    };
+    refresh();
+    schedule();
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
+  }, [baseDay, baseDate]);
 
   useEffect(() => { storageSet(USER_MOOD_KEY, userMood); }, [userMood]);
   useEffect(() => { storageSet(USER_EMOJI_KEY, userEmoji); }, [userEmoji]);
@@ -363,7 +432,7 @@ const YuZhouApp: React.FC = () => {
       {editingDay && <div className="absolute inset-0 z-[70] bg-black/25 flex items-center justify-center px-8">
         <div className="w-full max-w-xs rounded-[28px] bg-white p-5 shadow-2xl">
           <div className="font-bold text-slate-800">修改纪念日天数</div>
-          <div className="text-xs text-slate-400 mt-1">这里暂时由你手动填写，不自动计算。</div>
+          <div className="text-xs text-slate-400 mt-1">填写今天是第几天，之后每过一天会自动 +1。</div>
           <div className="mt-4 flex items-center gap-2">
             <input autoFocus inputMode="numeric" value={dayDraft} onChange={e => setDayDraft(e.target.value.replace(/\D/g, ''))} className="flex-1 h-12 rounded-2xl bg-rose-50 px-4 text-2xl font-black text-rose-500 outline-none" />
             <span className="font-bold text-rose-300">天</span>
