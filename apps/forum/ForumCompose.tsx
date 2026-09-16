@@ -52,6 +52,7 @@ const ForumCompose: React.FC<Props> = ({ activeAccount, onDone }) => {
         isCollected: false,
         involvesCharInteraction: false,
         isOwnedByUserSide: true,
+        likes: [],
         visibility: 'public',
       });
       addToast('发布成功', 'success');

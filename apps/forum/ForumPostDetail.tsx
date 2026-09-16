@@ -1,9 +1,10 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
-import { BookmarkSimple, ArrowsClockwise, ArrowBendUpLeft, Newspaper } from '@phosphor-icons/react';
+import { BookmarkSimple, ArrowsClockwise, ArrowBendUpLeft, Newspaper, Heart, PencilSimple, TrashSimple } from '@phosphor-icons/react';
 import * as db from '../../utils/forumDb';
 import * as feed from '../../utils/forumFeed';
+import { isUserSideAccount } from '../../utils/forumFeed';
 import * as ai from '../../utils/forumAi';
-import { getTopicLabel, type ForumTopicTag } from '../../utils/forumConstants';
+import { FORUM_TOPIC_TAGS, getTopicLabel, type ForumTopicTag } from '../../utils/forumConstants';
 import { useOS } from '../../context/OSContext';
 
 interface Props {
@@ -11,6 +12,8 @@ interface Props {
   activeAccount: db.ForumAccount;
   heatLevel: number;
   apiConfig: { baseUrl: string; apiKey: string; model: string };
+  /** 删除后调用，父组件负责导航回上一页（比如回主页）。不传就只是留在原地显示"已删除"。 */
+  onDeleted?: () => void;
 }
 
 /** 评论树里的一层，只按"楼"分组、楼内按时间线性展开（楼中楼这里不做多级缩进，
@@ -28,7 +31,7 @@ function groupByFloor(comments: db.ForumComment[]): { rootId: string; items: db.
     .sort((a, b) => a.items[0].createdAt - b.items[0].createdAt);
 }
 
-const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, apiConfig }) => {
+const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, apiConfig, onDeleted }) => {
   const { addToast } = useOS();
   const [post, setPost] = useState<db.ForumPost | null>(null);
   const [comments, setComments] = useState<db.ForumComment[]>([]);
@@ -37,6 +40,11 @@ const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, ap
   const [refreshing, setRefreshing] = useState(false);
   const [replyTarget, setReplyTarget] = useState<db.ForumComment | null>(null);
   const [inputText, setInputText] = useState('');
+  const [isEditing, setIsEditing] = useState(false);
+  const [editTitle, setEditTitle] = useState('');
+  const [editContent, setEditContent] = useState('');
+  const [editTopicTag, setEditTopicTag] = useState<ForumTopicTag>('daily_chatter');
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   const load = useCallback(async () => {
     const [p, c, accounts] = await Promise.all([
@@ -51,7 +59,6 @@ const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, ap
   useEffect(() => { load(); }, [load]);
 
   const floors = useMemo(() => groupByFloor(comments), [comments]);
-  const author = post ? accountsById.get(post.authorAccountId) : undefined;
 
   const toggleCollect = useCallback(async () => {
     if (!post) return;
@@ -59,6 +66,40 @@ const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, ap
     await db.saveForumPost(updated);
     setPost(updated);
   }, [post]);
+
+  // [用户确认新增] 点赞：跟收藏是两件事，不影响三天水线保留判定。
+  const toggleLike = useCallback(async () => {
+    if (!post) return;
+    const updated = await feed.toggleLike(post.id, activeAccount.id);
+    if (updated) setPost(updated);
+  }, [post, activeAccount.id]);
+
+  const author = post ? accountsById.get(post.authorAccountId) : undefined;
+  // [用户确认新增] 编辑/删除只对"用户方账号发的帖子"开放（主号/小号/共管账号），
+  // 不要求必须是当前激活身份——切换回主号也该能管自己小号发过的旧帖。
+  const canManage = isUserSideAccount(author);
+
+  const startEdit = useCallback(() => {
+    if (!post) return;
+    setEditTitle(post.title);
+    setEditContent(post.content);
+    setEditTopicTag(post.topicTag as ForumTopicTag);
+    setIsEditing(true);
+  }, [post]);
+
+  const saveEdit = useCallback(async () => {
+    if (!post) return;
+    const updated = await feed.editPost(post.id, { title: editTitle, content: editContent, topicTag: editTopicTag });
+    if (updated) setPost(updated);
+    setIsEditing(false);
+  }, [post, editTitle, editContent, editTopicTag]);
+
+  const handleDelete = useCallback(async () => {
+    if (!post) return;
+    await feed.deletePostWithComments(post.id);
+    setConfirmingDelete(false);
+    if (onDeleted) onDeleted();
+  }, [post, onDeleted]);
 
   const handleSubmitComment = useCallback(async () => {
     const text = inputText.trim();
@@ -117,17 +158,58 @@ const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, ap
               <Newspaper size={10} weight="fill" /> News
             </span>
           )}
-          <button onClick={toggleCollect} className="ml-auto p-1">
-            <BookmarkSimple size={18} weight={post.isCollected ? 'fill' : 'regular'} />
-          </button>
+          <div className="ml-auto flex items-center gap-1">
+            {canManage && !isEditing && (
+              <>
+                <button onClick={startEdit} className="p-1"><PencilSimple size={16} /></button>
+                <button onClick={() => setConfirmingDelete(true)} className="p-1"><TrashSimple size={16} /></button>
+              </>
+            )}
+            <button onClick={toggleCollect} className="p-1">
+              <BookmarkSimple size={18} weight={post.isCollected ? 'fill' : 'regular'} />
+            </button>
+          </div>
         </div>
-        {post.title && <div className="font-bold text-[17px] mt-2">{post.title}</div>}
-        <div className="text-[14px] mt-1.5 whitespace-pre-wrap leading-relaxed">{post.content}</div>
-        {post.postKind === 'news' && post.sourceNewsUrl && (
-          <a href={post.sourceNewsUrl} target="_blank" rel="noreferrer" className="text-[12px] opacity-50 mt-1.5 block underline">
-            原文：{post.sourceNewsTitle || post.sourceNewsUrl}
-          </a>
+
+        {isEditing ? (
+          <div className="mt-2 space-y-2">
+            <select value={editTopicTag} onChange={e => setEditTopicTag(e.target.value as ForumTopicTag)} className="w-full px-2 py-1.5 rounded-lg text-sm" style={{ background: 'rgba(127,127,127,0.1)' }}>
+              {FORUM_TOPIC_TAGS.map(t => <option key={t.tag} value={t.tag}>{t.label}</option>)}
+            </select>
+            <input value={editTitle} onChange={e => setEditTitle(e.target.value)} placeholder="标题" className="w-full px-2 py-1.5 rounded-lg text-sm outline-none" style={{ background: 'rgba(127,127,127,0.1)' }} />
+            <textarea value={editContent} onChange={e => setEditContent(e.target.value)} rows={5} className="w-full px-2 py-1.5 rounded-lg text-sm outline-none resize-none" style={{ background: 'rgba(127,127,127,0.1)' }} />
+            <div className="flex gap-2">
+              <button onClick={saveEdit} className="text-sm px-3 py-1.5 rounded-full font-bold" style={{ background: '#3b82f6', color: '#fff' }}>保存</button>
+              <button onClick={() => setIsEditing(false)} className="text-sm px-3 py-1.5 rounded-full" style={{ background: 'rgba(127,127,127,0.15)' }}>取消</button>
+            </div>
+          </div>
+        ) : (
+          <>
+            {post.title && <div className="font-bold text-[17px] mt-2">{post.title}</div>}
+            <div className="text-[14px] mt-1.5 whitespace-pre-wrap leading-relaxed">{post.content}</div>
+            {post.postKind === 'news' && post.sourceNewsUrl && (
+              <a href={post.sourceNewsUrl} target="_blank" rel="noreferrer" className="text-[12px] opacity-50 mt-1.5 block underline">
+                原文：{post.sourceNewsTitle || post.sourceNewsUrl}
+              </a>
+            )}
+          </>
         )}
+
+        {confirmingDelete && (
+          <div className="mt-2 text-sm space-y-2 p-2 rounded-lg" style={{ background: 'rgba(239,68,68,0.1)' }}>
+            <div>确定删除这条帖子吗？评论会一起删掉，不能撤销。</div>
+            <div className="flex gap-2">
+              <button onClick={handleDelete} className="px-3 py-1.5 rounded-full text-xs" style={{ background: '#ef4444', color: '#fff' }}>确定删除</button>
+              <button onClick={() => setConfirmingDelete(false)} className="px-3 py-1.5 rounded-full text-xs" style={{ background: 'rgba(127,127,127,0.15)' }}>取消</button>
+            </div>
+          </div>
+        )}
+
+        {/* [用户确认新增] 点赞：跟收藏分开显示，不影响保留判定 */}
+        <button onClick={toggleLike} className="flex items-center gap-1 mt-2 text-[13px]">
+          <Heart size={16} weight={post.likes.includes(activeAccount.id) ? 'fill' : 'regular'} color={post.likes.includes(activeAccount.id) ? '#ef4444' : undefined} />
+          <span className="opacity-60">{post.likes.length || ''}</span>
+        </button>
       </div>
 
       {/* 评论区头部 + 刷新按钮 [交接4 二.3.1] */}

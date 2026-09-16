@@ -1,5 +1,5 @@
 import React from 'react';
-import { Newspaper } from '@phosphor-icons/react';
+import { Newspaper, Heart } from '@phosphor-icons/react';
 import type { ForumAccount, ForumPost } from '../../utils/forumDb';
 import { getTopicLabel, type ForumTopicTag } from '../../utils/forumConstants';
 
@@ -41,7 +41,12 @@ const ForumPostCard: React.FC<Props> = ({ post, author, commentCount, onClick })
           </div>
           {post.title && <div className="font-bold text-[15px] mt-0.5 truncate">{post.title}</div>}
           <div className="text-[13px] opacity-80 mt-0.5 line-clamp-2">{post.content}</div>
-          <div className="text-[11px] opacity-50 mt-1">{commentCount} 条评论</div>
+          <div className="text-[11px] opacity-50 mt-1 flex items-center gap-3">
+            <span>{commentCount} 条评论</span>
+            {post.likes.length > 0 && (
+              <span className="flex items-center gap-0.5"><Heart size={11} weight="fill" />{post.likes.length}</span>
+            )}
+          </div>
         </div>
       </div>
     </button>
