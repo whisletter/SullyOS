@@ -4,6 +4,9 @@
 //   做新游戏时直接 import { callGameAI } from '../shared/ai'。
 // ═══════════════════════════════════════════════════════════════════════════
 
+import { safeFetchJson, extractContent } from '../../../utils/safeApi';
+import type { ApiCallMeta } from '../../../utils/apiCallLog';
+
 export interface GameAIMessage { role: 'user' | 'assistant'; content: string }
 export interface GameAIApi { baseUrl: string; apiKey: string; model: string }
 
@@ -14,6 +17,7 @@ export interface GameAIRequest {
   messages: GameAIMessage[];
   temperature?: number;
   label?: string;                               // 报错时显示是谁（如「荷官」）
+  meta?: ApiCallMeta;                           // 「设置 → API 调用记录」里显示的 App / 角色 / 用途
 }
 
 const pick = (v: string | undefined, fb: string | undefined) => (v && v.trim() ? v.trim() : (fb || '').trim());
@@ -37,17 +41,24 @@ export async function callGameAI(req: GameAIRequest): Promise<string | null> {
     messages: [{ role: 'system', content: req.system }, ...req.messages],
   };
   if (typeof req.temperature === 'number') body.temperature = req.temperature;
-  const res = await fetch(`${baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey || 'sk-none'}` },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`${req.label || 'AI'} 接口返回 ${res.status}${text ? `：${text.slice(0, 160)}` : ''}`);
+  let data: any;
+  try {
+    // 走项目统一的请求：调用记录里带上 App / 角色 / 用途；聊天接口不会自动重试（不重复扣费）
+    data = await safeFetchJson(
+      `${baseUrl}/chat/completions`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey || 'sk-none'}` },
+        body: JSON.stringify(body),
+      },
+      0,
+      120000,
+      req.meta,
+    );
+  } catch (e: any) {
+    throw new Error(`${req.label || 'AI'} 接口出错：${String(e?.message || e).slice(0, 160)}`);
   }
-  const data = await res.json();
-  return stripThinking(data?.choices?.[0]?.message?.content ?? '');
+  return stripThinking(extractContent(data) ?? data?.choices?.[0]?.message?.content ?? '');
 }
 
 // 把同角色连续消息合并、去掉开头的 assistant（很多接口要求 user 开头、角色交替）
