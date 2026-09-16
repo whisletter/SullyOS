@@ -9,7 +9,7 @@ import { useOS } from '../../../context/OSContext';
 import { DB } from '../../../utils/db';
 import { callGameAI } from '../shared/ai';
 import { createChatMirror } from '../shared/chatMirror';
-import { readNames, readPersona, readSex } from '../shared/profile';
+import { detectSex, readNames, readPersona } from '../shared/profile';
 import {
   AI_TEMPERATURE, BIRD_TEXT, CHAT_MIRROR, DEALER_API, DEALER_NAME, DUEL_HINT, FUNCTION_CARDS, GAME_NUMBERS,
   INTENSITY_NOTES, INTENSITY_RANGES, LEVEL_NAMES, LEVEL_STEPS, LEVELS_FOOTER, MARK_PARTS, OPENING_REMINDER,
@@ -25,7 +25,7 @@ import {
   buildDealerMessages, buildDealerSystem, buildTaMessages, buildTaSystem, isBirdWord, parseTaActions,
   type ChatEntry, type ChatFrom,
 } from './prompts';
-import type { MonopolySettings, Profiles, Who } from './types';
+import type { MonopolySettings, Profiles, Sex, Who } from './types';
 
 const DICE_FACES = ['⚀', '⚁', '⚂', '⚃', '⚄', '⚅'];
 
@@ -76,6 +76,20 @@ const CmdButton: React.FC<{ label: string; cmd: string; onClick: () => void; ton
   </button>
 );
 
+// 开局卡片 / 设置页底部：用户、TA 各一行
+const PlayerIdTable: React.FC<{ profiles: Pick<Profiles, 'names' | 'sexes'>; roles: MonopolySettings['roles'] }> = ({ profiles, roles }) => (
+  <div className="rounded-2xl bg-rose-50/60 border border-rose-100 px-3.5 py-2.5 grid grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-x-3 gap-y-1.5 text-[12px]">
+    {([['user', '用户ID'], ['ta', '角色ID']] as const).map(([w, label]) => (
+      <React.Fragment key={w}>
+        <span className="text-slate-400 font-bold">{label}</span>
+        <span className="font-black text-slate-700 truncate">{profiles.names[w]}</span>
+        <span className={profiles.sexes[w] ? 'text-slate-600' : 'text-amber-600 font-bold'}>{profiles.sexes[w] ?? '性别?'}</span>
+        <span className="min-w-[2.2em] text-center rounded-full bg-rose-400 text-white text-[11px] font-black px-2 py-0.5">{roles[w]}</span>
+      </React.Fragment>
+    ))}
+  </div>
+);
+
 function ringPos(i: number): [number, number] {
   if (i <= 5) return [1, i + 1];
   if (i <= 10) return [i - 4, 6];
@@ -87,11 +101,15 @@ function ringPos(i: number): [number, number] {
 
 const GameSettingsPage: React.FC<{
   onBack: () => void;
-  onSave: (s: MonopolySettings) => void;
+  onSave: (s: MonopolySettings, sexOverride: SexOverride) => void;
   initial: MonopolySettings;
   profiles: Profiles;
-}> = ({ onBack, onSave, initial, profiles }) => {
+  detected: Record<Who, { sex: Sex | null; from: string }>;
+  initialSexOverride: SexOverride;
+}> = ({ onBack, onSave, initial, profiles, detected, initialSexOverride }) => {
   const [settings, setSettings] = useState<MonopolySettings>(initial);
+  const [sexOverride, setSexOverride] = useState<SexOverride>(initialSexOverride);
+  const draftProfiles = { names: profiles.names, sexes: { user: sexOverride.user ?? detected.user.sex, ta: sexOverride.ta ?? detected.ta.sex } };
   const patch = (p: Partial<MonopolySettings>) => setSettings(prev => ({ ...prev, ...p }));
   const setPer = <K extends 'roles' | 'pureTop' | 'backdoor'>(key: K, who: Who, value: MonopolySettings[K][Who]) =>
     setSettings(prev => ({ ...prev, [key]: { ...prev[key], [who]: value } }));
@@ -99,7 +117,7 @@ const GameSettingsPage: React.FC<{
     if (!RED_LINES[idx]) return;
     setSettings(prev => { const next = [...prev.redLineActive]; next[idx] = !next[idx]; return { ...prev, redLineActive: next }; });
   };
-  const handleSave = () => { saveSettings(settings); onSave(settings); onBack(); };
+  const handleSave = () => { saveSettings(settings); onSave(settings, sexOverride); onBack(); };
   const activeRange = parseRange(INTENSITY_RANGES[settings.intensity]);
   const names = profiles.names;
 
@@ -125,8 +143,16 @@ const GameSettingsPage: React.FC<{
                 <div className="flex items-center justify-between gap-2">
                   <div className="min-w-0">
                     <div className="text-[12px] font-black text-slate-700 truncate">{names[who]}</div>
-                    <div className={`text-[10px] ${profiles.sexes[who] ? 'text-slate-400' : 'text-amber-600 font-bold'}`}>
-                      {profiles.sexes[who] ? `性别：${profiles.sexes[who]}（读自人设）` : '性别未识别：只会抽到不限性别的题'}
+                    <div className={`text-[10px] ${draftProfiles.sexes[who] ? 'text-slate-400' : 'text-amber-600 font-bold'}`}>
+                      {sexOverride[who]
+                        ? `性别：${sexOverride[who]}（手动指定）`
+                        : detected[who].sex ? `性别：${detected[who].sex}（读自${detected[who].from}）` : '性别未识别：只会抽到不限性别的题'}
+                    </div>
+                    <div className="flex gap-1 mt-1.5">
+                      {([null, '男', '女'] as const).map(v => (
+                        <SegButton key={String(v)} className="!px-2.5 !py-1 !text-[11px]" active={sexOverride[who] === v}
+                          onClick={() => setSexOverride(prev => ({ ...prev, [who]: v }))}>{v ?? '自动'}</SegButton>
+                      ))}
                     </div>
                   </div>
                   <div className="flex gap-1.5 shrink-0">
@@ -227,8 +253,8 @@ const GameSettingsPage: React.FC<{
             </div>
           </SettingCard>
 
-          <div className="rounded-[20px] bg-slate-800 text-[11px] text-rose-100 font-mono p-3.5 leading-5 break-words mb-2">{buildOpeningCommand(settings, profiles)}</div>
-          <div className="text-[9px] text-rose-300 text-center">↑ 开局指令预览（和原版命令行同一写法），保存后下一局按这些参数开</div>
+          <div className="mb-2"><PlayerIdTable profiles={draftProfiles} roles={settings.roles} /></div>
+          <div className="text-[9px] text-rose-300 text-center">↑ 保存后下一局按这些参数开</div>
         </main>
       </div>
 
@@ -488,6 +514,14 @@ function loadChat(charId: string): ChatEntry[] {
   try { const raw = localStorage.getItem(chatStorageKey(charId)); const v = raw ? JSON.parse(raw) : []; return Array.isArray(v) ? v : []; } catch { return []; }
 }
 
+// 手动指定性别：null = 自动读人设。按角色分开存，换角色不串
+type SexOverride = Record<Who, Sex | null>;
+const sexOverrideKey = (charId: string) => `yuzhou_monopoly_sex_${charId || 'default'}`;
+function loadSexOverride(charId: string): SexOverride {
+  const ok = (v: unknown): Sex | null => (v === '男' || v === '女' ? v : null);
+  try { const p = JSON.parse(localStorage.getItem(sexOverrideKey(charId)) || '{}'); return { user: ok(p?.user), ta: ok(p?.ta) }; } catch { return { user: null, ta: null }; }
+}
+
 const MonopolyGame: React.FC<{ onBack: () => void }> = ({ onBack }) => {
   const { activeCharacterId, characters, userProfile, apiConfig } = useOS();
   const charId = activeCharacterId || '';
@@ -499,9 +533,16 @@ const MonopolyGame: React.FC<{ onBack: () => void }> = ({ onBack }) => {
     ta: charAvatar || char?.avatar,
   };
 
+  const [sexOverride, setSexOverride] = useState<SexOverride>(() => loadSexOverride(charId));
+  useEffect(() => { setSexOverride(loadSexOverride(charId)); }, [charId]);
+  const names = readNames(userProfile, char);
+  const detected: Record<Who, { sex: Sex | null; from: string }> = {
+    user: detectSex(userProfile, { selfName: names.user, otherName: names.ta }),
+    ta: detectSex(char, { selfName: names.ta, otherName: names.user }),
+  };
   const profiles: Profiles = {
-    names: readNames(userProfile, char),
-    sexes: { user: readSex(userProfile), ta: readSex(char) },
+    names,
+    sexes: { user: sexOverride.user ?? detected.user.sex, ta: sexOverride.ta ?? detected.ta.sex },
     taPersona: readPersona(char),
   };
 
@@ -677,9 +718,12 @@ const MonopolyGame: React.FC<{ onBack: () => void }> = ({ onBack }) => {
     commitGame(createLobby(settings, profiles));
     setConfirmReset(false);
   };
-  const handleSaveSettings = (s: MonopolySettings) => {
+  const handleSaveSettings = (s: MonopolySettings, so: SexOverride) => {
     setSettings(s);
-    if (gameRef.current.phase === 'lobby') commitGame(createLobby(s, profiles));
+    setSexOverride(so);
+    try { localStorage.setItem(sexOverrideKey(charId), JSON.stringify(so)); } catch { /* ignore */ }
+    const nextProfiles: Profiles = { ...profiles, sexes: { user: so.user ?? detected.user.sex, ta: so.ta ?? detected.ta.sex } };
+    if (gameRef.current.phase === 'lobby') commitGame(createLobby(s, nextProfiles));
   };
 
   const g = game;
@@ -704,23 +748,23 @@ const MonopolyGame: React.FC<{ onBack: () => void }> = ({ onBack }) => {
     <div className="absolute inset-0 z-[70] bg-[#fff7f5] text-slate-800 overflow-hidden">
       <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_15%_10%,rgba(255,190,205,.42),transparent_28%),radial-gradient(circle_at_90%_25%,rgba(255,220,224,.5),transparent_30%),linear-gradient(180deg,#fffafa_0%,#fff4f1_100%)]" />
       <div className="relative h-full overflow-y-auto overscroll-none" style={{ paddingTop: 'var(--safe-top)' }}>
-        <header className="h-14 px-3 grid grid-cols-[1fr_auto_1fr] items-center gap-2">
-          <div className="flex items-center gap-1.5">
+        <header className="px-3 pt-2 pb-1">
+          <div className="h-12 grid grid-cols-[auto_1fr_auto] items-center gap-2">
             <button onClick={onBack} className="w-9 h-9 shrink-0 rounded-full bg-white/80 shadow-sm text-rose-400 text-xl active:scale-90 transition-transform">‹</button>
+            <div className="text-center min-w-0">
+              <div className="font-black tracking-[.18em] text-rose-500 text-base">大富翁</div>
+              <div className="text-[8px] tracking-[.12em] text-rose-300 mt-0.5 truncate">
+                {inGame ? `回合 ${g.turnCount}/${g.totalRounds}` : '未开局'} · {shown.intensity} · 局长{inGame ? g.totalRounds : shown.rounds}
+              </div>
+            </div>
+            <button onClick={() => setShowSettings(true)} aria-label="功能型选项" className="w-9 h-9 rounded-full bg-white/80 shadow-sm text-[18px] flex items-center justify-center active:scale-90 transition-transform">😄</button>
+          </div>
+          <div className="mt-1.5 flex justify-center gap-2">
             <button onClick={() => execCmd('bird 我', 'user')} disabled={!(g.phase === 'playing' || g.phase === 'lock')} aria-label="飞鸟：立刻停止游戏"
-              className="h-9 px-2.5 shrink-0 rounded-full bg-sky-50 border border-sky-200 text-sky-600 text-[11px] font-black shadow-sm active:scale-90 transition-transform disabled:opacity-40">🕊️ 飞鸟</button>
+              className="h-8 px-3.5 shrink-0 rounded-full bg-sky-50 border border-sky-200 text-sky-600 text-[11px] font-black shadow-sm active:scale-90 transition-transform disabled:opacity-40">🕊️ 飞鸟</button>
             <button onClick={() => firstSkippable && execCmd(OWN_KINDS.includes(firstSkippable.kind) ? `skip ${n[firstSkippable.owner]}` : `skip #${firstSkippable.id}`, firstSkippable.owner)}
               disabled={g.phase !== 'playing' || !firstSkippable} aria-label="跳过当前的题"
-              className="h-9 px-2.5 shrink-0 rounded-full bg-white/85 border border-rose-100 text-rose-400 text-[11px] font-black shadow-sm active:scale-90 transition-transform disabled:opacity-40">⏭️ 跳过</button>
-          </div>
-          <div className="text-center">
-            <div className="font-black tracking-[.18em] text-rose-500 text-base">大富翁</div>
-            <div className="text-[8px] tracking-[.12em] text-rose-300 mt-0.5 whitespace-nowrap">
-              {inGame ? `回合 ${g.turnCount}/${g.totalRounds}` : '未开局'} · {shown.intensity} · 局长{inGame ? g.totalRounds : shown.rounds}
-            </div>
-          </div>
-          <div className="flex justify-end">
-            <button onClick={() => setShowSettings(true)} aria-label="功能型选项" className="w-9 h-9 rounded-full bg-white/80 shadow-sm text-[18px] flex items-center justify-center active:scale-90 transition-transform">😄</button>
+              className="h-8 px-3.5 shrink-0 rounded-full bg-white/85 border border-rose-100 text-rose-400 text-[11px] font-black shadow-sm active:scale-90 transition-transform disabled:opacity-40">⏭️ 跳过</button>
           </div>
         </header>
 
@@ -728,7 +772,7 @@ const MonopolyGame: React.FC<{ onBack: () => void }> = ({ onBack }) => {
           <IssuesCard issues={CONTENT_ISSUES} />
 
           {g.phase === 'lobby' && (
-            <section className="rounded-[28px] bg-white/80 border border-white shadow-[0_12px_40px_rgba(172,88,108,.09)] p-5">
+            <section className="mt-6 rounded-[28px] bg-white/80 border border-white shadow-[0_12px_40px_rgba(172,88,108,.09)] p-5">
               <div className="text-[13px] font-black text-rose-500">准备开局</div>
               <div className="mt-1 text-[11px] text-slate-500 leading-5">{profiles.names.user} 和 {profiles.names.ta} 对局；{DEALER_NAME}只负责播报引擎。</div>
               <div className="mt-3 grid grid-cols-2 gap-2">
@@ -744,7 +788,7 @@ const MonopolyGame: React.FC<{ onBack: () => void }> = ({ onBack }) => {
                 <div className="text-[11px] leading-5 text-slate-600 mt-0.5">{INTENSITY_NOTES[settings.intensity]}</div>
               </div>
               {OPENING_REMINDER && <div className="mt-3 rounded-2xl bg-amber-50/70 border border-amber-100 p-3 text-[11px] leading-5 text-amber-700 font-semibold">{OPENING_REMINDER}</div>}
-              <div className="mt-3 rounded-2xl bg-slate-800 text-[10px] text-rose-100 font-mono p-3 leading-5 break-words">{buildOpeningCommand(settings, profiles)}</div>
+              <div className="mt-3"><PlayerIdTable profiles={profiles} roles={settings.roles} /></div>
               <div className="mt-4 flex gap-2">
                 <button onClick={() => setShowSettings(true)} className="flex-1 h-11 rounded-2xl bg-white border border-rose-100 text-rose-400 font-bold active:scale-95 transition-transform">改设置</button>
                 <button onClick={startGame} className="flex-[1.4] h-11 rounded-2xl bg-rose-400 text-white font-bold active:scale-95 transition-transform shadow-[0_8px_24px_rgba(225,110,140,.3)]">开局</button>
@@ -936,7 +980,7 @@ const MonopolyGame: React.FC<{ onBack: () => void }> = ({ onBack }) => {
         </div>
       )}
 
-      {showSettings && <GameSettingsPage initial={settings} profiles={profiles} onBack={() => setShowSettings(false)} onSave={handleSaveSettings} />}
+      {showSettings && <GameSettingsPage initial={settings} profiles={profiles} detected={detected} initialSexOverride={sexOverride} onBack={() => setShowSettings(false)} onSave={handleSaveSettings} />}
     </div>
   );
 };
