@@ -43,8 +43,9 @@ export type ForumSection =
   | { kind: 'settings' }
   | { kind: 'compose' };
 
+// 「发布」不在这条导航里——它是右下角那颗悬浮纸飞机（见下方 FAB），
+// 跟左侧这排「去哪儿看」的导航不是一类操作。
 const NAV_ITEMS: { id: ForumSection['kind']; icon: React.ElementType; label: string }[] = [
-  { id: 'compose', icon: PaperPlaneTilt, label: '发布' },
   { id: 'home', icon: House, label: '主页' },
   { id: 'search', icon: MagnifyingGlass, label: '搜索' },
   { id: 'notifications', icon: Bell, label: '通知' },
@@ -228,7 +229,7 @@ const ForumApp: React.FC = () => {
 
   return (
     <div
-      className="h-full w-full flex flex-col"
+      className="relative h-full w-full flex flex-col overflow-hidden"
       style={{ background: themeTokens.bg, color: themeTokens.text }}
     >
       {/* 顶栏：返回 + 标题 + 手动刷新（仅主页显示）+ 浅色/夜色切换 */}
@@ -295,12 +296,36 @@ const ForumApp: React.FC = () => {
           })}
         </div>
 
-        <div className="flex-1 min-w-0 overflow-y-auto no-scrollbar">
+        <div className={`flex-1 min-w-0 no-scrollbar ${section.kind === 'compose' ? 'overflow-hidden' : 'overflow-y-auto'}`}>
           {!ready && <div className="text-center py-16 text-sm opacity-50">加载中…</div>}
           {ready && !activeAccount && <div className="text-center py-16 text-sm opacity-50">初始化失败，请退出重进或查看控制台报错</div>}
           {content}
         </div>
       </div>
+
+      {/* 右下角悬浮「发帖」：底下垫一层同色光晕做悬浮感，正在发布页时隐藏，免得挡住工具条 */}
+      {ready && activeAccount && section.kind !== 'compose' && (
+        <div className="absolute right-5 z-30 pointer-events-none" style={{ bottom: 'calc(var(--safe-bottom, 0px) + 22px)' }}>
+          <div
+            className="absolute -inset-3 rounded-full"
+            style={{ background: 'radial-gradient(circle, rgba(59,130,246,0.38) 0%, rgba(59,130,246,0) 70%)', filter: 'blur(6px)' }}
+          />
+          <button
+            onClick={() => { setHistory([]); setSection({ kind: 'compose' }); }}
+            className="pointer-events-auto relative w-14 h-14 rounded-full flex items-center justify-center active:scale-90 transition-transform"
+            style={{
+              background: 'linear-gradient(140deg, #60A5FA 0%, #3B82F6 55%, #2563EB 100%)',
+              color: '#fff',
+              boxShadow: '0 12px 28px -8px rgba(37,99,235,0.65), 0 3px 10px rgba(0,0,0,0.18), inset 0 1px 0 rgba(255,255,255,0.35)',
+              border: `1px solid ${darkMode ? 'rgba(255,255,255,0.14)' : 'rgba(255,255,255,0.5)'}`,
+            }}
+            aria-label="发帖"
+            title="发帖"
+          >
+            <PaperPlaneTilt size={24} weight="fill" style={{ transform: 'translate(-1px, 1px)' }} />
+          </button>
+        </div>
+      )}
 
       {identitySheetOpen && activeAccount && (
         <ForumIdentitySheet
