@@ -93,13 +93,13 @@ export function saveDayMood(charId: string, dateKey: string, side: 'user' | 'ta'
 
 // ==================== TA 今日心情生成（一次调用） ====================
 
-const nowHHMM = () => {
+export const nowHHMM = () => {
   const d = new Date();
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 };
 
 /** 读今天已有的日程（只读，不会为此额外生成日程） */
-async function buildScheduleBlock(char: CharacterProfile): Promise<string> {
+export async function buildScheduleBlock(char: CharacterProfile): Promise<string> {
   try {
     if (!isScheduleFeatureOn(char)) return '';
     const schedule = await getDailyScheduleForChar(char, new Date());
@@ -126,7 +126,7 @@ async function buildScheduleBlock(char: CharacterProfile): Promise<string> {
 }
 
 /** 今天的聊天记录（当天记忆的一部分） */
-async function buildTodayChatBlock(char: CharacterProfile, user: UserProfile): Promise<string> {
+export async function buildTodayChatBlock(char: CharacterProfile, user: UserProfile): Promise<string> {
   try {
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
@@ -152,7 +152,7 @@ async function buildTodayChatBlock(char: CharacterProfile, user: UserProfile): P
 }
 
 /** 角色人设 + 记忆：优先复用全项目统一的上下文构建器 */
-function buildPersonaBlock(char: CharacterProfile, user: UserProfile): string {
+export function buildPersonaBlock(char: CharacterProfile, user: UserProfile): string {
   try {
     const ctx = (ContextBuilder as any).buildCoreContext(char, user, true);
     if (typeof ctx === 'string' && ctx.trim()) return ctx;
