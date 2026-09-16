@@ -41,6 +41,7 @@ export enum AppID {
   WorldHome = 'world_home', // 家园 — 同世界观多角色共同生活的大世界（观测驱动演绎，每角色独立 LLM 调用 + NPC 世界引擎）
   Moments = 'moments', // 朋友圈 — 用户和角色的朋友圈动态，点赞评论互动
   YuZhou = 'yuzhou', // 与昼 — 情侣空间主界面
+  Forum = 'forum', // 杂波频段 — 论坛（NPC路人 + 角色小号/共管账号 + 热点新闻贴）
 }
 
 export interface SystemLog {
