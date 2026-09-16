@@ -8,6 +8,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useOS } from '../../../context/OSContext';
 import { DB } from '../../../utils/db';
 import { callGameAI } from '../shared/ai';
+import { extractModelIds } from '../../../utils/modelList';
 import { createChatMirror } from '../shared/chatMirror';
 import { detectSex, readNames, readPersona } from '../shared/profile';
 import {
@@ -22,12 +23,61 @@ import {
   saveSeen, saveSettings, tollOf, type GameState, type TaskCard,
 } from './engine';
 import {
-  buildDealerMessages, buildDealerSystem, buildTaMessages, buildTaSystem, isBirdWord, parseTaActions,
+  buildTaMessages, buildTaSystem, isBirdWord, parseTaActions, taNudgeKey,
   type ChatEntry, type ChatFrom,
 } from './prompts';
 import type { MonopolySettings, Profiles, Sex, Who } from './types';
 
 const DICE_FACES = ['⚀', '⚁', '⚂', '⚃', '⚄', '⚅'];
+
+// ─── TA 专用 API（设置页里填；三项都空 = 用 App 设置里的主 API）────────────────
+export interface TaApiSetting { baseUrl: string; apiKey: string; model: string }
+const TA_API_KEY = 'yuzhou_monopoly_ta_api';
+function loadTaApi(): TaApiSetting {
+  try {
+    const v = JSON.parse(localStorage.getItem(TA_API_KEY) || '{}');
+    return { baseUrl: String(v?.baseUrl || ''), apiKey: String(v?.apiKey || ''), model: String(v?.model || '') };
+  } catch { return { baseUrl: '', apiKey: '', model: '' }; }
+}
+function saveTaApi(v: TaApiSetting) {
+  try { localStorage.setItem(TA_API_KEY, JSON.stringify({ baseUrl: v.baseUrl.trim(), apiKey: v.apiKey.trim(), model: v.model.trim() })); } catch { /* ignore */ }
+}
+const taApiFilled = (v: TaApiSetting) => !!(v.baseUrl.trim() && v.model.trim());
+
+// ─── 荷官：不调 API，把引擎原文整理一下直接出字 ──────────────────────────────
+const BOARD_ART_LINE = /^(［|🙋.*@\d|💞.*@\d|🚩地盘：)/;
+function dealerText(texts: string[]): string {
+  return texts
+    .map(t => t
+      .split('\n')
+      .filter(line => !BOARD_ART_LINE.test(line.trim()))
+      .join('\n')
+      .replace(/📋 〔([^｜〕]*)｜([^｜〕]*)｜([^｜〕]*)｜([^〕]*)〕/g, (_m, lv, _type, label) => `📋 新题 · ${label}（${lv}）`)
+      .replace(/（念给人类[^）]*）/g, '')
+      .trim())
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+/** 首页同款小光线 */
+const SparkLines: React.FC<{ flip?: boolean; className?: string }> = ({ flip, className = '' }) => (
+  <svg viewBox="0 0 18 18" className={`${className} ${flip ? '-scale-x-100' : ''}`} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
+    <path d="M5 3.5 L9 7" /><path d="M2.5 9.5 L8.5 9.5" /><path d="M5 15.5 L9 12" />
+  </svg>
+);
+const HeartBadge: React.FC<{ className?: string; color?: string }> = ({ className = '', color = '#f9a8c0' }) => (
+  <svg viewBox="0 0 24 24" className={className} aria-hidden>
+    <path d="M12 21 C6 16.5 2.5 13.4 2.5 9.2 C2.5 6.3 4.7 4 7.4 4 C9.4 4 11 5.1 12 6.8 C13 5.1 14.6 4 16.6 4 C19.3 4 21.5 6.3 21.5 9.2 C21.5 13.4 18 16.5 12 21 Z"
+      fill={color} stroke="#fff" strokeWidth="2" strokeLinejoin="round" />
+  </svg>
+);
+
+const GAME_CSS = `
+@keyframes mono-pulse { 0% { box-shadow: 0 0 0 0 rgba(167,139,250,.55); } 70% { box-shadow: 0 0 0 12px rgba(167,139,250,0); } 100% { box-shadow: 0 0 0 0 rgba(167,139,250,0); } }
+.mono-pulse { animation: mono-pulse 1.6s ease-out infinite; }
+@keyframes mono-bubble { 0% { opacity: 0; transform: translateY(8px) scale(.96); } 12% { opacity: 1; transform: none; } 85% { opacity: 1; } 100% { opacity: 0; transform: translateY(-4px); } }
+.mono-bubble { animation: mono-bubble 4.8s ease-out forwards; }
+`;
 
 // ─── 小件 ─────────────────────────────────────────────────────────────────
 
@@ -65,15 +115,14 @@ const MiniAvatar: React.FC<{ src?: string | null; label: string; ring: string }>
   </span>
 );
 
-const CmdButton: React.FC<{ label: string; cmd: string; onClick: () => void; tone?: 'primary' | 'plain' | 'warn'; disabled?: boolean }> = ({ label, cmd, onClick, tone = 'plain', disabled }) => (
+const CmdButton: React.FC<{ label: string; cmd: string; onClick: () => void; tone?: 'primary' | 'plain' | 'warn'; disabled?: boolean }> = ({ label, onClick, tone = 'plain', disabled }) => (
   <button
     onClick={onClick}
     disabled={disabled}
-    className={`flex-1 min-w-[92px] rounded-2xl px-2 py-2 flex flex-col items-center gap-0.5 transition-transform ${disabled ? 'opacity-40' : 'active:scale-95'} ${tone === 'primary' ? 'bg-rose-400 text-white shadow-[0_6px_18px_rgba(225,110,140,.3)]' : tone === 'warn' ? 'bg-amber-50 text-amber-700 border border-amber-200' : 'bg-white text-rose-500 border border-rose-100'}`}
-  >
-    <span className="text-[12px] font-bold">{label}</span>
-    <span className={`text-[8px] font-mono ${tone === 'primary' ? 'text-rose-100' : 'text-slate-400'}`}>{cmd}</span>
-  </button>
+    className={`flex-1 min-w-[88px] h-10 rounded-full px-3 text-[12px] font-bold transition-transform ${disabled ? 'opacity-40' : 'active:scale-95'} ${tone === 'primary'
+      ? 'bg-gradient-to-br from-[#fb9fb6] to-[#f37c9c] text-white shadow-[0_6px_14px_rgba(240,110,145,.3)]'
+      : tone === 'warn' ? 'bg-[#fff4e0] text-[#c7852a] border border-[#f7dcae]' : 'bg-white/90 text-rose-500 border border-rose-100'}`}
+  >{label}</button>
 );
 
 // 开局卡片 / 设置页底部：用户、TA 各一行
@@ -101,12 +150,13 @@ function ringPos(i: number): [number, number] {
 
 const GameSettingsPage: React.FC<{
   onBack: () => void;
-  onSave: (s: MonopolySettings, sexOverride: SexOverride) => void;
+  onSave: (s: MonopolySettings, sexOverride: SexOverride, taApi: TaApiSetting) => void;
+  initialTaApi: TaApiSetting;
   initial: MonopolySettings;
   profiles: Profiles;
   detected: Record<Who, { sex: Sex | null; from: string }>;
   initialSexOverride: SexOverride;
-}> = ({ onBack, onSave, initial, profiles, detected, initialSexOverride }) => {
+}> = ({ initialTaApi, onBack, onSave, initial, profiles, detected, initialSexOverride }) => {
   const [settings, setSettings] = useState<MonopolySettings>(initial);
   const [sexOverride, setSexOverride] = useState<SexOverride>(initialSexOverride);
   const draftProfiles = { names: profiles.names, sexes: { user: sexOverride.user ?? detected.user.sex, ta: sexOverride.ta ?? detected.ta.sex } };
@@ -117,14 +167,32 @@ const GameSettingsPage: React.FC<{
     if (!RED_LINES[idx]) return;
     setSettings(prev => { const next = [...prev.redLineActive]; next[idx] = !next[idx]; return { ...prev, redLineActive: next }; });
   };
-  const handleSave = () => { saveSettings(settings); onSave(settings, sexOverride); onBack(); };
+  const [taApi, setTaApi] = useState<TaApiSetting>(initialTaApi);
+  const [showKey, setShowKey] = useState(false);
+  const [models, setModels] = useState<string[]>([]);
+  const [modelMsg, setModelMsg] = useState('');
+  const fetchModels = async () => {
+    const base = taApi.baseUrl.trim().replace(/\/+$/, '');
+    if (!base) { setModelMsg('先填 URL'); return; }
+    setModelMsg('正在获取…');
+    try {
+      const res = await fetch(`${base}/models`, { headers: { Authorization: `Bearer ${taApi.apiKey.trim()}` } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const list = extractModelIds(await res.json());
+      setModels(list);
+      setModelMsg(list.length ? `获取到 ${list.length} 个模型，点一个选上` : '没有读到模型，直接手填也行');
+    } catch (e: any) {
+      setModelMsg(`获取失败：${e?.message || '网络错误'}，可以直接手填模型名`);
+    }
+  };
+  const handleSave = () => { saveSettings(settings); onSave(settings, sexOverride, taApi); onBack(); };
   const activeRange = parseRange(INTENSITY_RANGES[settings.intensity]);
   const names = profiles.names;
 
   return (
     <div className="absolute inset-0 z-[80] bg-[#fff7f5] text-slate-800">
       <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_15%_10%,rgba(255,190,205,.42),transparent_28%),radial-gradient(circle_at_90%_25%,rgba(255,220,224,.5),transparent_30%),linear-gradient(180deg,#fffafa_0%,#fff4f1_100%)]" />
-      <div className="relative h-full overflow-y-auto overscroll-none" style={{ paddingTop: 'var(--safe-top)' }}>
+      <div className="relative h-full overflow-y-auto overscroll-none" style={{ paddingTop: 'var(--safe-top, 0px)' }}>
         <header className="h-14 px-4 flex items-center justify-between">
           <button onClick={onBack} className="w-9 h-9 rounded-full bg-white/80 shadow-sm text-rose-400 text-xl active:scale-90 transition-transform">‹</button>
           <div className="text-center">
@@ -253,12 +321,43 @@ const GameSettingsPage: React.FC<{
             </div>
           </SettingCard>
 
+          <SettingCard title="TA 专用 API" icon="💞" hint="只给大富翁里的 TA 接话用。三项都留空 = 用 App 设置里的主 API。TA 一次只看人设和这局游戏，输入不多，适合按量计费的便宜模型。">
+            <label className="block text-[10px] font-bold text-rose-300 mb-1 pl-1">URL</label>
+            <input value={taApi.baseUrl} onChange={e => setTaApi(v => ({ ...v, baseUrl: e.target.value }))} placeholder="https://api.example.com/v1" autoCapitalize="off" autoCorrect="off" spellCheck={false}
+              className="w-full h-10 rounded-xl bg-rose-50/60 border border-rose-100 px-3 text-[12px] font-mono text-slate-700 outline-none focus:border-rose-300" />
+            <label className="block text-[10px] font-bold text-rose-300 mt-3 mb-1 pl-1">Key</label>
+            <div className="flex gap-1.5">
+              <input value={taApi.apiKey} onChange={e => setTaApi(v => ({ ...v, apiKey: e.target.value }))} type={showKey ? 'text' : 'password'} placeholder="sk-..." autoCapitalize="off" autoCorrect="off" spellCheck={false}
+                className="flex-1 min-w-0 h-10 rounded-xl bg-rose-50/60 border border-rose-100 px-3 text-[12px] font-mono text-slate-700 outline-none focus:border-rose-300" />
+              <button onClick={() => setShowKey(v => !v)} className="shrink-0 w-10 h-10 rounded-xl bg-white border border-rose-100 text-[14px]" aria-label={showKey ? '隐藏 Key' : '显示 Key'}>{showKey ? '🙈' : '👀'}</button>
+            </div>
+            <div className="flex items-center justify-between mt-3 mb-1 pl-1">
+              <label className="text-[10px] font-bold text-rose-300">Model</label>
+              <button onClick={fetchModels} className="text-[10px] font-bold text-rose-400">获取模型列表</button>
+            </div>
+            <input value={taApi.model} onChange={e => setTaApi(v => ({ ...v, model: e.target.value }))} placeholder="模型名" autoCapitalize="off" autoCorrect="off" spellCheck={false}
+              className="w-full h-10 rounded-xl bg-rose-50/60 border border-rose-100 px-3 text-[12px] font-mono text-slate-700 outline-none focus:border-rose-300" />
+            {modelMsg && <div className="mt-1.5 text-[10px] text-rose-300 pl-1">{modelMsg}</div>}
+            {models.length > 0 && (
+              <div className="mt-2 max-h-36 overflow-y-auto flex flex-wrap gap-1.5">
+                {models.map(m => (
+                  <button key={m} onClick={() => setTaApi(v => ({ ...v, model: m }))}
+                    className={`px-2.5 py-1 rounded-full text-[10px] font-mono border ${taApi.model === m ? 'bg-rose-400 text-white border-rose-400' : 'bg-white text-slate-500 border-rose-100'}`}>{m}</button>
+                ))}
+              </div>
+            )}
+            <div className="mt-3 flex items-center justify-between">
+              <span className={`text-[10px] font-bold ${taApiFilled(taApi) ? 'text-emerald-500' : 'text-slate-400'}`}>{taApiFilled(taApi) ? '✓ TA 用这个 API' : '现在用主 API'}</span>
+              {(taApi.baseUrl || taApi.apiKey || taApi.model) && <button onClick={() => { setTaApi({ baseUrl: '', apiKey: '', model: '' }); setModels([]); setModelMsg(''); }} className="text-[10px] text-slate-400 underline underline-offset-2">清空，改回主 API</button>}
+            </div>
+          </SettingCard>
+
           <div className="mb-2"><PlayerIdTable profiles={draftProfiles} roles={settings.roles} /></div>
           <div className="text-[9px] text-rose-300 text-center">↑ 保存后下一局按这些参数开</div>
         </main>
       </div>
 
-      <div className="absolute bottom-0 inset-x-0 px-4 pt-3 bg-white/90 backdrop-blur-xl border-t border-rose-100" style={{ paddingBottom: 'max(14px, var(--safe-bottom))' }}>
+      <div className="absolute bottom-0 inset-x-0 px-4 pt-3 bg-white/90 backdrop-blur-xl border-t border-rose-100" style={{ paddingBottom: 'max(14px, var(--safe-bottom, 0px))' }}>
         <button onClick={handleSave} className="w-full h-12 rounded-2xl bg-rose-400 text-white font-bold active:scale-[.98] transition-transform shadow-[0_8px_24px_rgba(225,110,140,.3)]">保存并返回</button>
       </div>
     </div>
@@ -280,15 +379,24 @@ const PlayerPanel: React.FC<{
   const catQuota = Number((id?.effects || []).find(e => e.type === 'task_reroll')?.value) || 0;
   const extraQuota = Number((id?.effects || []).find(e => e.type === 'extra_task')?.value) || 0;
   return (
-    <div className={`flex-1 min-w-0 rounded-[22px] p-3 border transition-colors ${active ? 'bg-white border-rose-200 shadow-[0_8px_22px_rgba(225,110,140,.14)]' : 'bg-white/60 border-white'}`}>
+    <div className={`flex-1 min-w-0 rounded-[24px] p-3 border-2 transition-all ${active
+      ? `bg-white/95 ${who === 'user' ? 'border-[#f7c2cf] shadow-[0_10px_26px_rgba(240,110,145,.18)]' : 'border-[#d9c8f5] shadow-[0_10px_26px_rgba(150,110,220,.16)]'}`
+      : 'bg-white/60 border-white'}`}>
       <div className="flex items-center gap-2">
-        <div className={`w-11 h-11 shrink-0 rounded-full overflow-hidden bg-rose-50 ring-2 ${who === 'user' ? 'ring-rose-300' : 'ring-violet-300'}`}>
-          {avatar ? <img src={avatar} alt={name} className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-rose-300">♡</div>}
+        <div className="relative shrink-0">
+          <div className={`rounded-full p-[2px] bg-gradient-to-br ${who === 'user' ? 'from-rose-200 to-pink-100' : 'from-violet-200 to-fuchsia-100'}`}>
+            <div className="rounded-full p-[2px] bg-white">
+              <div className="w-10 h-10 rounded-full overflow-hidden bg-rose-50">
+                {avatar ? <img src={avatar} alt={name} className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-rose-300">♡</div>}
+              </div>
+            </div>
+          </div>
+          <HeartBadge className="absolute -right-1 -bottom-0.5 w-4 h-4" color={who === 'user' ? '#f9a8c0' : '#c4b0f2'} />
         </div>
         <div className="min-w-0">
-          <div className={`text-[12px] font-black truncate ${tint}`}>{name}{active && playing ? ' · 掷骰' : ''}</div>
+          <div className={`text-[12px] font-black truncate ${tint}`}>{name}{active && playing ? <span className="ml-1 text-[9px] px-1.5 py-[1px] rounded-full bg-[#fff1c9] text-[#c28a1c] align-middle">🎲 该我了</span> : null}</div>
           <div className="text-[10px] text-slate-400">{g.profiles.sexes[who] ?? '?'} · {g.settings.roles[who]}{g.settings.pureTop[who] ? ' · 纯top' : ''}</div>
-          <div className="text-[11px] text-amber-600 font-bold">🪙 {p.coins} <span className="text-slate-400 font-semibold">· 地盘 {land} · 第{p.lap + 1}圈</span></div>
+          <div className="text-[11px] text-[#d0901f] font-bold whitespace-nowrap">🪙 {p.coins}<span className="ml-1.5 text-[10px] text-slate-400 font-semibold">🚩{land} · 第{p.lap + 1}圈</span></div>
         </div>
       </div>
 
@@ -348,10 +456,14 @@ const TaskCardView: React.FC<{ g: GameState; c: TaskCard; exec: (cmd: string, by
   const p = g.players[c.owner];
   const reward = isPending ? rewardPreview(g, c.owner) : null;
   const catLeft = (identityOf(g, c.owner)?.effects || []).some(e => e.type === 'task_reroll' && p.taskRerolled < (Number(e.value) || 0));
+  const mine = c.owner === 'user';
   return (
-    <div className="rounded-[20px] bg-white border border-rose-100 shadow-[0_10px_30px_rgba(172,88,108,.12)] p-4">
+    <div className="relative pt-2" style={{ filter: 'drop-shadow(0 8px 14px rgba(172,88,108,.14))' }}>
+    <span className={`absolute top-0 left-5 z-[1] w-14 h-5 rotate-[-8deg] rounded-[3px] opacity-90 shadow-sm ${mine ? 'bg-[#f7b8c6]' : 'bg-[#b9d3f2]'}`} />
+    <div className={`relative p-4 pt-5 ${mine ? 'bg-[#fdebef]' : 'bg-[#fff6e6]'}`}
+      style={{ borderRadius: '6px 14px 8px 12px', clipPath: 'polygon(0 1%, 3% 0, 97% 1%, 100% 0, 99% 50%, 100% 99%, 96% 100%, 4% 99%, 0 100%, 1% 50%)' }}>
       <div className="flex items-center justify-between gap-2">
-        <div className="text-[12px] font-black text-rose-500">
+        <div className={`text-[12px] font-black ${mine ? 'text-[#e2577f]' : 'text-[#b8804a]'}`}>
           {CARD_LABEL[c.kind]} · {LEVEL_MARKS[c.level - 1]}{LEVEL_NAMES[c.level - 1]}
           {c.pool === 'task' && <span className="ml-1 text-[10px] font-bold text-slate-400">{c.type}</span>}
         </div>
@@ -361,9 +473,9 @@ const TaskCardView: React.FC<{ g: GameState; c: TaskCard; exec: (cmd: string, by
         {c.dir} · <span className={c.label.startsWith('🔄') ? 'text-amber-600 font-bold' : ''}>{c.label}</span>
         {reward !== null && ` · 做完 +${reward} 币`}
       </div>
-      <div className="mt-2 text-[14px] leading-6 text-slate-700 whitespace-pre-wrap">{c.text}</div>
+      <div className="mt-2 text-[14px] leading-7 text-[#5b4a4e] whitespace-pre-wrap">{c.text}</div>
       {c.note && <div className="mt-1.5 text-[10px] leading-4 text-slate-400">{c.note}</div>}
-      {c.actor === 'ta' && <div className="mt-2 text-[10px] text-violet-400">这道由 {n.ta} 来做；在文字卡片里看 TA 的回应。</div>}
+      {c.actor === 'ta' && <div className="mt-2 text-[10px] text-violet-400">这道由 {n.ta} 来做，想看 TA 怎么做就点右下角「💞 让TA接话」。</div>}
 
       {g.phase === 'playing' && (
         <div className="mt-3 flex gap-2 flex-wrap">
@@ -388,6 +500,7 @@ const TaskCardView: React.FC<{ g: GameState; c: TaskCard; exec: (cmd: string, by
         </div>
       )}
     </div>
+    </div>
   );
 };
 
@@ -399,108 +512,137 @@ const ChatCard: React.FC<{
   open: boolean;
   onToggle: () => void;
   onSend: (text: string, to: 'ta' | 'dealer') => void;
+  onAskTa: () => void;
+  taHint: boolean;
   typing: 'dealer' | 'ta' | null;
   aiMissing: boolean;
   avatars: Record<Who, string | null | undefined>;
   unread: number;
-}> = ({ g, chat, open, onToggle, onSend, typing, aiMissing, avatars, unread }) => {
+  height: number;
+  onHeight: (h: number) => void;
+}> = ({ g, chat, open, onToggle, onSend, onAskTa, taHint, typing, aiMissing, avatars, unread, height, onHeight }) => {
   const [draft, setDraft] = useState('');
-  const [to, setTo] = useState<'ta' | 'dealer'>('ta');
   const [tab, setTab] = useState<'chat' | 'engine'>('chat');
   const endRef = useRef<HTMLDivElement | null>(null);
+  const dragRef = useRef<{ y: number; h: number } | null>(null);
   const n = g.profiles.names;
   useEffect(() => { if (open) endRef.current?.scrollIntoView({ block: 'end' }); }, [open, chat.length, tab, typing]);
-  const send = () => { const t = draft.trim(); if (!t) return; onSend(t, to); setDraft(''); };
+  const send = () => { const t = draft.trim(); if (!t) return; onSend(t, 'ta'); setDraft(''); };
   const last = [...chat].reverse().find(e => e.from === 'dealer' || e.from === 'ta');
+  // 收起时新消息飘一个气泡，几秒后消失（消失后不占位置、不挡点击）
+  const [bubbleId, setBubbleId] = useState<number | null>(null);
+  useEffect(() => {
+    if (open || !last || unread === 0) { setBubbleId(null); return; }
+    setBubbleId(last.id);
+    const t = window.setTimeout(() => setBubbleId(null), 4800);
+    return () => window.clearTimeout(t);
+  }, [last?.id, open]);
+
+  // 把手：上下拖改高度（屏幕的 28% ~ 85%）
+  const clampH = (h: number) => Math.round(Math.min(window.innerHeight * 0.85, Math.max(window.innerHeight * 0.28, h)));
+  const onHandleDown = (e: React.PointerEvent) => { (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId); dragRef.current = { y: e.clientY, h: height }; };
+  const onHandleMove = (e: React.PointerEvent) => { const d = dragRef.current; if (d) onHeight(clampH(d.h + (d.y - e.clientY))); };
+  const onHandleUp = () => { dragRef.current = null; };
+
+  const askBtn = (compact: boolean) => (
+    <button
+      onClick={onAskTa}
+      disabled={typing === 'ta'}
+      aria-label={`让${n.ta}接话`}
+      className={`relative shrink-0 rounded-full bg-gradient-to-br from-[#d9c6fa] to-[#f4b3c8] text-white font-bold flex items-center justify-center gap-1 active:scale-90 transition-transform shadow-[0_6px_16px_rgba(170,120,220,.35)] disabled:opacity-80 ${taHint && typing !== 'ta' ? 'mono-pulse' : ''} ${compact ? 'h-9 px-3 text-[12px]' : 'h-12 px-4 text-[13px]'}`}
+    >
+      <span className={typing === 'ta' ? 'animate-pulse' : ''}>💞</span>
+      {typing === 'ta' ? '在想…' : compact ? '接话' : `让${n.ta}接话`}
+    </button>
+  );
 
   if (!open) {
     return (
-      <div className="absolute right-3 z-[76] flex items-end gap-2 max-w-[86%]" style={{ bottom: 'max(16px, var(--safe-bottom))' }}>
-        {last && unread > 0 && (
-          <button onClick={onToggle} className="min-w-0 max-w-[230px] text-left rounded-2xl rounded-br-md bg-white/95 border border-rose-100 shadow-[0_8px_24px_rgba(172,88,108,.16)] px-3 py-2">
-            <div className={`text-[10px] font-black ${last.from === 'ta' ? 'text-violet-500' : 'text-slate-500'}`}>{last.from === 'ta' ? `💞 ${n.ta}` : `🎩 ${DEALER_NAME}`}</div>
-            <div className="text-[11px] text-slate-600 leading-4 line-clamp-2">{last.text}</div>
+      <div className="absolute right-3 left-3 z-[76] flex flex-col items-end gap-2 pointer-events-none" style={{ bottom: 'max(16px, var(--safe-bottom, 0px))' }}>
+        {last && unread > 0 && bubbleId === last.id && (
+          <button key={last.id} onClick={onToggle}
+            className="mono-bubble pointer-events-auto max-w-[80%] text-left rounded-[20px] rounded-br-md bg-[rgba(255,250,251,.92)] backdrop-blur-xl border border-white shadow-[0_10px_26px_rgba(172,88,108,.16)] px-3.5 py-2.5">
+            <div className={`text-[10px] font-black ${last.from === 'ta' ? 'text-violet-500' : 'text-rose-400'}`}>{last.from === 'ta' ? `💞 ${n.ta}` : `🎩 ${DEALER_NAME}`}</div>
+            <div className="text-[12px] text-slate-600 leading-5 line-clamp-3 whitespace-pre-wrap">{last.text}</div>
           </button>
         )}
-        <button onClick={onToggle} aria-label="打开文字卡片" className="relative w-12 h-12 shrink-0 rounded-full bg-rose-400 text-white text-[20px] shadow-[0_8px_24px_rgba(225,110,140,.4)] active:scale-90 transition-transform">
-          💬
-          {unread > 0 && <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-white text-rose-500 text-[10px] font-black flex items-center justify-center border border-rose-200">{unread > 9 ? '9+' : unread}</span>}
-        </button>
+        <div className="pointer-events-auto flex items-center gap-2">
+          {g.phase !== 'lobby' && askBtn(false)}
+          <button onClick={onToggle} aria-label="打开对话" className="relative w-12 h-12 shrink-0 rounded-full bg-gradient-to-br from-[#fb9fb6] to-[#f37c9c] text-white text-[20px] shadow-[0_8px_20px_rgba(240,110,145,.38)] active:scale-90 transition-transform">
+            💬
+            {unread > 0 && <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-white text-rose-500 text-[10px] font-black flex items-center justify-center border border-rose-200">{unread > 9 ? '9+' : unread}</span>}
+          </button>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="absolute inset-x-0 bottom-0 z-[76] px-2" style={{ paddingBottom: 'max(8px, var(--safe-bottom))' }}>
-      <div className="max-w-md mx-auto h-[62vh] rounded-[26px] bg-white/97 border border-rose-100 shadow-[0_-10px_40px_rgba(172,88,108,.2)] flex flex-col overflow-hidden">
-        <div className="px-3 pt-2.5 pb-2 flex items-center gap-2 border-b border-rose-50">
-          <div className="flex gap-1 bg-rose-50/70 rounded-full p-0.5">
+    <div className="absolute inset-x-0 bottom-0 z-[76] px-2" style={{ paddingBottom: 'max(8px, var(--safe-bottom, 0px))' }}>
+      <div className="max-w-md mx-auto rounded-[28px] bg-[rgba(255,250,251,.9)] backdrop-blur-2xl border-2 border-white/80 shadow-[0_-10px_40px_rgba(172,88,108,.18)] flex flex-col overflow-hidden" style={{ height }}>
+        <div className="pt-1.5 pb-0.5 flex justify-center cursor-ns-resize touch-none" onPointerDown={onHandleDown} onPointerMove={onHandleMove} onPointerUp={onHandleUp} onPointerCancel={onHandleUp} aria-label="拖动调整高度">
+          <span className="w-10 h-1.5 rounded-full bg-rose-200" />
+        </div>
+        <div className="px-3 pb-2 flex items-center gap-2">
+          <div className="flex gap-1 bg-white/70 rounded-full p-0.5">
             {([['chat', '对话'], ['engine', '引擎原文']] as const).map(([k, label]) => (
-              <button key={k} onClick={() => setTab(k)} className={`px-3 py-1 rounded-full text-[11px] font-bold ${tab === k ? 'bg-white text-rose-500 shadow-sm' : 'text-rose-300'}`}>{label}</button>
+              <button key={k} onClick={() => setTab(k)} className={`px-3 py-1 rounded-full text-[11px] font-bold ${tab === k ? 'bg-rose-400 text-white' : 'text-rose-300'}`}>{label}</button>
             ))}
           </div>
           <div className="ml-auto" />
-          <button onClick={onToggle} aria-label="收起" className="w-8 h-8 rounded-full bg-slate-100 text-slate-500 text-[14px] active:scale-90">˅</button>
+          <button onClick={onToggle} aria-label="收起" className="w-8 h-8 rounded-full bg-white/80 text-rose-400 text-[14px] active:scale-90">˅</button>
         </div>
 
         {aiMissing && (
-          <div className="mx-3 mt-2 rounded-xl bg-amber-50 border border-amber-200 px-2.5 py-1.5 text-[10px] leading-4 text-amber-700">
-            没读到 API 配置（App 设置里的地址或模型为空）：{DEALER_NAME}位置先显示引擎原文，{n.ta} 暂时不说话。
+          <div className="mx-3 mb-1 rounded-xl bg-[#fff4e0]/90 border border-[#f7dcae] px-2.5 py-1.5 text-[10px] leading-4 text-[#b07a28]">
+            没读到 API 配置：{n.ta} 暂时接不了话。可以在 😈 设置里填「TA 专用 API」，或检查 App 设置里的主 API。
           </div>
         )}
 
-        <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2">
+        <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2.5">
           {tab === 'engine' && g.log.map(line => (
             line.kind === 'cmd'
               ? <div key={line.id} className="text-[9px] font-mono text-slate-400 px-1">{line.text}</div>
-              : <pre key={line.id} className={`rounded-xl px-2.5 py-2 text-[11px] leading-[1.55] whitespace-pre-wrap break-words font-mono ${line.kind === 'error' ? 'bg-amber-50 text-amber-800 border border-amber-200' : 'bg-slate-50 text-slate-700 border border-slate-100'}`}>{line.text}</pre>
+              : <pre key={line.id} className={`rounded-xl px-2.5 py-2 text-[11px] leading-[1.55] whitespace-pre-wrap break-words font-mono ${line.kind === 'error' ? 'bg-amber-50/90 text-amber-800 border border-amber-200' : 'bg-white/70 text-slate-600 border border-white'}`}>{line.text}</pre>
           ))}
           {tab === 'chat' && chat.filter(e => e.from !== 'engine').map(e => {
-            if (e.from === 'system') return <div key={e.id} className="text-center text-[10px] text-amber-600 bg-amber-50/70 rounded-lg px-2 py-1 whitespace-pre-wrap">{e.text}</div>;
+            if (e.from === 'system') return <div key={e.id} className="text-center text-[10px] text-[#b07a28] bg-[#fff4e0]/80 rounded-lg px-2 py-1 whitespace-pre-wrap">{e.text}</div>;
             if (e.from === 'dealer') return (
-              <div key={e.id} className="rounded-2xl bg-slate-50 border border-slate-100 px-3 py-2">
-                <div className="text-[10px] font-black text-slate-500 mb-0.5">🎩 {DEALER_NAME}</div>
-                <div className="text-[12px] leading-5 text-slate-700 whitespace-pre-wrap break-words">{e.text}</div>
+              <div key={e.id} className="mx-3 rounded-[18px] bg-white/65 border border-white px-3 py-2">
+                <div className="text-[10px] font-black text-rose-300 mb-0.5">🎩 {DEALER_NAME}</div>
+                <div className="text-[12px] leading-5 text-slate-600 whitespace-pre-wrap break-words">{e.text}</div>
               </div>
             );
             if (e.from === 'ta') return (
               <div key={e.id} className="flex items-start gap-2 pr-6">
                 <MiniAvatar src={avatars.ta} label={n.ta} ring="ring-violet-300" />
-                <div className="rounded-2xl rounded-tl-md bg-violet-50 border border-violet-100 px-3 py-2 text-[13px] leading-6 text-slate-700 whitespace-pre-wrap break-words">{e.text}</div>
+                <div className="rounded-[20px] rounded-tl-md bg-[#f1eafd]/95 border border-white px-3 py-2 text-[13px] leading-6 text-slate-700 whitespace-pre-wrap break-words">{e.text}</div>
               </div>
             );
             return (
               <div key={e.id} className="flex justify-end pl-8">
-                <div className="rounded-2xl rounded-tr-md bg-rose-400 text-white px-3 py-2 text-[13px] leading-6 whitespace-pre-wrap break-words">
-                  {e.to === 'dealer' && <span className="block text-[9px] text-rose-100">问{DEALER_NAME}</span>}
-                  {e.text}
-                </div>
+                <div className="rounded-[20px] rounded-tr-md bg-gradient-to-br from-[#fb9fb6] to-[#f37c9c] text-white px-3 py-2 text-[13px] leading-6 whitespace-pre-wrap break-words">{e.text}</div>
               </div>
             );
           })}
-          {tab === 'chat' && typing && (
-            <div className="text-[10px] text-slate-400 px-1">{typing === 'ta' ? `💞 ${n.ta} 正在回应…` : `🎩 ${DEALER_NAME} 正在播报…`}</div>
-          )}
+          {tab === 'chat' && typing === 'ta' && <div className="text-[11px] text-violet-400 px-1">💞 {n.ta} 正在想…</div>}
           <div ref={endRef} />
         </div>
 
-        <div className="px-2.5 pt-2 pb-2.5 border-t border-rose-50">
-          <div className="flex gap-1 mb-1.5">
-            <button onClick={() => setTo('ta')} className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold ${to === 'ta' ? 'bg-violet-100 text-violet-600' : 'text-slate-400'}`}>对{n.ta}说</button>
-            <button onClick={() => setTo('dealer')} className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold ${to === 'dealer' ? 'bg-slate-200 text-slate-600' : 'text-slate-400'}`}>问{DEALER_NAME}</button>
-            <span className="ml-auto text-[9px] text-slate-300 self-center">打「飞鸟」或「404」立刻停</span>
-          </div>
+        <div className="px-2.5 pt-2 pb-2.5 border-t border-white/80 bg-white/40">
           <div className="flex gap-2 items-end">
             <textarea
               value={draft}
               onChange={e => setDraft(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
               rows={1}
-              placeholder={to === 'ta' ? '做了什么、说了什么，写给 TA…' : '问荷官规则或现在的状态…'}
-              className="flex-1 min-w-0 max-h-24 resize-none rounded-2xl bg-rose-50/60 border border-rose-100 px-3 py-2 text-[13px] leading-5 outline-none focus:border-rose-300"
+              placeholder={`对${n.ta}说点什么（不会马上回）`}
+              className="flex-1 min-w-0 max-h-24 resize-none rounded-[18px] bg-white/85 border border-rose-100 px-3 py-2 text-[13px] leading-5 outline-none focus:border-rose-300"
             />
-            <button onClick={send} className="h-9 px-4 rounded-2xl bg-rose-400 text-white text-[12px] font-bold active:scale-95 shrink-0">发送</button>
+            <button onClick={send} className="h-9 px-3.5 rounded-full bg-white border border-rose-200 text-rose-500 text-[12px] font-bold active:scale-95 shrink-0">发送</button>
+            {askBtn(true)}
           </div>
+          <div className="mt-1 text-[9px] text-rose-300 text-center">打「飞鸟」或「404」立刻停 · 点💞才会调用一次 API</div>
         </div>
       </div>
     </div>
@@ -559,6 +701,9 @@ const MonopolyGame: React.FC<{ onBack: () => void }> = ({ onBack }) => {
   const [confirmReset, setConfirmReset] = useState(false);
   const [markPick, setMarkPick] = useState('');
   const [personaDraft, setPersonaDraft] = useState('');
+  const [taHint, setTaHint] = useState(false);
+  const [taApi, setTaApi] = useState<TaApiSetting>(() => loadTaApi());
+  const [sheetH, setSheetH] = useState(() => Math.round((typeof window !== 'undefined' ? window.innerHeight : 800) * 0.46));
 
   const gameRef = useRef<GameState>(game);
   const chatRef = useRef<ChatEntry[]>(chat);
@@ -613,48 +758,33 @@ const MonopolyGame: React.FC<{ onBack: () => void }> = ({ onBack }) => {
     if (next.phase === 'over') mirrorSystem(`这局结束了：${nm.user} ${next.players.user.coins} 币，${nm.ta} ${next.players.ta.coins} 币。`);
   }
 
-  // 荷官播报（可选）→ TA 回应（可选）→ 执行 TA 的标签
-  const runLines = (engineEntryId: number | null, opts: { dealer: boolean; ta: boolean }) => {
+  // TA 接话：只有点「💞 让TA接话」才调用一次 API，TA 会看到上次回复之后发生的所有事
+  const askTa = () => {
+    if (typing) return;
+    setTaHint(false);
     enqueue(async () => {
-      const historyExcept = () => chatRef.current.filter(e => e.id !== engineEntryId);
-      const engineText = engineEntryId ? chatRef.current.find(e => e.id === engineEntryId)?.text ?? '' : '';
-
-      if (opts.dealer) {
-        setTyping('dealer');
-        const g = gameRef.current;
-        const reply = await callGameAI({
-          api: apiConfig, override: DEALER_API, label: DEALER_NAME, temperature: AI_TEMPERATURE.dealer,
-          system: buildDealerSystem(g), messages: buildDealerMessages(g, historyExcept(), engineText),
-        });
-        setTyping(null);
-        if (reply === null) {
-          setAiMissing(true);
-          if (engineText) pushChat('dealer', engineText);
-        } else if (reply) {
-          setAiMissing(false);
-          pushChat('dealer', reply);
-          if (CHAT_MIRROR.dealer) mirrorSystem(`${DEALER_NAME}：${reply}`);
-        }
+      setTyping('ta');
+      const g = gameRef.current;
+      const own = taApiFilled(taApi);
+      const reply = await callGameAI({
+        api: own ? taApi : apiConfig,
+        override: own ? undefined : { model: TA_MODEL },
+        label: g.profiles.names.ta,
+        temperature: AI_TEMPERATURE.ta,
+        system: buildTaSystem(g),
+        messages: buildTaMessages(g, chatRef.current, ''),
+        meta: { appName: '与昼', charId: charId || undefined, charName: g.profiles.names.ta, purpose: '大富翁 · TA接话' },
+      });
+      setTyping(null);
+      if (reply === null) { setAiMissing(true); return; }
+      setAiMissing(false);
+      const parsed = parseTaActions(gameRef.current, reply);
+      if (parsed.text) {
+        pushChat('ta', parsed.text);
+        if (CHAT_MIRROR.dialogue) mirror('assistant', parsed.text);
       }
-
-      if (opts.ta) {
-        setTyping('ta');
-        const g = gameRef.current;
-        const reply = await callGameAI({
-          api: apiConfig, override: { model: TA_MODEL }, label: g.profiles.names.ta, temperature: AI_TEMPERATURE.ta,
-          system: buildTaSystem(g), messages: buildTaMessages(g, chatRef.current, ''),
-        });
-        setTyping(null);
-        if (reply === null) { setAiMissing(true); return; }
-        setAiMissing(false);
-        const parsed = parseTaActions(gameRef.current, reply);
-        if (parsed.text) {
-          pushChat('ta', parsed.text);
-          if (CHAT_MIRROR.dialogue) mirror('assistant', parsed.text);
-        }
-        if (parsed.rejected.length) pushChat('system', `引擎没有执行 ${g.profiles.names.ta} 的标签：\n${parsed.rejected.join('\n')}`);
-        parsed.commands.forEach(cmd => execCmd(cmd, 'ta', { fromTA: true }));
-      }
+      if (parsed.rejected.length) pushChat('system', `引擎没有执行 ${g.profiles.names.ta} 的标签：\n${parsed.rejected.join('\n')}`);
+      parsed.commands.forEach(cmd => execCmd(cmd, 'ta', { fromTA: true }));
     });
   };
 
@@ -670,8 +800,18 @@ const MonopolyGame: React.FC<{ onBack: () => void }> = ({ onBack }) => {
     if (errors.length) pushChat('system', errors.join('\n'));
     const verb = cmd.trim().split(/\s+/)[0];
     if (engineText && !['board', 'status'].includes(verb)) {
-      const entry = pushChat('engine', engineText);
-      if (!opts.quiet) runLines(entry.id, { dealer: true, ta: !opts.fromTA });
+      pushChat('engine', engineText);
+      if (!opts.quiet) {
+        const say = dealerText(fresh.filter(l => l.kind === 'engine').map(l => l.text));
+        if (say) {
+          pushChat('dealer', say);
+          if (CHAT_MIRROR.dealer) mirrorSystem(`${DEALER_NAME}：${say}`);
+        }
+      }
+      if (!opts.fromTA) {
+        const key = taNudgeKey(next);
+        setTaHint(key === 'taActs' || (key === 'decision' && (next.pendingDuel || next.pendingToll?.who === 'ta')) || key === 'over');
+      }
     }
     return next;
   }
@@ -684,8 +824,7 @@ const MonopolyGame: React.FC<{ onBack: () => void }> = ({ onBack }) => {
     }
     pushChat('user', text, { to });
     if (to === 'ta' && CHAT_MIRROR.dialogue) mirror('user', text);
-    if (to === 'dealer') runLines(null, { dealer: true, ta: false });
-    else runLines(null, { dealer: false, ta: true });
+    // 不自动回：想看 TA 反应时点「💞 让TA接话」
   };
 
   const handleRoll = () => {
@@ -709,8 +848,11 @@ const MonopolyGame: React.FC<{ onBack: () => void }> = ({ onBack }) => {
     chatRef.current = [];
     setChat([]);
     if (CHAT_MIRROR.milestones) mirrorSystem(`${profiles.names.user}和${profiles.names.ta}开了一局大富翁。`);
-    const entry = pushChat('engine', g.log.filter(l => l.kind === 'engine').map(l => l.text).join('\n'));
-    runLines(entry.id, { dealer: true, ta: true });
+    const openTexts = g.log.filter(l => l.kind === 'engine').map(l => l.text);
+    pushChat('engine', openTexts.join('\n'));
+    const say = dealerText(openTexts);
+    if (say) pushChat('dealer', say);
+    setTaHint(true);
   };
   const backToLobby = () => {
     const g = gameRef.current;
@@ -718,8 +860,10 @@ const MonopolyGame: React.FC<{ onBack: () => void }> = ({ onBack }) => {
     commitGame(createLobby(settings, profiles));
     setConfirmReset(false);
   };
-  const handleSaveSettings = (s: MonopolySettings, so: SexOverride) => {
+  const handleSaveSettings = (s: MonopolySettings, so: SexOverride, api: TaApiSetting) => {
     setSettings(s);
+    setTaApi(api);
+    saveTaApi(api);
     setSexOverride(so);
     try { localStorage.setItem(sexOverrideKey(charId), JSON.stringify(so)); } catch { /* ignore */ }
     const nextProfiles: Profiles = { ...profiles, sexes: { user: so.user ?? detected.user.sex, ta: so.ta ?? detected.ta.sex } };
@@ -746,35 +890,40 @@ const MonopolyGame: React.FC<{ onBack: () => void }> = ({ onBack }) => {
 
   return (
     <div className="absolute inset-0 z-[70] bg-[#fff7f5] text-slate-800 overflow-hidden">
+      <style>{GAME_CSS}</style>
       <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_15%_10%,rgba(255,190,205,.42),transparent_28%),radial-gradient(circle_at_90%_25%,rgba(255,220,224,.5),transparent_30%),linear-gradient(180deg,#fffafa_0%,#fff4f1_100%)]" />
-      <div className="relative h-full overflow-y-auto overscroll-none" style={{ paddingTop: 'var(--safe-top)' }}>
+      <div className="relative h-full overflow-y-auto overscroll-none" style={{ paddingTop: 'var(--safe-top, 0px)' }}>
         <header className="px-3 pt-2 pb-1">
           <div className="h-12 grid grid-cols-[auto_1fr_auto] items-center gap-2">
             <button onClick={onBack} className="w-9 h-9 shrink-0 rounded-full bg-white/80 shadow-sm text-rose-400 text-xl active:scale-90 transition-transform">‹</button>
             <div className="text-center min-w-0">
-              <div className="font-black tracking-[.18em] text-rose-500 text-base">大富翁</div>
-              <div className="text-[8px] tracking-[.12em] text-rose-300 mt-0.5 truncate">
+              <div className="flex items-center justify-center gap-1.5 text-rose-400">
+                <SparkLines className="w-3.5 h-3.5" />
+                <span className="font-black tracking-[.3em] pl-[.3em] text-[#e2577f] text-[19px]">大富翁</span>
+                <SparkLines flip className="w-3.5 h-3.5" />
+              </div>
+              <div className="text-[10px] text-rose-300 mt-0.5 truncate">
                 {inGame ? `回合 ${g.turnCount}/${g.totalRounds}` : '未开局'} · {shown.intensity} · 局长{inGame ? g.totalRounds : shown.rounds}
               </div>
             </div>
-            <button onClick={() => setShowSettings(true)} aria-label="功能型选项" className="w-9 h-9 rounded-full bg-white/80 shadow-sm text-[18px] flex items-center justify-center active:scale-90 transition-transform">😄</button>
+            <button onClick={() => setShowSettings(true)} aria-label="功能型选项" className="w-10 h-10 rounded-full bg-gradient-to-br from-[#fde4ea] to-[#fbd0dc] ring-2 ring-white shadow-[0_6px_14px_rgba(240,110,145,.22)] text-[20px] flex items-center justify-center active:scale-90 transition-transform">😈</button>
           </div>
           <div className="mt-1.5 flex justify-center gap-2">
             <button onClick={() => execCmd('bird 我', 'user')} disabled={!(g.phase === 'playing' || g.phase === 'lock')} aria-label="飞鸟：立刻停止游戏"
-              className="h-8 px-3.5 shrink-0 rounded-full bg-sky-50 border border-sky-200 text-sky-600 text-[11px] font-black shadow-sm active:scale-90 transition-transform disabled:opacity-40">🕊️ 飞鸟</button>
+              className="h-8 px-3.5 shrink-0 rounded-full bg-[#eaf3fc] border border-[#c9def4] text-[#5b8fc7] text-[11px] font-black shadow-sm active:scale-90 transition-transform disabled:opacity-40">🕊️ 飞鸟</button>
             <button onClick={() => firstSkippable && execCmd(OWN_KINDS.includes(firstSkippable.kind) ? `skip ${n[firstSkippable.owner]}` : `skip #${firstSkippable.id}`, firstSkippable.owner)}
               disabled={g.phase !== 'playing' || !firstSkippable} aria-label="跳过当前的题"
               className="h-8 px-3.5 shrink-0 rounded-full bg-white/85 border border-rose-100 text-rose-400 text-[11px] font-black shadow-sm active:scale-90 transition-transform disabled:opacity-40">⏭️ 跳过</button>
           </div>
         </header>
 
-        <main className="px-4 pt-2 pb-28 max-w-md mx-auto">
+        <main className="px-4 pt-2 max-w-md mx-auto" style={{ paddingBottom: chatOpen ? sheetH + 24 : 112 }}>
           <IssuesCard issues={CONTENT_ISSUES} />
 
           {g.phase === 'lobby' && (
             <section className="mt-6 rounded-[28px] bg-white/80 border border-white shadow-[0_12px_40px_rgba(172,88,108,.09)] p-5">
               <div className="text-[13px] font-black text-rose-500">准备开局</div>
-              <div className="mt-1 text-[11px] text-slate-500 leading-5">{profiles.names.user} 和 {profiles.names.ta} 对局；{DEALER_NAME}只负责播报引擎。</div>
+              <div className="mt-1 text-[11px] text-slate-500 leading-5">{profiles.names.user} 和 {profiles.names.ta} 的一局；{DEALER_NAME}会自动播报每一步。</div>
               <div className="mt-3 grid grid-cols-2 gap-2">
                 {(['user', 'ta'] as const).map(w => (
                   <div key={w} className="rounded-2xl bg-rose-50/60 border border-rose-100 px-3 py-2">
@@ -790,8 +939,8 @@ const MonopolyGame: React.FC<{ onBack: () => void }> = ({ onBack }) => {
               {OPENING_REMINDER && <div className="mt-3 rounded-2xl bg-amber-50/70 border border-amber-100 p-3 text-[11px] leading-5 text-amber-700 font-semibold">{OPENING_REMINDER}</div>}
               <div className="mt-3"><PlayerIdTable profiles={profiles} roles={settings.roles} /></div>
               <div className="mt-4 flex gap-2">
-                <button onClick={() => setShowSettings(true)} className="flex-1 h-11 rounded-2xl bg-white border border-rose-100 text-rose-400 font-bold active:scale-95 transition-transform">改设置</button>
-                <button onClick={startGame} className="flex-[1.4] h-11 rounded-2xl bg-rose-400 text-white font-bold active:scale-95 transition-transform shadow-[0_8px_24px_rgba(225,110,140,.3)]">开局</button>
+                <button onClick={() => setShowSettings(true)} className="flex-1 h-11 rounded-full bg-white border border-rose-100 text-rose-400 font-bold active:scale-95 transition-transform">改设置</button>
+                <button onClick={startGame} className="flex-[1.4] h-11 rounded-full bg-gradient-to-br from-[#fb9fb6] to-[#f37c9c] text-white font-bold active:scale-95 transition-transform shadow-[0_8px_20px_rgba(240,110,145,.32)]">开局</button>
               </div>
             </section>
           )}
@@ -807,7 +956,7 @@ const MonopolyGame: React.FC<{ onBack: () => void }> = ({ onBack }) => {
                 <PlayerPanel g={g} who="ta" avatar={avatars.ta} active={g.turn === 'ta'} exec={execCmd} />
               </div>
 
-              <section className="mt-3 rounded-[26px] bg-white/70 border border-white/90 shadow-[0_12px_40px_rgba(172,88,108,.09)] p-2.5">
+              <section className="mt-3 rounded-[30px] bg-white/75 border-2 border-white shadow-[0_14px_40px_rgba(172,88,108,.10)] p-2.5">
                 <div className="grid grid-cols-6 grid-rows-6 gap-1 aspect-square">
                   {g.board.map((kind, i) => {
                     const [row, col] = ringPos(i);
@@ -817,8 +966,8 @@ const MonopolyGame: React.FC<{ onBack: () => void }> = ({ onBack }) => {
                     const landed = g.lastMover !== null && g.players[g.lastMover].pos === i && g.turnCount > 0;
                     return (
                       <div key={i} style={{ gridRow: row, gridColumn: col }}
-                        className={`relative rounded-lg border flex flex-col items-center justify-center ${owner === 'user' ? 'bg-rose-100 border-rose-300' : owner === 'ta' ? 'bg-violet-100 border-violet-300' : 'bg-white/90 border-rose-50'} ${landed ? 'ring-2 ring-amber-300' : ''}`}>
-                        <span className="absolute top-0.5 left-1 text-[7px] text-slate-400 font-mono">{pad2(i)}</span>
+                        className={`relative rounded-[12px] border flex flex-col items-center justify-center ${owner === 'user' ? 'bg-[#fde2e8] border-[#f7bccb]' : owner === 'ta' ? 'bg-[#ece3fb] border-[#d3c1f3]' : 'bg-[#fffaf6] border-[#f6e4dc]'} ${landed ? 'ring-2 ring-[#f9c86b] ring-offset-1 ring-offset-white' : ''}`}>
+                        <span className="absolute top-0.5 left-1 text-[7px] text-rose-200">{i}</span>
                         <span className="text-[16px] leading-none">{CELL_ICON[kind]}</span>
                         {(hereU || hereT) && (
                           <span className="absolute -bottom-1 flex -space-x-1">
@@ -831,14 +980,14 @@ const MonopolyGame: React.FC<{ onBack: () => void }> = ({ onBack }) => {
                   })}
                   <div style={{ gridRow: '2 / span 4', gridColumn: '2 / span 4' }} className="flex flex-col items-center justify-center text-center px-1">
                     <button onClick={handleRoll} disabled={!canRoll} aria-label="掷骰子"
-                      className={`w-[70px] h-[70px] rounded-3xl bg-white shadow-[0_8px_24px_rgba(172,88,108,.18)] border-2 flex items-center justify-center text-[42px] leading-none transition-transform ${rolling ? 'animate-bounce border-rose-200' : 'border-rose-100 active:scale-90'} ${canRoll ? '' : 'opacity-50'}`}>
+                      className={`w-[72px] h-[72px] rounded-[24px] bg-gradient-to-br from-white to-[#fdeef2] shadow-[0_10px_24px_rgba(240,110,145,.22),inset_0_-3px_0_rgba(247,184,198,.45)] border-2 flex items-center justify-center text-[44px] leading-none text-[#e2577f] transition-transform ${rolling ? 'animate-bounce border-rose-200' : 'border-white active:scale-90'} ${canRoll ? '' : 'opacity-50'}`}>
                       {DICE_FACES[diceFace]}
                     </button>
                     <div className="mt-2 text-[11px] font-bold text-rose-400 leading-4">{g.phase === 'lock' ? '确认锁定后开始' : status}</div>
                     {g.phase === 'playing' && g.cards.length > 0 && <div className="text-[9px] text-slate-400 mt-0.5">掷下一轮 = 上一题玩完了</div>}
                     <div className="mt-2 flex gap-2 text-[8px] text-slate-400">
-                      <span className="flex items-center gap-0.5"><span className="w-2 h-2 rounded-sm bg-rose-200 border border-rose-300" />{n.user}</span>
-                      <span className="flex items-center gap-0.5"><span className="w-2 h-2 rounded-sm bg-violet-200 border border-violet-300" />{n.ta}</span>
+                      <span className="flex items-center gap-0.5"><span className="w-2 h-2 rounded-full bg-[#fde2e8] border border-[#f7bccb]" />{n.user}的地盘</span>
+                      <span className="flex items-center gap-0.5"><span className="w-2 h-2 rounded-full bg-[#ece3fb] border border-[#d3c1f3]" />{n.ta}的地盘</span>
                     </div>
                   </div>
                 </div>
@@ -948,28 +1097,28 @@ const MonopolyGame: React.FC<{ onBack: () => void }> = ({ onBack }) => {
         </main>
       </div>
 
-      <ChatCard g={g} chat={chat} open={chatOpen} onToggle={() => { setChatOpen(v => !v); setUnread(0); }} onSend={handleSend} typing={typing} aiMissing={aiMissing} avatars={avatars} unread={unread} />
+      <ChatCard g={g} chat={chat} open={chatOpen} onToggle={() => { setChatOpen(v => !v); setUnread(0); }} onSend={handleSend} onAskTa={askTa} taHint={taHint && inGame} typing={typing} aiMissing={aiMissing} avatars={avatars} unread={unread} height={sheetH} onHeight={setSheetH} />
 
       {g.phase === 'lock' && (
-        <div className="absolute inset-0 z-[75] bg-black/30 flex items-end sm:items-center justify-center p-4">
-          <div className="w-full max-w-md rounded-[28px] bg-white p-5 shadow-2xl">
-            <div className="text-[14px] font-black text-rose-500">🔒 开局锁定 · 请确认</div>
+        <div className="absolute inset-0 z-[79] bg-[#fbe3ea]/55 backdrop-blur-sm flex items-end sm:items-center justify-center p-4">
+          <div className="w-full max-w-md rounded-[30px] bg-white/95 border-2 border-white p-5 shadow-[0_20px_50px_rgba(200,100,130,.25)]">
+            <div className="flex items-center gap-1.5 text-rose-400"><SparkLines className="w-3.5 h-3.5" /><span className="text-[15px] font-black text-[#e2577f]">开局前确认一下</span><SparkLines flip className="w-3.5 h-3.5" /></div>
             <div className="mt-1 text-[11px] text-slate-500 leading-5">引擎实际生效的参数如下。和你在设置里选的不一样，就是参数没填对，重开。</div>
-            <pre className="mt-3 max-h-[40vh] overflow-auto rounded-2xl bg-slate-800 text-rose-100 text-[10px] leading-5 p-3 whitespace-pre-wrap break-words font-mono">{g.lockLine}</pre>
+            <div className="mt-3 max-h-[40vh] overflow-auto rounded-[20px] bg-[#fff7f3] border border-[#f6e1d8] text-[#6b5357] text-[12px] leading-6 p-3.5 whitespace-pre-wrap break-words">{dealerText([g.lockLine])}</div>
             <div className={`mt-2 text-[11px] font-bold ${settingsChanged ? 'text-amber-600' : 'text-emerald-600'}`}>{settingsChanged ? '❌ 和当前设置不一致，建议重开' : '✅ 和当前设置一致'}</div>
             <div className="mt-4 flex gap-2">
-              <button onClick={backToLobby} className="flex-1 h-11 rounded-2xl bg-slate-100 text-slate-500 font-bold active:scale-95">不符，重开</button>
-              <button onClick={() => execCmd('confirm', 'user', { quiet: true })} disabled={settingsChanged} className="flex-[1.4] h-11 rounded-2xl bg-rose-400 text-white font-bold active:scale-95 disabled:opacity-40">确认，开始</button>
+              <button onClick={backToLobby} className="flex-1 h-11 rounded-full bg-white border border-rose-100 text-rose-400 font-bold active:scale-95">不符，重开</button>
+              <button onClick={() => execCmd('confirm', 'user', { quiet: true })} disabled={settingsChanged} className="flex-[1.4] h-11 rounded-full bg-gradient-to-br from-[#fb9fb6] to-[#f37c9c] text-white font-bold shadow-[0_6px_14px_rgba(240,110,145,.3)] active:scale-95 disabled:opacity-40">确认，开始</button>
             </div>
           </div>
         </div>
       )}
 
       {g.phase === 'stopped' && (
-        <div className="absolute inset-0 z-[78] bg-sky-900/40 backdrop-blur-sm flex items-center justify-center p-6">
-          <div className="w-full max-w-xs rounded-[28px] bg-white p-6 text-center shadow-2xl">
+        <div className="absolute inset-0 z-[79] bg-[#cfe2f5]/60 backdrop-blur-md flex items-center justify-center p-6">
+          <div className="w-full max-w-xs rounded-[30px] bg-white/95 border-2 border-white p-6 text-center shadow-[0_20px_50px_rgba(90,130,180,.25)]">
             <div className="text-[44px] leading-none">🕊️</div>
-            <div className="mt-3 text-[16px] font-black text-sky-700">飞鸟 · 游戏已停</div>
+            <div className="mt-3 text-[16px] font-black text-[#5b8fc7]">游戏停下了</div>
             <div className="mt-1 text-[11px] text-slate-400">{g.stoppedBy ? `${n[g.stoppedBy]} 按下了` : ''}</div>
             <div className="mt-3 text-[12px] leading-5 text-slate-600">{BIRD_TEXT}</div>
             <div className="mt-5 flex flex-col gap-2">
@@ -980,7 +1129,7 @@ const MonopolyGame: React.FC<{ onBack: () => void }> = ({ onBack }) => {
         </div>
       )}
 
-      {showSettings && <GameSettingsPage initial={settings} profiles={profiles} detected={detected} initialSexOverride={sexOverride} onBack={() => setShowSettings(false)} onSave={handleSaveSettings} />}
+      {showSettings && <GameSettingsPage initialTaApi={taApi} initial={settings} profiles={profiles} detected={detected} initialSexOverride={sexOverride} onBack={() => setShowSettings(false)} onSave={handleSaveSettings} />}
     </div>
   );
 };

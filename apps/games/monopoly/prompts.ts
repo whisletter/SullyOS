@@ -135,7 +135,8 @@ export function taNudgeKey(g: GameState): keyof typeof TA_NUDGE {
 
 export function buildTaMessages(g: GameState, chat: ChatEntry[], engineText: string): GameAIMessage[] {
   const n = g.profiles.names;
-  const hist = chat.slice(-24).filter(e => e.from !== 'system' && !(e.from === 'user' && e.to === 'dealer'));
+  // 荷官现在只是把引擎原文整理后自动出字，和【引擎】重复，不再发给 TA（省 token）
+  const hist = chat.filter(e => e.from !== 'system' && e.from !== 'dealer' && !(e.from === 'user' && e.to === 'dealer')).slice(-24);
   const msgs: GameAIMessage[] = hist.map(e => {
     if (e.from === 'ta') return { role: 'assistant', content: e.text };
     if (e.from === 'user') return { role: 'user', content: `${n.user}：${e.text}` };
