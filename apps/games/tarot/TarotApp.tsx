@@ -6,7 +6,6 @@ import { useOS } from '../../../context/OSContext';
 // 房间图和代码放在同一个文件夹，由 Vite 打包。想换背景，直接用同名图片覆盖这两张即可。
 import roomEmptyUrl from './room-empty.jpg';
 import roomOccupiedUrl from './room-occupied.jpg';
-
 /**
  * 塔罗 — 最小可玩版。
  *
