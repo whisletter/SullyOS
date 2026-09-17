@@ -2,6 +2,7 @@ import React, { useMemo, useState, useEffect, useCallback, useLayoutEffect, useR
 import { TAROT_DECK, TarotCard, SUIT_INFO } from './cards';
 import { getMeaning, CardMeaning } from './meanings';
 import { CardFace, CardBack, CARD_RATIO } from './CardFace';
+import { SPREADS, SpreadId, getSpread, fillWho } from './spreads';
 import { useOS } from '../../../context/OSContext';
 // 房间图和代码放在同一个文件夹，由 Vite 打包。想换背景，直接用同名图片覆盖即可。
 // 平板（屏幕偏宽）用 2:3 的这两张：
@@ -17,8 +18,12 @@ import roomOccupiedPhoneUrl from './room-occupied-phone.webp';
  * 这一版做的：房间场景 + 煤油灯调亮调暗 + 首次进入的金光提示 +
  * 塔罗一副（78 张）+ 单张牌阵 + 洗牌扇形抽牌翻牌 + 牌意之书。
  *
- * 留了接口没做的：雷诺曼 / 神谕两副牌（托盘已经画好位置）、三张牌阵、
- * 牌组工坊（墙上的画）、称号（天球仪）、呼叫 TA（电话）。
+ * 点电话：TA 入座 / 离席（切换房间图）。
+ *
+ * 牌阵：单张 / 三张 / 六张，定义在 spreads.ts。
+ *
+ * 留了接口没做的：雷诺曼 / 神谕两副牌（托盘已经画好位置）、
+ * 牌组工坊（墙上的画）、称号（天球仪）、真心话玩法。
  * 点这些位置现在会提示「还没开」，不会报错。
  *
  * 手机 / 平板按屏幕比例自动选图，两套图各有一套点击热区（见 SCENES）。
@@ -37,7 +42,7 @@ export interface TarotAppProps {
   characterAvatar?: string;
 }
 
-type Phase = 'room' | 'shuffle' | 'fan' | 'result' | 'book';
+type Phase = 'room' | 'spread' | 'shuffle' | 'fan' | 'result' | 'book';
 
 interface DrawnCard {
   card: TarotCard;
@@ -75,7 +80,7 @@ const HOTSPOTS_TABLET: Hotspot[] = [
   { key: 'book', label: '牌意之书', left: '72%', top: '70%', width: '28%', height: '19%', ready: true },
   { key: 'lamp', label: '煤油灯', left: '0%', top: '36%', width: '11%', height: '22%', ready: true },
   { key: 'orrery', label: '称号', left: '76%', top: '47%', width: '13%', height: '14%', ready: false },
-  { key: 'phone', label: '呼叫', left: '87%', top: '54%', width: '13%', height: '14%', ready: false },
+  { key: 'phone', label: '电话', left: '87%', top: '54%', width: '13%', height: '14%', ready: true },
   { key: 'painting', label: '牌组工坊', left: '51%', top: '2%', width: '26%', height: '24%', ready: false },
 ];
 
@@ -85,7 +90,7 @@ const HOTSPOTS_PHONE_EMPTY: Hotspot[] = [
   { key: 'book', label: '牌意之书', left: '73%', top: '65%', width: '27%', height: '17%', ready: true },
   { key: 'lamp', label: '煤油灯', left: '0%', top: '42%', width: '12%', height: '16%', ready: true },
   { key: 'orrery', label: '称号', left: '76%', top: '51%', width: '12%', height: '11%', ready: false },
-  { key: 'phone', label: '呼叫', left: '88%', top: '53%', width: '12%', height: '12%', ready: false },
+  { key: 'phone', label: '电话', left: '88%', top: '53%', width: '12%', height: '12%', ready: true },
   { key: 'painting', label: '牌组工坊', left: '51%', top: '18%', width: '26%', height: '18%', ready: false },
 ];
 
@@ -95,11 +100,9 @@ const HOTSPOTS_PHONE_OCCUPIED: Hotspot[] = [
   { key: 'book', label: '牌意之书', left: '73%', top: '63%', width: '27%', height: '16%', ready: true },
   { key: 'lamp', label: '煤油灯', left: '0%', top: '40%', width: '12%', height: '17%', ready: true },
   { key: 'orrery', label: '称号', left: '76%', top: '49%', width: '12%', height: '11%', ready: false },
-  { key: 'phone', label: '呼叫', left: '88%', top: '52%', width: '12%', height: '11%', ready: false },
+  { key: 'phone', label: '电话', left: '88%', top: '52%', width: '12%', height: '11%', ready: true },
   { key: 'painting', label: '牌组工坊', left: '52%', top: '16%', width: '25%', height: '17%', ready: false },
 ];
-
-interface Rect { left: string; top: string; width: string; height: string }
 
 /** 一张房间图的全部配置 */
 interface Scene {
@@ -107,8 +110,6 @@ interface Scene {
   /** 图片高 / 宽，图片加载后会用真实尺寸覆盖，换图不用改这里 */
   ratio: number;
   hotspots: Hotspot[];
-  /** 「请 TA 入座」的点击区域 */
-  seat: Rect;
   /** 煤油灯暖光的中心位置 */
   glowAt: string;
 }
@@ -119,14 +120,12 @@ const SCENES: Record<'phone' | 'tablet', { empty: Scene; occupied: Scene }> = {
       src: roomEmptyPhoneUrl,
       ratio: 2269 / 1080,
       hotspots: HOTSPOTS_PHONE_EMPTY,
-      seat: { left: '23%', top: '40%', width: '50%', height: '17%' },
       glowAt: '5% 51%',
     },
     occupied: {
       src: roomOccupiedPhoneUrl,
       ratio: 2048 / 930,
       hotspots: HOTSPOTS_PHONE_OCCUPIED,
-      seat: { left: '18%', top: '34%', width: '56%', height: '15%' },
       glowAt: '5% 49%',
     },
   },
@@ -135,14 +134,12 @@ const SCENES: Record<'phone' | 'tablet', { empty: Scene; occupied: Scene }> = {
       src: roomEmptyUrl,
       ratio: 1.5,
       hotspots: HOTSPOTS_TABLET,
-      seat: { left: '23%', top: '31%', width: '49%', height: '27%' },
       glowAt: '6% 46%',
     },
     occupied: {
       src: roomOccupiedUrl,
       ratio: 1.5,
       hotspots: HOTSPOTS_TABLET,
-      seat: { left: '23%', top: '31%', width: '49%', height: '27%' },
       glowAt: '6% 46%',
     },
   },
@@ -218,14 +215,21 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
   const [ratios, setRatios] = useState<Record<string, number>>({});
 
   const [phase, setPhase] = useState<Phase>('room');
+  const phaseRef = useRef<Phase>('room');
+  phaseRef.current = phase;
   const [lampBright, setLampBright] = useState(false);
   const [taSeated, setTaSeated] = useState(false);
   const [hintPlaying, setHintPlaying] = useState(true);
   const [toast, setToast] = useState<string | null>(null);
 
   const [deckOrder, setDeckOrder] = useState<TarotCard[]>(() => shuffle(TAROT_DECK));
-  const [drawn, setDrawn] = useState<DrawnCard | null>(null);
-  const [flipped, setFlipped] = useState(false);
+  const [spreadId, setSpreadId] = useState<SpreadId>('single');
+  /** 扇面里已经点中的牌（deckOrder 的下标），按点选顺序 */
+  const [picked, setPicked] = useState<number[]>([]);
+  const [drawn, setDrawn] = useState<DrawnCard[]>([]);
+  const [flipped, setFlipped] = useState<boolean[]>([]);
+  /** 结果页当前在看哪一张 */
+  const [focus, setFocus] = useState<number | null>(null);
   const [bookFilter, setBookFilter] = useState<'all' | 'major' | 'minor'>('all');
 
   // 牌意改写
@@ -285,31 +289,60 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  const startDraw = useCallback(() => {
+  const spread = getSpread(spreadId);
+
+  const startDraw = useCallback((id: SpreadId) => {
+    setSpreadId(id);
     setDeckOrder(shuffle(TAROT_DECK));
-    setDrawn(null);
-    setFlipped(false);
+    setPicked([]);
+    setDrawn([]);
+    setFlipped([]);
+    setFocus(null);
     setPhase('shuffle');
     window.setTimeout(() => setPhase('fan'), 1100);
   }, []);
 
   const pickCard = useCallback((index: number) => {
-    const card = deckOrder[index];
-    if (!card) return;
-    setDrawn({ card, reversed: Math.random() < 0.5 });
-    setFlipped(false);
-    setPhase('result');
-  }, [deckOrder]);
+    const need = getSpread(spreadId).positions.length;
+    if (picked.includes(index) || picked.length >= need) return;
+    const next = [...picked, index];
+    setPicked(next);
+    if (next.length === need) {
+      const cards = next.map((i) => ({ card: deckOrder[i], reversed: Math.random() < 0.5 }));
+      // 让最后一张被点中的动效播完再进结果页
+      window.setTimeout(() => {
+        if (phaseRef.current !== 'fan') return; // 中途点了「算了」
+        setDrawn(cards);
+        setFlipped(cards.map(() => false));
+        setFocus(null);
+        setPhase('result');
+      }, 450);
+    }
+  }, [picked, spreadId, deckOrder]);
+
+  const tapResultCard = useCallback((i: number) => {
+    if (!flipped[i]) {
+      setFlipped((prev) => prev.map((v, j) => (j === i ? true : v)));
+    }
+    setFocus(i);
+  }, [flipped]);
+
+  const flipAll = useCallback(() => {
+    setFlipped((prev) => prev.map(() => true));
+    setFocus((f) => (f === null ? 0 : f));
+  }, []);
 
   const handleHotspot = useCallback((spot: Hotspot) => {
     if (!spot.ready) {
       setToast(`${spot.label}还没开，下一版见`);
       return;
     }
-    if (spot.key === 'tarot') startDraw();
+    if (spot.key === 'tarot') setPhase('spread');
     else if (spot.key === 'book') setPhase('book');
     else if (spot.key === 'lamp') setLampBright((v) => !v);
-  }, [startDraw]);
+    // 电话：拨过去 TA 就坐到对面，再点一次 TA 离席
+    else if (spot.key === 'phone') setTaSeated((v) => !v);
+  }, []);
 
   const variant: 'phone' | 'tablet' =
     frame.w > 0 && frame.h / frame.w >= PHONE_ASPECT ? 'phone' : 'tablet';
@@ -386,23 +419,11 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
               animationDelay: hintPlaying ? `${i * 0.45}s` : undefined,
             }}
             onClick={() => handleHotspot(spot)}
-            aria-label={spot.label}
+            aria-label={spot.key === 'phone' ? (taSeated ? `请${who}离席` : `呼叫${who}`) : spot.label}
           >
             <span className="tarot-hotspot-label">{spot.label}</span>
           </button>
         ))}
-
-        {/* 椅子：TA 在不在座 */}
-        <button
-          className="tarot-seat"
-          style={scene.seat}
-          onClick={() => setTaSeated((v) => !v)}
-          aria-label={taSeated ? `请${who}先离席` : `请${who}入座`}
-        >
-          <span className="tarot-seat-label">
-            {taSeated ? `${who} 坐在对面` : `请 ${who} 入座`}
-          </span>
-        </button>
       </div>
 
       {/* 顶部：猫爪返回。灯的明暗只靠点桌上的煤油灯 */}
@@ -426,24 +447,69 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
         </div>
       )}
 
+      {/* ── 选牌阵 ───────────────────────────── */}
+      {phase === 'spread' && (
+        <div style={styles.overlay}>
+          <p style={styles.overlayHint}>选一个牌阵</p>
+          <div className="tarot-spread-list">
+            {SPREADS.map((sp) => (
+              <button key={sp.id} className="tarot-spread-item" onClick={() => startDraw(sp.id)}>
+                <span
+                  className="tarot-spread-icon"
+                  style={{ gridTemplateColumns: `repeat(${sp.columns}, 1fr)` }}
+                  aria-hidden="true"
+                >
+                  {sp.positions.map((_, k) => <i key={k} />)}
+                </span>
+                <span className="tarot-spread-text">
+                  <span className="tarot-spread-name">
+                    {sp.name}
+                    <em>{sp.positions.length} 张</em>
+                  </span>
+                  <span className="tarot-spread-desc">{fillWho(sp.desc, who)}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+          <button className="tarot-chip tarot-chip-ghost" onClick={() => setPhase('room')}>
+            回到桌前
+          </button>
+        </div>
+      )}
+
       {/* ── 扇形抽牌 ─────────────────────────── */}
       {phase === 'fan' && (
         <div style={styles.overlay}>
-          <p style={styles.overlayHint}>凭感觉挑一张</p>
+          <p style={styles.overlayHint}>
+            {spread.positions.length === 1
+              ? '凭感觉挑一张'
+              : picked.length < spread.positions.length
+                ? `凭感觉挑 ${spread.positions.length} 张 · 下一张：${fillWho(spread.positions[picked.length].label, who)}`
+                : '牌已选好'}
+          </p>
+          {spread.positions.length > 1 && (
+            <div className="tarot-pick-dots" aria-hidden="true">
+              {spread.positions.map((_, k) => (
+                <i key={k} className={k < picked.length ? 'on' : ''} />
+              ))}
+            </div>
+          )}
           <div className="tarot-fan">
             {deckOrder.map((card, i) => {
               const total = deckOrder.length;
-              const spread = 68; // 扇面总角度
-              const angle = -spread / 2 + (spread / (total - 1)) * i;
+              const fanAngle = 68; // 扇面总角度
+              const angle = -fanAngle / 2 + (fanAngle / (total - 1)) * i;
+              const isPicked = picked.includes(i);
               return (
                 <button
                   key={card.id}
-                  className="tarot-fan-card"
+                  className={isPicked ? 'tarot-fan-card tarot-fan-card-picked' : 'tarot-fan-card'}
                   style={{
-                    transform: `rotate(${angle}deg)`,
+                    transform: `rotate(${angle}deg)${isPicked ? ' translateY(-26px)' : ''}`,
                     zIndex: i,
                   }}
                   onClick={() => pickCard(i)}
+                  disabled={isPicked}
                   aria-label={`第 ${i + 1} 张`}
                 >
                   <CardBack width={66} />
@@ -458,33 +524,80 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
       )}
 
       {/* ── 结果 ─────────────────────────────── */}
-      {phase === 'result' && drawn && (
-        <div style={styles.overlay}>
-          {!flipped ? (
-            <>
-              <p style={styles.overlayHint}>牌已经落下，点开看看</p>
-              <button className="tarot-flip-btn" onClick={() => setFlipped(true)}>
-                <CardBack width={150} />
-              </button>
-            </>
-          ) : (
-            <div className="tarot-result">
-              <CardFace card={drawn.card} reversed={drawn.reversed} width={150} />
-              <h2 style={styles.resultName}>
-                {drawn.card.name}
-                <span style={styles.resultPos}>{drawn.reversed ? '逆位' : '正位'}</span>
-              </h2>
-              <p style={styles.resultMeaning}>
-                {drawn.reversed ? meaningOf(drawn.card.id).rev : meaningOf(drawn.card.id).up}
-              </p>
-              <div style={styles.resultActions}>
-                <button className="tarot-chip" onClick={startDraw}>再抽一张</button>
-                <button className="tarot-chip tarot-chip-ghost" onClick={() => setPhase('room')}>
-                  回到桌前
-                </button>
-              </div>
+      {phase === 'result' && drawn.length > 0 && (
+        <div style={{ ...styles.overlay, justifyContent: 'flex-start', overflowY: 'auto' }}>
+          <div className="tarot-result">
+            <p style={styles.overlayHint}>
+              {spread.name}
+              {flipped.some((v) => !v) ? ' · 点牌翻开' : ' · 点牌看解读'}
+            </p>
+
+            <div
+              className="tarot-spread-grid"
+              style={{ gridTemplateColumns: `repeat(${spread.columns}, auto)` }}
+            >
+              {drawn.map((d, i) => (
+                <div key={i} className="tarot-slot" style={{ animationDelay: `${i * 0.08}s` }}>
+                  {spread.positions.length > 1 && (
+                    <span className="tarot-slot-label">{fillWho(spread.positions[i].label, who)}</span>
+                  )}
+                  <button
+                    className={
+                      'tarot-slot-card' +
+                      (focus === i && flipped[i] ? ' tarot-slot-card-on' : '')
+                    }
+                    onClick={() => tapResultCard(i)}
+                    aria-label={flipped[i] ? d.card.name : `翻开第 ${i + 1} 张`}
+                  >
+                    {flipped[i] ? (
+                      <span className="tarot-flip-in">
+                        <CardFace card={d.card} reversed={d.reversed} width={spread.cardWidth} />
+                      </span>
+                    ) : (
+                      <CardBack width={spread.cardWidth} />
+                    )}
+                  </button>
+                </div>
+              ))}
             </div>
-          )}
+
+            {focus !== null && flipped[focus] && drawn[focus] ? (
+              <div className="tarot-reading" key={focus}>
+                {spread.positions.length > 1 && (
+                  <p className="tarot-reading-pos">
+                    {fillWho(spread.positions[focus].label, who)}
+                    <span>{fillWho(spread.positions[focus].hint, who)}</span>
+                  </p>
+                )}
+                <h2 style={styles.resultName}>
+                  {drawn[focus].card.name}
+                  <span style={styles.resultPos}>{drawn[focus].reversed ? '逆位' : '正位'}</span>
+                </h2>
+                <p style={styles.resultMeaning}>
+                  {drawn[focus].reversed
+                    ? meaningOf(drawn[focus].card.id).rev
+                    : meaningOf(drawn[focus].card.id).up}
+                </p>
+              </div>
+            ) : (
+              <p className="tarot-reading-empty">
+                {flipped.some((v) => !v) ? '按顺序一张张翻开，或者一次全部翻开' : '点一张牌，看看它在说什么'}
+              </p>
+            )}
+
+            <div style={styles.resultActions}>
+              {flipped.some((v) => !v) && (
+                <button className="tarot-chip" onClick={flipAll}>全部翻开</button>
+              )}
+              <button className="tarot-chip" onClick={() => startDraw(spreadId)}>再抽一次</button>
+              <button className="tarot-chip tarot-chip-ghost" onClick={() => setPhase('spread')}>
+                换牌阵
+              </button>
+              <button className="tarot-chip tarot-chip-ghost" onClick={() => setPhase('room')}>
+                回到桌前
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -688,6 +801,8 @@ const styles: Record<string, React.CSSProperties> = {
   },
   resultActions: {
     display: 'flex',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
     gap: 10,
     marginTop: 4,
   },
@@ -742,32 +857,6 @@ const CSS = `
     background: rgba(217,185,120,0.16);
   }
 }
-
-.tarot-seat {
-  position: absolute;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  z-index: 10;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 6px;
-  padding: 0 0 6px;
-}
-.tarot-seat-label {
-  font-size: 11px;
-  letter-spacing: 0.1em;
-  color: #d9b978;
-  background: rgba(12,6,22,0.72);
-  border-radius: 999px;
-  padding: 3px 10px;
-  opacity: 0;
-  transition: opacity 0.2s ease;
-}
-.tarot-seat:hover .tarot-seat-label,
-.tarot-seat:focus-visible .tarot-seat-label { opacity: 1; }
 
 .tarot-chip {
   border: 1px solid rgba(217,185,120,0.5);
@@ -870,6 +959,111 @@ const CSS = `
   z-index: 200 !important;
 }
 
+.tarot-fan-card:disabled { cursor: default; }
+.tarot-fan-card-picked { filter: brightness(1.4) drop-shadow(0 0 10px rgba(217,185,120,0.7)); }
+
+.tarot-pick-dots { display: flex; gap: 8px; margin-top: -8px; }
+.tarot-pick-dots i {
+  width: 7px; height: 7px; border-radius: 50%;
+  border: 1px solid rgba(217,185,120,0.7);
+  transition: background 0.2s ease;
+}
+.tarot-pick-dots i.on { background: #d9b978; }
+
+/* 选牌阵 */
+.tarot-spread-list {
+  width: 100%;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.tarot-spread-item {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  text-align: left;
+  border: 1px solid rgba(217,185,120,0.35);
+  background: rgba(40,22,62,0.55);
+  border-radius: 14px;
+  padding: 12px 14px;
+  cursor: pointer;
+  color: #efe3c8;
+  font-family: inherit;
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+.tarot-spread-item:hover, .tarot-spread-item:focus-visible {
+  border-color: #d9b978;
+  background: rgba(217,185,120,0.1);
+  outline: none;
+}
+.tarot-spread-icon {
+  display: grid;
+  gap: 3px;
+  width: 38px;
+  flex-shrink: 0;
+  justify-items: center;
+}
+.tarot-spread-icon i {
+  width: 9px; height: 14px;
+  border-radius: 2px;
+  border: 1px solid #d9b978;
+  background: rgba(217,185,120,0.15);
+}
+.tarot-spread-text { display: flex; flex-direction: column; gap: 3px; }
+.tarot-spread-name { font-size: 15px; letter-spacing: 0.06em; }
+.tarot-spread-name em {
+  font-style: normal; font-size: 11px; color: #d9b978; margin-left: 8px;
+}
+.tarot-spread-desc { font-size: 12px; color: rgba(239,227,200,0.6); line-height: 1.5; }
+
+/* 结果页牌阵 */
+.tarot-spread-grid {
+  display: grid;
+  gap: 12px 14px;
+  justify-content: center;
+}
+.tarot-slot {
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+  animation: tarotLand 0.45s cubic-bezier(.2,.8,.3,1) both;
+}
+.tarot-slot-label {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: #d9b978;
+  white-space: nowrap;
+}
+.tarot-slot-card {
+  border: none; background: transparent; padding: 0; cursor: pointer;
+  border-radius: 8px;
+  line-height: 0;
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+.tarot-slot-card-on {
+  box-shadow: 0 0 0 1.5px #d9b978, 0 0 18px rgba(217,185,120,0.5);
+  transform: translateY(-3px);
+}
+.tarot-flip-in { display: inline-block; animation: tarotFlipIn 0.35s ease both; }
+@keyframes tarotFlipIn {
+  from { transform: rotateY(90deg); opacity: 0.4; }
+  to { transform: rotateY(0deg); opacity: 1; }
+}
+.tarot-reading {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  animation: tarotReveal 0.3s ease both;
+}
+.tarot-reading-pos {
+  margin: 0;
+  font-size: 13px;
+  color: #d9b978;
+  letter-spacing: 0.08em;
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+}
+.tarot-reading-pos span { font-size: 11px; color: rgba(239,227,200,0.5); letter-spacing: 0.04em; }
+.tarot-reading-empty {
+  margin: 0; font-size: 12px; color: rgba(239,227,200,0.5); letter-spacing: 0.06em;
+}
+
 .tarot-flip-btn {
   border: none; background: transparent; padding: 0; cursor: pointer;
   animation: tarotLand 0.45s cubic-bezier(.2,.8,.3,1) both;
@@ -879,6 +1073,9 @@ const CSS = `
 }
 .tarot-result {
   display: flex; flex-direction: column; align-items: center; gap: 14px;
+  width: 100%;
+  margin: auto 0;
+  padding: 12px 0 20px;
   animation: tarotReveal 0.4s ease both;
 }
 @keyframes tarotReveal { from { opacity: 0; transform: scale(0.94); } }
@@ -967,7 +1164,8 @@ const CSS = `
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .tarot-hint, .tarot-shuffle-card, .tarot-flip-btn, .tarot-result, .tarot-toast {
+  .tarot-hint, .tarot-shuffle-card, .tarot-flip-btn, .tarot-result, .tarot-toast,
+  .tarot-slot, .tarot-flip-in, .tarot-reading {
     animation: none !important;
   }
 }
