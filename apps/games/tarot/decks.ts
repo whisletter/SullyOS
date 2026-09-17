@@ -14,6 +14,7 @@ import { DB } from '../../../utils/db';
 import { putImageBlob } from '../../../utils/blobRef';
 import { processImageToBlob } from '../../../utils/file';
 import type { CardMeaning } from './meanings';
+import type { LenormandMeaning } from './lenormand';
 import { renderPdfPages, isPdf } from './pdfCards';
 
 export type DeckKind = 'lenormand' | 'tarot' | 'oracle';
@@ -66,11 +67,14 @@ export interface WorkshopData {
   active: Partial<Record<DeckKind, string>>;
   /** 塔罗牌意改写，所有塔罗牌组共用 */
   meaningOverrides: Record<number, CardMeaning>;
+  /** 雷诺曼牌意改写，所有雷诺曼牌组共用 */
+  lenormandOverrides: Record<number, LenormandMeaning>;
 }
 
-/** 基础牌组（代码画的，不能改不能删） */
+/** 基础牌组（代码画的，不能改不能删）。神谕没有基础牌组，全靠自己上传 */
 export const BUILTIN_DECK_ID: Partial<Record<DeckKind, string>> = {
   tarot: 'builtin-tarot',
+  lenormand: 'builtin-lenormand',
 };
 
 export const WORKSHOP_ASSET_ID = 'tarot_workshop_v1';
@@ -78,7 +82,7 @@ export const WORKSHOP_ASSET_ID = 'tarot_workshop_v1';
 const LEGACY_MEANING_KEY = 'sullyos.tarot.meaningOverrides.v1';
 
 function emptyData(): WorkshopData {
-  return { version: 1, decks: [], active: {}, meaningOverrides: {} };
+  return { version: 1, decks: [], active: {}, meaningOverrides: {}, lenormandOverrides: {} };
 }
 
 function normalize(raw: unknown): WorkshopData {
@@ -92,6 +96,7 @@ function normalize(raw: unknown): WorkshopData {
       : [],
     active: r.active && typeof r.active === 'object' ? r.active : {},
     meaningOverrides: r.meaningOverrides && typeof r.meaningOverrides === 'object' ? r.meaningOverrides : {},
+    lenormandOverrides: r.lenormandOverrides && typeof r.lenormandOverrides === 'object' ? r.lenormandOverrides : {},
   };
 }
 

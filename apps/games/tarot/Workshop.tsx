@@ -20,6 +20,8 @@ interface WorkshopProps {
   update: (fn: (prev: WorkshopData) => WorkshopData) => Promise<void>;
   onClose: () => void;
   onToast: (text: string) => void;
+  /** 进来时先停在哪个分类 */
+  initialKind?: DeckKind;
 }
 
 type View = { type: 'shelf' } | { type: 'deck'; id: string };
@@ -37,7 +39,7 @@ interface Slot {
   image?: string;
 }
 
-const BUILTIN_NAME: Partial<Record<DeckKind, string>> = { tarot: '基础塔罗' };
+const BUILTIN_NAME: Partial<Record<DeckKind, string>> = { tarot: '基础塔罗', lenormand: '基础雷诺曼' };
 
 const NAMING_HINT: Record<DeckKind, string> = {
   tarot: '图片按文件名编号对号入座：00 愚者 ~ 21 世界，22 ~ 77 小阿卡纳；叫 back 或「牌背」的那张会当牌背。PDF 一页一张，按页码顺序。缺的牌用默认牌面。',
@@ -83,8 +85,8 @@ function pickFiles(accept: string, multiple: boolean): Promise<File[]> {
   });
 }
 
-export function Workshop({ data, update, onClose, onToast }: WorkshopProps) {
-  const [kind, setKind] = useState<DeckKind>('tarot');
+export function Workshop({ data, update, onClose, onToast, initialKind = 'tarot' }: WorkshopProps) {
+  const [kind, setKind] = useState<DeckKind>(initialKind);
   const [view, setView] = useState<View>({ type: 'shelf' });
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
@@ -307,6 +309,10 @@ export function Workshop({ data, update, onClose, onToast }: WorkshopProps) {
 
   // ── 渲染 ──
   const renderShelf = () => (
+    <>
+    {kind === 'oracle' && decksOfKind.length === 0 && (
+      <p className="ws-hint ws-shelf-tip">神谕卡没有基础牌组，点「+」上传你自己的牌，牌名和牌意都由你来写。</p>
+    )}
     <div className="ws-shelf">
       {builtinId && (
         <button className="ws-tile" onClick={() => setView({ type: 'deck', id: builtinId })}>
@@ -348,6 +354,7 @@ export function Workshop({ data, update, onClose, onToast }: WorkshopProps) {
         <span className="ws-tile-meta">图片 / PDF</span>
       </button>
     </div>
+    </>
   );
 
   const renderDeck = () => {
@@ -728,6 +735,7 @@ export const WORKSHOP_CSS = `
   border-radius: 999px; padding: 1px 8px; letter-spacing: 0.08em;
 }
 .ws-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.ws-shelf-tip { text-align: center; margin: 0 0 16px !important; }
 .ws-hint { margin: 0; font-size: 11px; line-height: 1.7; color: rgba(239,227,200,0.5); }
 .ws-empty { margin: 20px 0; text-align: center; font-size: 13px; color: rgba(239,227,200,0.5); }
 .ws-back-row { display: flex; align-items: center; gap: 10px; font-size: 12px; color: rgba(239,227,200,0.6); }

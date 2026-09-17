@@ -1,9 +1,12 @@
 import React, { useMemo, useState, useEffect, useCallback, useLayoutEffect, useRef } from 'react';
-import { TAROT_DECK, TarotCard, SUIT_INFO } from './cards';
+import { TAROT_DECK, SUIT_INFO } from './cards';
 import { getMeaning, CardMeaning } from './meanings';
-import { CardFace, CardBack, CARD_RATIO } from './CardFace';
-import { SPREADS, SpreadId, getSpread, fillWho } from './spreads';
-import { useWorkshop, getActiveDeck } from './decks';
+import { LENORMAND_DECK, getLenormand, LenormandMeaning } from './lenormand';
+import { CardFace, CardBack, GenericCardFace } from './CardFace';
+import { SpreadId, getSpread, spreadsFor, slotOfPick, fillWho } from './spreads';
+import {
+  useWorkshop, getActiveDeck, DeckKind, CARD_RATIOS, OracleCard, WorkshopData,
+} from './decks';
 import { Workshop, WORKSHOP_CSS } from './Workshop';
 import { useOS } from '../../../context/OSContext';
 // 房间图和代码放在同一个文件夹，由 Vite 打包。想换背景，直接用同名图片覆盖即可。
@@ -15,25 +18,19 @@ import roomEmptyPhoneUrl from './room-empty-phone.webp';
 import roomOccupiedPhoneUrl from './room-occupied-phone.webp';
 
 /**
- * 塔罗 — 最小可玩版。
+ * 塔罗小屋。
  *
- * 这一版做的：房间场景 + 煤油灯调亮调暗 + 首次进入的金光提示 +
- * 塔罗一副（78 张）+ 单张牌阵 + 洗牌扇形抽牌翻牌 + 牌意之书。
+ * 房间场景 + 煤油灯明暗 + 首次进入的金光提示；点电话 TA 入座 / 离席。
+ * 桌上三个托盘（从近到远）：神谕、塔罗、雷诺曼，点哪个抽哪副。
+ * 用的是牌组工坊里「放到桌上」的那一套（decks.ts），塔罗 / 雷诺曼没设过就用基础牌组，
+ * 神谕没有基础牌组，要先去工坊上传。
  *
- * 点电话：TA 入座 / 离席（切换房间图）。
- *
- * 牌阵：单张 / 三张 / 六张，定义在 spreads.ts。
- *
- * 留了接口没做的：雷诺曼 / 神谕两副牌（托盘已经画好位置）、
- * 牌组工坊（墙上的画）、称号（天球仪）、真心话玩法。
- * 点这些位置现在会提示「还没开」，不会报错。
+ * 牌阵定义在 spreads.ts，按牌组区分；雷诺曼的牌意在 lenormand.ts，塔罗在 meanings.ts。
+ * 牌意之书里双击可以改写塔罗 / 雷诺曼的牌意，改写存在数据库里，会进备份。
+ * 墙上的画是牌组工坊（Workshop.tsx）。
  *
  * 手机 / 平板按屏幕比例自动选图，两套图各有一套点击热区（见 SCENES）。
- * 牌意之书里双击某张牌的牌意可以改写。
- * 点墙上的画进牌组工坊（Workshop.tsx），上传的牌组和牌意改写都存在数据库里（decks.ts），会进备份。
- *
  * 角色名默认读当前选中的角色（useOS），也可以从 props 传进来覆盖。
- * 代码里不写死任何具体角色。
  */
 
 export interface TarotAppProps {
@@ -45,11 +42,36 @@ export interface TarotAppProps {
   characterAvatar?: string;
 }
 
-type Phase = 'room' | 'spread' | 'shuffle' | 'fan' | 'result' | 'book' | 'workshop';
+type Phase = 'room' | 'spread' | 'needDeck' | 'shuffle' | 'fan' | 'result' | 'book' | 'workshop';
+
+/** 抽牌池里的一张牌，三副牌统一成这个样子 */
+interface PoolCard {
+  key: string;
+  name: string;
+  /** 上传的牌面（blobref 令牌），没有就画默认牌面 */
+  image?: string;
+  tarotId?: number;
+  lenormandId?: number;
+  oracle?: OracleCard;
+}
 
 interface DrawnCard {
-  card: TarotCard;
+  card: PoolCard;
   reversed: boolean;
+}
+
+const DECK_LABEL: Record<DeckKind, string> = { tarot: '塔罗', lenormand: '雷诺曼', oracle: '神谕' };
+
+/** 按工坊里桌上正在用的牌组，拼出这副牌的抽牌池 */
+function buildPool(data: WorkshopData, kind: DeckKind): PoolCard[] {
+  const deck = getActiveDeck(data, kind);
+  if (kind === 'tarot') {
+    return TAROT_DECK.map((c) => ({ key: `t${c.id}`, name: c.name, tarotId: c.id, image: deck?.faces[c.id] }));
+  }
+  if (kind === 'lenormand') {
+    return LENORMAND_DECK.map((c) => ({ key: `l${c.id}`, name: c.name, lenormandId: c.id, image: deck?.faces[c.id] }));
+  }
+  return (deck?.oracle ?? []).map((c) => ({ key: c.id, name: c.name, oracle: c, image: c.image }));
 }
 
 const GOLD = '#d9b978';
@@ -79,7 +101,9 @@ interface Hotspot {
 
 /** 平板 2:3 图的热区（原版，两张图共用） */
 const HOTSPOTS_TABLET: Hotspot[] = [
-  { key: 'tarot', label: '塔罗牌', left: '0%', top: '59%', width: '17%', height: '23%', ready: true },
+  { key: 'lenormand', label: '雷诺曼', left: '0%', top: '59%', width: '19%', height: '6%', ready: true },
+  { key: 'tarot', label: '塔罗牌', left: '0%', top: '65%', width: '15%', height: '6.5%', ready: true },
+  { key: 'oracle', label: '神谕卡', left: '0%', top: '71.5%', width: '11%', height: '10%', ready: true },
   { key: 'book', label: '牌意之书', left: '72%', top: '70%', width: '28%', height: '19%', ready: true },
   { key: 'lamp', label: '煤油灯', left: '0%', top: '36%', width: '11%', height: '22%', ready: true },
   { key: 'orrery', label: '称号', left: '76%', top: '47%', width: '13%', height: '14%', ready: false },
@@ -89,7 +113,9 @@ const HOTSPOTS_TABLET: Hotspot[] = [
 
 /** 手机 · 空座位图的热区 */
 const HOTSPOTS_PHONE_EMPTY: Hotspot[] = [
-  { key: 'tarot', label: '塔罗牌', left: '0%', top: '58%', width: '20%', height: '18%', ready: true },
+  { key: 'lenormand', label: '雷诺曼', left: '0%', top: '58%', width: '20%', height: '5.5%', ready: true },
+  { key: 'tarot', label: '塔罗牌', left: '0%', top: '63.5%', width: '16%', height: '5.5%', ready: true },
+  { key: 'oracle', label: '神谕卡', left: '0%', top: '69%', width: '12%', height: '7%', ready: true },
   { key: 'book', label: '牌意之书', left: '73%', top: '65%', width: '27%', height: '17%', ready: true },
   { key: 'lamp', label: '煤油灯', left: '0%', top: '42%', width: '12%', height: '16%', ready: true },
   { key: 'orrery', label: '称号', left: '76%', top: '51%', width: '12%', height: '11%', ready: false },
@@ -99,7 +125,9 @@ const HOTSPOTS_PHONE_EMPTY: Hotspot[] = [
 
 /** 手机 · TA 在座图的热区（这张图比例更长，物件位置略有不同） */
 const HOTSPOTS_PHONE_OCCUPIED: Hotspot[] = [
-  { key: 'tarot', label: '塔罗牌', left: '0%', top: '56%', width: '21%', height: '17%', ready: true },
+  { key: 'lenormand', label: '雷诺曼', left: '0%', top: '56.5%', width: '21%', height: '4.8%', ready: true },
+  { key: 'tarot', label: '塔罗牌', left: '0%', top: '61.3%', width: '17%', height: '4.5%', ready: true },
+  { key: 'oracle', label: '神谕卡', left: '0%', top: '65.8%', width: '12%', height: '7%', ready: true },
   { key: 'book', label: '牌意之书', left: '73%', top: '63%', width: '27%', height: '16%', ready: true },
   { key: 'lamp', label: '煤油灯', left: '0%', top: '40%', width: '12%', height: '17%', ready: true },
   { key: 'orrery', label: '称号', left: '76%', top: '49%', width: '12%', height: '11%', ready: false },
@@ -204,67 +232,112 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
   const [hintPlaying, setHintPlaying] = useState(true);
   const [toast, setToast] = useState<string | null>(null);
 
-  const [deckOrder, setDeckOrder] = useState<TarotCard[]>(() => shuffle(TAROT_DECK));
+  const { data: workshop, update: updateWorkshop } = useWorkshop();
+
+  // ── 抽牌状态 ──
+  /** 这一轮抽的是哪副牌 */
+  const [drawKind, setDrawKind] = useState<DeckKind>('tarot');
+  const [deckOrder, setDeckOrder] = useState<PoolCard[]>([]);
   const [spreadId, setSpreadId] = useState<SpreadId>('single');
   /** 扇面里已经点中的牌（deckOrder 的下标），按点选顺序 */
   const [picked, setPicked] = useState<number[]>([]);
+  /** 按牌阵位置摆好的牌 */
   const [drawn, setDrawn] = useState<DrawnCard[]>([]);
   const [flipped, setFlipped] = useState<boolean[]>([]);
   /** 结果页当前在看哪一张 */
   const [focus, setFocus] = useState<number | null>(null);
-  const [bookFilter, setBookFilter] = useState<'all' | 'major' | 'minor'>('all');
+  /** 去工坊时先停在哪个分类 */
+  const [workshopKind, setWorkshopKind] = useState<DeckKind>('tarot');
 
-  // 牌意改写
-  const { data: workshop, update: updateWorkshop } = useWorkshop();
-  const overrides = workshop.meaningOverrides;
-  /** 桌上正在用的塔罗牌组，null = 基础牌组 */
-  const tarotDeck = getActiveDeck(workshop, 'tarot');
-  const [editing, setEditing] = useState<{ id: number; up: string; rev: string } | null>(null);
-  const lastTap = useRef<{ id: number; t: number } | null>(null);
+  const drawDeck = getActiveDeck(workshop, drawKind);
+  const drawRatio = CARD_RATIOS[drawKind];
+  const spread = getSpread(spreadId);
+
+  // ── 牌意之书 ──
+  const [bookKind, setBookKind] = useState<'tarot' | 'lenormand'>('tarot');
+  const [bookFilter, setBookFilter] = useState<'all' | 'major' | 'minor'>('all');
+  /** 正在改写的那条：塔罗是正 / 逆，雷诺曼是关键词 / 时间 */
+  const [editing, setEditing] = useState<{ kind: 'tarot' | 'lenormand'; id: number; a: string; b: string } | null>(null);
+  const lastTap = useRef<{ key: string; t: number } | null>(null);
+
+  const tarotOverrides = workshop.meaningOverrides;
+  const lenormandOverrides = workshop.lenormandOverrides;
 
   const meaningOf = useCallback(
-    (id: number): CardMeaning => overrides[id] ?? getMeaning(id),
-    [overrides],
+    (id: number): CardMeaning => tarotOverrides[id] ?? getMeaning(id),
+    [tarotOverrides],
+  );
+  const lenormandOf = useCallback(
+    (id: number): LenormandMeaning => {
+      const base = getLenormand(id);
+      return lenormandOverrides[id] ?? { keywords: base?.keywords ?? '', time: base?.time ?? '' };
+    },
+    [lenormandOverrides],
   );
 
-  const handleEntryTap = useCallback((id: number) => {
-    if (editing?.id === id) return;
+  const handleEntryTap = useCallback((kind: 'tarot' | 'lenormand', id: number) => {
+    if (editing && editing.kind === kind && editing.id === id) return;
+    const key = `${kind}${id}`;
     const now = Date.now();
     const prev = lastTap.current;
-    if (prev && prev.id === id && now - prev.t < 350) {
+    if (prev && prev.key === key && now - prev.t < 350) {
       lastTap.current = null;
-      const m = overrides[id] ?? getMeaning(id);
-      setEditing({ id, up: m.up, rev: m.rev });
+      if (kind === 'tarot') {
+        const m = meaningOf(id);
+        setEditing({ kind, id, a: m.up, b: m.rev });
+      } else {
+        const m = lenormandOf(id);
+        setEditing({ kind, id, a: m.keywords, b: m.time });
+      }
     } else {
-      lastTap.current = { id, t: now };
+      lastTap.current = { key, t: now };
     }
-  }, [editing, overrides]);
+  }, [editing, meaningOf, lenormandOf]);
+
+  const saveFail = useCallback(() => setToast('保存失败，可能是存储空间不够了'), []);
 
   const saveEdit = useCallback(() => {
     if (!editing) return;
-    const def = getMeaning(editing.id);
-    const up = editing.up.trim();
-    const rev = editing.rev.trim();
-    const id = editing.id;
-    updateWorkshop((prev) => {
-      const next = { ...prev.meaningOverrides };
-      if (up === def.up && rev === def.rev) delete next[id];
-      else next[id] = { up: up || def.up, rev: rev || def.rev };
-      return { ...prev, meaningOverrides: next };
-    }).catch(() => setToast('保存失败，可能是存储空间不够了'));
+    const { kind, id } = editing;
+    const a = editing.a.trim();
+    const b = editing.b.trim();
+    if (kind === 'tarot') {
+      const def = getMeaning(id);
+      updateWorkshop((prev) => {
+        const next = { ...prev.meaningOverrides };
+        if (a === def.up && b === def.rev) delete next[id];
+        else next[id] = { up: a || def.up, rev: b || def.rev };
+        return { ...prev, meaningOverrides: next };
+      }).catch(saveFail);
+    } else {
+      const def = getLenormand(id);
+      const defK = def?.keywords ?? '';
+      const defT = def?.time ?? '';
+      updateWorkshop((prev) => {
+        const next = { ...prev.lenormandOverrides };
+        if (a === defK && b === defT) delete next[id];
+        else next[id] = { keywords: a || defK, time: b || defT };
+        return { ...prev, lenormandOverrides: next };
+      }).catch(saveFail);
+    }
     setEditing(null);
-  }, [editing, updateWorkshop]);
+  }, [editing, updateWorkshop, saveFail]);
 
   const resetEdit = useCallback(() => {
     if (!editing) return;
-    const id = editing.id;
+    const { kind, id } = editing;
     updateWorkshop((prev) => {
-      const next = { ...prev.meaningOverrides };
+      if (kind === 'tarot') {
+        const next = { ...prev.meaningOverrides };
+        delete next[id];
+        return { ...prev, meaningOverrides: next };
+      }
+      const next = { ...prev.lenormandOverrides };
       delete next[id];
-      return { ...prev, meaningOverrides: next };
-    }).catch(() => setToast('保存失败，可能是存储空间不够了'));
+      return { ...prev, lenormandOverrides: next };
+    }).catch(saveFail);
     setEditing(null);
-  }, [editing, updateWorkshop]);
+  }, [editing, updateWorkshop, saveFail]);
 
   // 首次进入，物件依次闪一遍金光，之后安静下来
   useEffect(() => {
@@ -274,30 +347,54 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
 
   useEffect(() => {
     if (!toast) return;
-    const timer = window.setTimeout(() => setToast(null), 2000);
+    const timer = window.setTimeout(() => setToast(null), 2200);
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  const spread = getSpread(spreadId);
+  /** 点托盘：先检查这副牌能不能抽，再去选牌阵 */
+  const openDeck = useCallback((kind: DeckKind) => {
+    setDrawKind(kind);
+    if (kind === 'oracle' && buildPool(workshop, 'oracle').length === 0) {
+      setPhase('needDeck');
+      return;
+    }
+    setPhase('spread');
+  }, [workshop]);
 
   const startDraw = useCallback((id: SpreadId) => {
+    const sp = getSpread(id);
+    const pool = buildPool(workshop, drawKind);
+    if (pool.length < sp.positions.length) {
+      setToast(`这套牌只有 ${pool.length} 张，不够这个牌阵`);
+      return;
+    }
     setSpreadId(id);
-    setDeckOrder(shuffle(TAROT_DECK));
+    setDeckOrder(shuffle(pool));
     setPicked([]);
     setDrawn([]);
     setFlipped([]);
     setFocus(null);
     setPhase('shuffle');
-    window.setTimeout(() => setPhase('fan'), 1100);
-  }, []);
+    window.setTimeout(() => {
+      if (phaseRef.current === 'shuffle') setPhase('fan');
+    }, 1100);
+  }, [workshop, drawKind]);
 
   const pickCard = useCallback((index: number) => {
-    const need = getSpread(spreadId).positions.length;
+    const sp = getSpread(spreadId);
+    const need = sp.positions.length;
     if (picked.includes(index) || picked.length >= need) return;
     const next = [...picked, index];
     setPicked(next);
     if (next.length === need) {
-      const cards = next.map((i) => ({ card: deckOrder[i], reversed: Math.random() < 0.5 }));
+      // 按抽牌顺序放进对应的位置；只有塔罗有逆位
+      const cards: DrawnCard[] = new Array(need);
+      next.forEach((deckIndex, k) => {
+        cards[slotOfPick(sp, k)] = {
+          card: deckOrder[deckIndex],
+          reversed: drawKind === 'tarot' && Math.random() < 0.5,
+        };
+      });
       // 让最后一张被点中的动效播完再进结果页
       window.setTimeout(() => {
         if (phaseRef.current !== 'fan') return; // 中途点了「算了」
@@ -307,7 +404,7 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
         setPhase('result');
       }, 450);
     }
-  }, [picked, spreadId, deckOrder]);
+  }, [picked, spreadId, deckOrder, drawKind]);
 
   const tapResultCard = useCallback((i: number) => {
     if (!flipped[i]) {
@@ -321,18 +418,23 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
     setFocus((f) => (f === null ? 0 : f));
   }, []);
 
+  const openWorkshop = useCallback((kind: DeckKind) => {
+    setWorkshopKind(kind);
+    setPhase('workshop');
+  }, []);
+
   const handleHotspot = useCallback((spot: Hotspot) => {
     if (!spot.ready) {
       setToast(`${spot.label}还没开，下一版见`);
       return;
     }
-    if (spot.key === 'tarot') setPhase('spread');
+    if (spot.key === 'tarot' || spot.key === 'lenormand' || spot.key === 'oracle') openDeck(spot.key);
     else if (spot.key === 'book') setPhase('book');
     else if (spot.key === 'lamp') setLampBright((v) => !v);
     // 电话：拨过去 TA 就坐到对面，再点一次 TA 离席
     else if (spot.key === 'phone') setTaSeated((v) => !v);
-    else if (spot.key === 'painting') setPhase('workshop');
-  }, []);
+    else if (spot.key === 'painting') openWorkshop('tarot');
+  }, [openDeck, openWorkshop]);
 
   const variant: 'phone' | 'tablet' =
     frame.w > 0 && frame.h / frame.w >= PHONE_ASPECT ? 'phone' : 'tablet';
@@ -352,10 +454,83 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
     return { position: 'absolute', lineHeight: 0, width: frame.w, height: h, left: 0, top: frame.h - h };
   }, [frame, variant, imgRatio]);
 
-  const bookList = useMemo(() => {
+  const tarotBookList = useMemo(() => {
     if (bookFilter === 'all') return TAROT_DECK;
     return TAROT_DECK.filter((c) => c.arcana === bookFilter);
   }, [bookFilter]);
+
+  /** 结果页：一张牌的正面 */
+  const renderFace = (d: DrawnCard, width: number) => {
+    const c = d.card;
+    if (c.tarotId !== undefined) {
+      const tc = TAROT_DECK[c.tarotId];
+      return <CardFace card={tc} reversed={d.reversed} width={width} image={c.image} />;
+    }
+    if (c.lenormandId !== undefined) {
+      return (
+        <GenericCardFace
+          width={width}
+          ratio={drawRatio}
+          image={c.image}
+          mark={String(c.lenormandId)}
+          symbol="✧"
+          title={c.name}
+        />
+      );
+    }
+    return <GenericCardFace width={width} ratio={drawRatio} image={c.image} symbol="✧" title={c.name} />;
+  };
+
+  /** 结果页：解读区 */
+  const renderReading = (d: DrawnCard) => {
+    const c = d.card;
+    if (c.tarotId !== undefined) {
+      const m = meaningOf(c.tarotId);
+      return (
+        <>
+          <h2 style={styles.resultName}>
+            {c.name}
+            <span style={styles.resultPos}>{d.reversed ? '逆位' : '正位'}</span>
+          </h2>
+          <p style={styles.resultMeaning}>{d.reversed ? m.rev : m.up}</p>
+        </>
+      );
+    }
+    if (c.lenormandId !== undefined) {
+      const m = lenormandOf(c.lenormandId);
+      return (
+        <>
+          <h2 style={styles.resultName}>
+            {c.name}
+            <span style={styles.resultPos}>{c.lenormandId}</span>
+          </h2>
+          <div className="tarot-len-reading">
+            <p><b>关键词</b>{m.keywords}</p>
+            <p><b>时间</b>{m.time}</p>
+          </div>
+        </>
+      );
+    }
+    const meaning = c.oracle?.meaning?.trim();
+    return (
+      <>
+        <h2 style={styles.resultName}>{c.name}</h2>
+        {meaning ? (
+          <p style={styles.resultMeaning}>{meaning}</p>
+        ) : (
+          <p className="tarot-reading-empty">
+            这张还没写牌意，
+            <button className="tarot-link" onClick={() => openWorkshop('oracle')}>去工坊补上</button>
+          </p>
+        )}
+      </>
+    );
+  };
+
+  const fanCount = deckOrder.length;
+  const fanAngle = fanCount > 40 ? 68 : fanCount > 12 ? 56 : Math.max(16, fanCount * 5);
+  const nextSlot = picked.length < spread.positions.length ? slotOfPick(spread, picked.length) : null;
+  const gridGap = spread.columns >= 5 ? '10px 6px' : '12px 14px';
 
   return (
     <div ref={rootRef} style={styles.root}>
@@ -376,18 +551,12 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
             }
           }}
           onError={(e: React.SyntheticEvent<HTMLImageElement>) => {
-            // 图片还没放进 public 时不开天窗，用底色顶着
             e.currentTarget.style.visibility = 'hidden';
           }}
         />
 
         {/* 暖光 / 暗角。生图是灯亮态，默认压暗一档 */}
-        <div
-          style={{
-            ...styles.vignette,
-            opacity: lampBright ? 0.18 : 0.62,
-          }}
-        />
+        <div style={{ ...styles.vignette, opacity: lampBright ? 0.18 : 0.62 }} />
         <div
           style={{
             ...styles.warmGlow,
@@ -406,7 +575,7 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
               top: spot.top,
               width: spot.width,
               height: spot.height,
-              animationDelay: hintPlaying ? `${i * 0.45}s` : undefined,
+              animationDelay: hintPlaying ? `${i * 0.4}s` : undefined,
             }}
             onClick={() => handleHotspot(spot)}
             aria-label={spot.key === 'phone' ? (taSeated ? `请${who}离席` : `呼叫${who}`) : spot.label}
@@ -425,45 +594,74 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
 
       {toast && <div className="tarot-toast">{toast}</div>}
 
-      {/* ── 洗牌 ─────────────────────────────── */}
-      {phase === 'shuffle' && (
+      {/* ── 神谕还没有牌 ─────────────────────── */}
+      {phase === 'needDeck' && (
         <div style={styles.overlay}>
-          <div className="tarot-shuffle">
-            <div className="tarot-shuffle-card" />
-            <div className="tarot-shuffle-card" />
-            <div className="tarot-shuffle-card" />
+          <p style={styles.overlayHint}>神谕卡是你自己的牌</p>
+          <p className="tarot-need-text">
+            {workshop.decks.some((d) => d.kind === 'oracle')
+              ? '桌上还没有放神谕牌组，或者这套牌还是空的。去工坊挑一套放到桌上，或者先传几张牌吧。'
+              : '神谕卡没有基础牌组，去牌组工坊上传你自己的牌，牌名和牌意都由你来写。'}
+          </p>
+          <div style={styles.resultActions}>
+            <button className="tarot-chip" onClick={() => openWorkshop('oracle')}>去牌组工坊</button>
+            <button className="tarot-chip tarot-chip-ghost" onClick={() => setPhase('room')}>回到桌前</button>
           </div>
-          <p style={styles.overlayHint}>洗牌中，想着你的问题</p>
         </div>
       )}
 
       {/* ── 选牌阵 ───────────────────────────── */}
       {phase === 'spread' && (
         <div style={styles.overlay}>
-          <p style={styles.overlayHint}>选一个牌阵</p>
+          <p style={styles.overlayHint}>
+            {DECK_LABEL[drawKind]} · {drawDeck ? drawDeck.name : drawKind === 'oracle' ? '' : '基础牌组'} · 选一个牌阵
+          </p>
           <div className="tarot-spread-list">
-            {SPREADS.map((sp) => (
-              <button key={sp.id} className="tarot-spread-item" onClick={() => startDraw(sp.id)}>
-                <span
-                  className="tarot-spread-icon"
-                  style={{ gridTemplateColumns: `repeat(${sp.columns}, 1fr)` }}
-                  aria-hidden="true"
+            {spreadsFor(drawKind).map((sp) => {
+              const poolSize = buildPool(workshop, drawKind).length;
+              const enough = poolSize >= sp.positions.length;
+              return (
+                <button
+                  key={sp.id}
+                  className="tarot-spread-item"
+                  onClick={() => startDraw(sp.id)}
+                  disabled={!enough}
                 >
-                  {sp.positions.map((_, k) => <i key={k} />)}
-                </span>
-                <span className="tarot-spread-text">
-                  <span className="tarot-spread-name">
-                    {sp.name}
-                    <em>{sp.positions.length} 张</em>
+                  <span
+                    className="tarot-spread-icon"
+                    style={{ gridTemplateColumns: `repeat(${Math.min(sp.columns, 5)}, 1fr)`, width: sp.columns >= 5 ? 50 : 38 }}
+                    aria-hidden="true"
+                  >
+                    {sp.positions.map((_, k) => <i key={k} />)}
                   </span>
-                  <span className="tarot-spread-desc">{fillWho(sp.desc, who)}</span>
-                </span>
-              </button>
-            ))}
+                  <span className="tarot-spread-text">
+                    <span className="tarot-spread-name">
+                      {sp.name}
+                      <em>{sp.positions.length} 张</em>
+                    </span>
+                    <span className="tarot-spread-desc">
+                      {enough ? fillWho(sp.desc, who) : `这套牌只有 ${poolSize} 张，不够用`}
+                    </span>
+                  </span>
+                </button>
+              );
+            })}
           </div>
           <button className="tarot-chip tarot-chip-ghost" onClick={() => setPhase('room')}>
             回到桌前
           </button>
+        </div>
+      )}
+
+      {/* ── 洗牌 ─────────────────────────────── */}
+      {phase === 'shuffle' && (
+        <div style={styles.overlay}>
+          <div className="tarot-shuffle" style={{ height: Math.round(120 * drawRatio) }}>
+            <div className="tarot-shuffle-card" />
+            <div className="tarot-shuffle-card" />
+            <div className="tarot-shuffle-card" />
+          </div>
+          <p style={styles.overlayHint}>洗牌中，想着你的问题</p>
         </div>
       )}
 
@@ -473,8 +671,8 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
           <p style={styles.overlayHint}>
             {spread.positions.length === 1
               ? '凭感觉挑一张'
-              : picked.length < spread.positions.length
-                ? `凭感觉挑 ${spread.positions.length} 张 · 下一张：${fillWho(spread.positions[picked.length].label, who)}`
+              : nextSlot !== null
+                ? `凭感觉挑 ${spread.positions.length} 张 · 下一张：${fillWho(spread.positions[nextSlot].label, who)}`
                 : '牌已选好'}
           </p>
           {spread.positions.length > 1 && (
@@ -486,13 +684,11 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
           )}
           <div className="tarot-fan">
             {deckOrder.map((card, i) => {
-              const total = deckOrder.length;
-              const fanAngle = 68; // 扇面总角度
-              const angle = -fanAngle / 2 + (fanAngle / (total - 1)) * i;
+              const angle = fanCount > 1 ? -fanAngle / 2 + (fanAngle / (fanCount - 1)) * i : 0;
               const isPicked = picked.includes(i);
               return (
                 <button
-                  key={card.id}
+                  key={card.key}
                   className={isPicked ? 'tarot-fan-card tarot-fan-card-picked' : 'tarot-fan-card'}
                   style={{
                     transform: `rotate(${angle}deg)${isPicked ? ' translateY(-26px)' : ''}`,
@@ -502,7 +698,7 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
                   disabled={isPicked}
                   aria-label={`第 ${i + 1} 张`}
                 >
-                  <CardBack width={66} image={tarotDeck?.back} />
+                  <CardBack width={66} ratio={drawRatio} image={drawDeck?.back} />
                 </button>
               );
             })}
@@ -518,38 +714,30 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
         <div style={{ ...styles.overlay, justifyContent: 'flex-start', overflowY: 'auto' }}>
           <div className="tarot-result">
             <p style={styles.overlayHint}>
-              {spread.name}
+              {DECK_LABEL[drawKind]} · {spread.name}
               {flipped.some((v) => !v) ? ' · 点牌翻开' : ' · 点牌看解读'}
             </p>
 
             <div
               className="tarot-spread-grid"
-              style={{ gridTemplateColumns: `repeat(${spread.columns}, auto)` }}
+              style={{ gridTemplateColumns: `repeat(${spread.columns}, auto)`, gap: gridGap }}
             >
               {drawn.map((d, i) => (
-                <div key={i} className="tarot-slot" style={{ animationDelay: `${i * 0.08}s` }}>
+                <div key={i} className="tarot-slot" style={{ animationDelay: `${i * 0.06}s` }}>
                   {spread.positions.length > 1 && (
-                    <span className="tarot-slot-label">{fillWho(spread.positions[i].label, who)}</span>
+                    <span className="tarot-slot-label" style={spread.columns >= 5 ? { fontSize: 10 } : undefined}>
+                      {fillWho(spread.positions[i].label, who)}
+                    </span>
                   )}
                   <button
-                    className={
-                      'tarot-slot-card' +
-                      (focus === i && flipped[i] ? ' tarot-slot-card-on' : '')
-                    }
+                    className={'tarot-slot-card' + (focus === i && flipped[i] ? ' tarot-slot-card-on' : '')}
                     onClick={() => tapResultCard(i)}
                     aria-label={flipped[i] ? d.card.name : `翻开第 ${i + 1} 张`}
                   >
                     {flipped[i] ? (
-                      <span className="tarot-flip-in">
-                        <CardFace
-                          card={d.card}
-                          reversed={d.reversed}
-                          width={spread.cardWidth}
-                          image={tarotDeck?.faces[d.card.id]}
-                        />
-                      </span>
+                      <span className="tarot-flip-in">{renderFace(d, spread.cardWidth)}</span>
                     ) : (
-                      <CardBack width={spread.cardWidth} image={tarotDeck?.back} />
+                      <CardBack width={spread.cardWidth} ratio={drawRatio} image={drawDeck?.back} />
                     )}
                   </button>
                 </div>
@@ -564,15 +752,7 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
                     <span>{fillWho(spread.positions[focus].hint, who)}</span>
                   </p>
                 )}
-                <h2 style={styles.resultName}>
-                  {drawn[focus].card.name}
-                  <span style={styles.resultPos}>{drawn[focus].reversed ? '逆位' : '正位'}</span>
-                </h2>
-                <p style={styles.resultMeaning}>
-                  {drawn[focus].reversed
-                    ? meaningOf(drawn[focus].card.id).rev
-                    : meaningOf(drawn[focus].card.id).up}
-                </p>
+                {renderReading(drawn[focus])}
               </div>
             ) : (
               <p className="tarot-reading-empty">
@@ -601,6 +781,7 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
         <Workshop
           data={workshop}
           update={updateWorkshop}
+          initialKind={workshopKind}
           onClose={() => setPhase('room')}
           onToast={setToast}
         />
@@ -619,90 +800,173 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
                 合上
               </button>
             </div>
-            <div className="tarot-book-tabs">
-              {([
-                ['all', '全部 78'],
-                ['major', '大阿卡纳'],
-                ['minor', '小阿卡纳'],
-              ] as const).map(([key, label]) => (
+
+            <div className="tarot-book-tabs tarot-book-kinds">
+              {([['tarot', 'Tarot'], ['lenormand', 'Lenormand']] as const).map(([key, label]) => (
                 <button
                   key={key}
-                  className={bookFilter === key ? 'tarot-tab tarot-tab-on' : 'tarot-tab'}
-                  onClick={() => { setEditing(null); setBookFilter(key); }}
+                  className={bookKind === key ? 'tarot-tab tarot-tab-on' : 'tarot-tab'}
+                  onClick={() => { setEditing(null); setBookKind(key); }}
                 >
                   {label}
                 </button>
               ))}
             </div>
-            <p className="tarot-book-tip">双击牌意可以改写，改动保存在这台设备上</p>
-            <div className="tarot-book-body">
-              {bookList.map((card) => {
-                const m = meaningOf(card.id);
-                const isEditing = editing?.id === card.id;
-                const edited = overrides[card.id] !== undefined;
-                return (
-                  <div
-                    key={card.id}
-                    className={isEditing ? 'tarot-entry tarot-entry-editing' : 'tarot-entry'}
-                    onClick={() => handleEntryTap(card.id)}
+
+            {bookKind === 'tarot' && (
+              <div className="tarot-book-tabs">
+                {([
+                  ['all', '全部 78'],
+                  ['major', '大阿卡纳'],
+                  ['minor', '小阿卡纳'],
+                ] as const).map(([key, label]) => (
+                  <button
+                    key={key}
+                    className={bookFilter === key ? 'tarot-tab tarot-tab-on' : 'tarot-tab'}
+                    onClick={() => { setEditing(null); setBookFilter(key); }}
                   >
-                    <div className="tarot-entry-head">
-                      <span className="tarot-entry-mark">{card.mark}</span>
-                      <span className="tarot-entry-name">{card.name}</span>
-                      {card.suit && (
-                        <span className="tarot-entry-suit">{SUIT_INFO[card.suit].element}</span>
-                      )}
-                      {edited && <span className="tarot-entry-edited">已改写</span>}
-                    </div>
-                    {isEditing && editing ? (
-                      <div className="tarot-edit">
-                        <label className="tarot-edit-row">
-                          <b>正</b>
-                          <textarea
-                            className="tarot-edit-input"
-                            value={editing.up}
-                            rows={2}
-                            autoFocus
-                            onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setEditing({ ...editing, up: e.target.value })}
-                          />
-                        </label>
-                        <label className="tarot-edit-row">
-                          <b>逆</b>
-                          <textarea
-                            className="tarot-edit-input"
-                            value={editing.rev}
-                            rows={2}
-                            onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setEditing({ ...editing, rev: e.target.value })}
-                          />
-                        </label>
-                        <div className="tarot-edit-actions">
-                          {edited && (
-                            <button className="tarot-chip tarot-chip-ghost tarot-chip-sm" onClick={resetEdit}>
-                              恢复默认
-                            </button>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <p className="tarot-book-tip">双击牌意可以改写</p>
+
+            <div className="tarot-book-body">
+              {bookKind === 'tarot'
+                ? tarotBookList.map((card) => {
+                    const m = meaningOf(card.id);
+                    const isEditing = editing?.kind === 'tarot' && editing.id === card.id;
+                    const edited = tarotOverrides[card.id] !== undefined;
+                    return (
+                      <div
+                        key={card.id}
+                        className={isEditing ? 'tarot-entry tarot-entry-editing' : 'tarot-entry'}
+                        onClick={() => handleEntryTap('tarot', card.id)}
+                      >
+                        <div className="tarot-entry-head">
+                          <span className="tarot-entry-mark">{card.mark}</span>
+                          <span className="tarot-entry-name">{card.name}</span>
+                          {card.suit && (
+                            <span className="tarot-entry-suit">{SUIT_INFO[card.suit].element}</span>
                           )}
-                          <div style={{ flex: 1 }} />
-                          <button className="tarot-chip tarot-chip-ghost tarot-chip-sm" onClick={() => setEditing(null)}>
-                            取消
-                          </button>
-                          <button className="tarot-chip tarot-chip-sm" onClick={saveEdit}>
-                            保存
-                          </button>
+                          {edited && <span className="tarot-entry-edited">已改写</span>}
                         </div>
+                        {isEditing && editing ? (
+                          <EntryEditor
+                            labelA="正"
+                            labelB="逆"
+                            a={editing.a}
+                            b={editing.b}
+                            edited={edited}
+                            onChange={(a, b) => setEditing({ ...editing, a, b })}
+                            onSave={saveEdit}
+                            onCancel={() => setEditing(null)}
+                            onReset={resetEdit}
+                          />
+                        ) : (
+                          <>
+                            <p className="tarot-entry-line"><b>正</b>{m.up}</p>
+                            <p className="tarot-entry-line"><b>逆</b>{m.rev}</p>
+                          </>
+                        )}
                       </div>
-                    ) : (
-                      <>
-                        <p className="tarot-entry-line"><b>正</b>{m.up}</p>
-                        <p className="tarot-entry-line"><b>逆</b>{m.rev}</p>
-                      </>
-                    )}
-                  </div>
-                );
-              })}
+                    );
+                  })
+                : LENORMAND_DECK.map((card) => {
+                    const m = lenormandOf(card.id);
+                    const isEditing = editing?.kind === 'lenormand' && editing.id === card.id;
+                    const edited = lenormandOverrides[card.id] !== undefined;
+                    return (
+                      <div
+                        key={card.id}
+                        className={isEditing ? 'tarot-entry tarot-entry-editing' : 'tarot-entry'}
+                        onClick={() => handleEntryTap('lenormand', card.id)}
+                      >
+                        <div className="tarot-entry-head">
+                          <span className="tarot-entry-mark">{card.id}</span>
+                          <span className="tarot-entry-name">{card.name}</span>
+                          {edited && <span className="tarot-entry-edited">已改写</span>}
+                        </div>
+                        {isEditing && editing ? (
+                          <EntryEditor
+                            labelA="关键词"
+                            labelB="时间"
+                            a={editing.a}
+                            b={editing.b}
+                            edited={edited}
+                            onChange={(a, b) => setEditing({ ...editing, a, b })}
+                            onSave={saveEdit}
+                            onCancel={() => setEditing(null)}
+                            onReset={resetEdit}
+                          />
+                        ) : (
+                          <>
+                            <p className="tarot-entry-line tarot-entry-line-wide"><b>关键词</b>{m.keywords}</p>
+                            <p className="tarot-entry-line tarot-entry-line-wide"><b>时间</b>{m.time}</p>
+                          </>
+                        )}
+                      </div>
+                    );
+                  })}
             </div>
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/** 牌意之书里改写一条的编辑框 */
+function EntryEditor({
+  labelA, labelB, a, b, edited, onChange, onSave, onCancel, onReset,
+}: {
+  labelA: string;
+  labelB: string;
+  a: string;
+  b: string;
+  edited: boolean;
+  onChange: (a: string, b: string) => void;
+  onSave: () => void;
+  onCancel: () => void;
+  onReset: () => void;
+}) {
+  return (
+    <div className="tarot-edit">
+      <label className="tarot-edit-row">
+        <b>{labelA}</b>
+        <textarea
+          className="tarot-edit-input"
+          value={a}
+          rows={2}
+          autoFocus
+          onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => onChange(e.target.value, b)}
+        />
+      </label>
+      <label className="tarot-edit-row">
+        <b>{labelB}</b>
+        <textarea
+          className="tarot-edit-input"
+          value={b}
+          rows={2}
+          onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => onChange(a, e.target.value)}
+        />
+      </label>
+      <div className="tarot-edit-actions">
+        {edited && (
+          <button className="tarot-chip tarot-chip-ghost tarot-chip-sm" onClick={onReset}>
+            恢复默认
+          </button>
+        )}
+        <div style={{ flex: 1 }} />
+        <button className="tarot-chip tarot-chip-ghost tarot-chip-sm" onClick={onCancel}>
+          取消
+        </button>
+        <button className="tarot-chip tarot-chip-sm" onClick={onSave}>
+          保存
+        </button>
+      </div>
     </div>
   );
 }
@@ -1068,6 +1332,28 @@ const CSS = `
 .tarot-reading-empty {
   margin: 0; font-size: 12px; color: rgba(239,227,200,0.5); letter-spacing: 0.06em;
 }
+
+.tarot-spread-item:disabled { opacity: 0.45; cursor: default; }
+.tarot-spread-item:disabled:hover { border-color: rgba(217,185,120,0.35); background: rgba(40,22,62,0.55); }
+.tarot-need-text {
+  margin: 0; max-width: 300px; text-align: center;
+  font-size: 14px; line-height: 1.8; color: rgba(239,227,200,0.85);
+}
+.tarot-len-reading {
+  max-width: 320px; display: flex; flex-direction: column; gap: 6px;
+}
+.tarot-len-reading p {
+  margin: 0; font-size: 14px; line-height: 1.75; color: rgba(239,227,200,0.9);
+}
+.tarot-len-reading b {
+  color: #d9b978; font-weight: 400; font-size: 12px; margin-right: 10px; letter-spacing: 0.08em;
+}
+.tarot-link {
+  border: none; background: transparent; padding: 0; cursor: pointer;
+  color: #d9b978; font: inherit; text-decoration: underline; text-underline-offset: 3px;
+}
+.tarot-entry-line-wide b { min-width: 3.2em; display: inline-block; }
+.tarot-book-kinds .tarot-tab { font-size: 13px; letter-spacing: 0.06em; }
 
 .tarot-flip-btn {
   border: none; background: transparent; padding: 0; cursor: pointer;
