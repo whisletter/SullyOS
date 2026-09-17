@@ -5,7 +5,7 @@ import type { DeckKind } from './decks';
  * 双人占卜的存档（和单人抽牌、随心抽完全分开存）。
  *
  * · 进行中的一场：系统资源表，id = tarot_duo_session_v1_<角色id>。「暂时离开」后回来接着玩。
- * · 占卜记录：tarot_duo_records_v1_<角色id>。每局结束和「结束占卜」时都会存一份，下一版的记录页从这里读。
+ * · 占卜记录：tarot_duo_records_v1_<角色id>。每局结束和「结束占卜」时都会存一份，书架上的占卜记录页从这里读。
  * · 猜中次数：tarot_duo_stats_v1_<角色id>。称号以后从这里算。
  * 这三份都在系统资源表里，会进备份。
  * · TA 的接口（窗外的月亮）和「玩法说明看过没」存在浏览器本地，和大富翁的接口设置一样不进备份。
@@ -101,9 +101,8 @@ export interface DuoLogEntry {
 export interface DuoSession {
   version: 1;
   id: string;
+  /** 只按角色 ID 认人，存档里不存任何名字。名字都是用的时候现查 */
   charId: string;
-  taName: string;
-  userName: string;
   startedAt: number;
   endedAt?: number;
   rounds: DuoRound[];
@@ -114,8 +113,8 @@ export function duoUid(prefix = 'd'): string {
   return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
 }
 
-export function newDuoSession(charId: string, taName: string, userName: string): DuoSession {
-  return { version: 1, id: duoUid('s'), charId, taName, userName, startedAt: Date.now(), rounds: [], log: [] };
+export function newDuoSession(charId: string): DuoSession {
+  return { version: 1, id: duoUid('s'), charId, startedAt: Date.now(), rounds: [], log: [] };
 }
 
 const sessionKey = (charId: string) => `tarot_duo_session_v1_${charId || 'default'}`;
@@ -130,8 +129,6 @@ function normalizeSession(raw: unknown, charId: string): DuoSession | null {
     version: 1,
     id: String(r.id),
     charId: r.charId || charId,
-    taName: r.taName || 'TA',
-    userName: r.userName || '我',
     startedAt: typeof r.startedAt === 'number' ? r.startedAt : Date.now(),
     endedAt: r.endedAt,
     rounds: r.rounds.map((x) => ({ ...x, pendingPicks: x.pendingPicks ?? null, cards: Array.isArray(x.cards) ? x.cards : [] })),
@@ -270,15 +267,20 @@ export function upsertDuoRecord(session: DuoSession): Promise<void> {
     let sessions: DuoSession[] = [];
     try {
       const raw = await DB.getAssetRaw(key);
-      if (raw && Array.isArray(raw.sessions)) sessions = raw.sessions;
+      if (raw && Array.isArray(raw.sessions)) {
+        // 顺手把旧存档里的名字字段清掉
+        sessions = raw.sessions.map((s: unknown) => normalizeSession(s, session.charId)).filter(Boolean) as DuoSession[];
+      }
     } catch {
       // 读失败时不写，免得把以前的记录覆盖成只剩这一场
       return;
     }
     const idx = sessions.findIndex((s) => s.id === session.id);
-    if (idx >= 0) sessions[idx] = session;
-    else sessions.push(session);
+    const clean = normalizeSession(session, session.charId) ?? session;
+    if (idx >= 0) sessions[idx] = clean;
+    else sessions.push(clean);
     await DB.saveAssetRaw(key, { version: 1, sessions });
+    notify(session.charId);
   });
 }
 
@@ -355,4 +357,22 @@ export function introSeen(): boolean {
 
 export function markIntroSeen() {
   try { localStorage.setItem(INTRO_KEY, '1'); } catch { /* 忽略 */ }
+}
+
+// ─── 占卜记录页用 ─────────────────────────────────────────────────────────
+
+/** 从占卜记录里删掉一场（进行中的那一场不在这里删） */
+export function deleteDuoRecord(charId: string, sessionId: string): Promise<boolean> {
+  const key = recordsKey(charId);
+  return enqueue(key, async () => {
+    const raw = await DB.getAssetRaw(key);
+    const sessions: DuoSession[] = raw && Array.isArray(raw.sessions)
+      ? raw.sessions.map((s: unknown) => normalizeSession(s, charId)).filter(Boolean) as DuoSession[]
+      : [];
+    const next = sessions.filter((s) => s.id !== sessionId);
+    if (next.length === sessions.length) return false;
+    await DB.saveAssetRaw(key, { version: 1, sessions: next });
+    notify(charId);
+    return true;
+  });
 }

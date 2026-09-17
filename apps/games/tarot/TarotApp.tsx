@@ -10,6 +10,7 @@ import {
 import { FreeDraw, FREE_DRAW_CSS } from './FreeDraw';
 import { Workshop, WORKSHOP_CSS } from './Workshop';
 import { DuoTable, DUO_CSS, DuoRequest } from './DuoTable';
+import { DuoRecords, DUO_RECORDS_CSS } from './DuoRecords';
 import { loadDuoSession, loadDuoApi, saveDuoApi, introSeen, markIntroSeen, DuoApiSetting } from './duoStore';
 import { useOS } from '../../../context/OSContext';
 // 房间图和代码放在同一个文件夹，由 Vite 打包。想换背景，直接用同名图片覆盖即可。
@@ -37,7 +38,7 @@ import roomOccupiedPhoneUrl from './room-occupied-phone.webp';
  *
  * 和 TA 一起占卜（DuoTable.tsx）：TA 在座时点托盘进双人，不在座时还是单人抽牌，两条路分开。
  * 占卜进行中电话点不动，猫爪会问「暂时离开」还是「结束占卜」。
- * 窗外的月亮是 TA 的接口设置，壁炉边的书架是占卜记录（下一版），TA 在座时可以戳他。
+ * 窗外的月亮是 TA 的接口设置，壁炉边的书架是占卜记录（DuoRecords.tsx），TA 在座时可以戳他。
  * 角色名默认读当前选中的角色（useOS），也可以从 props 传进来覆盖。
  */
 
@@ -50,7 +51,7 @@ export interface TarotAppProps {
   characterAvatar?: string;
 }
 
-type Phase = 'room' | 'spread' | 'needDeck' | 'shuffle' | 'fan' | 'result' | 'book' | 'workshop' | 'free';
+type Phase = 'room' | 'spread' | 'needDeck' | 'shuffle' | 'fan' | 'result' | 'book' | 'workshop' | 'free' | 'records';
 
 /** 按工坊里桌上正在用的牌组，拼出这副牌的抽牌池 */
 function buildPool(data: WorkshopData, kind: DeckKind): PoolCard[] {
@@ -97,7 +98,8 @@ const HOTSPOTS_TABLET: Hotspot[] = [
   { key: 'phone', label: '电话', left: '87%', top: '54%', width: '13%', height: '14%', ready: true },
   { key: 'painting', label: '牌组工坊', left: '51%', top: '2%', width: '26%', height: '24%', ready: true },
   { key: 'moon', label: '接口设置', left: '12%', top: '4%', width: '14%', height: '11%', ready: true },
-  { key: 'shelf', label: '占卜记录', left: '89%', top: '0%', width: '11%', height: '9%', ready: true },
+  // 书架用画下面、椅子右后方那一排：图顶端在 4:3 的平板上会被裁掉，放不了东西
+  { key: 'shelf', label: '占卜记录', left: '58%', top: '27%', width: '20%', height: '9%', ready: true },
 ];
 
 /** 平板 · TA 在座：多一块戳 TA 的区域。放在最前面，和画、天球仪重叠的地方让给它们 */
@@ -454,10 +456,6 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
   }, []);
 
   const handleHotspot = useCallback((spot: Hotspot) => {
-    if (spot.key === 'shelf') {
-      setToast('占卜记录下一版开放，记录已经在帮你存了');
-      return;
-    }
     if (!spot.ready) {
       setToast(`${spot.label}还没开，下一版见`);
       return;
@@ -468,6 +466,7 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
       else openDeck(spot.key);
     }
     else if (spot.key === 'book') { setBookReturn('room'); setPhase('book'); }
+    else if (spot.key === 'shelf') setPhase('records');
     else if (spot.key === 'lamp') setLampBright((v) => !v);
     // 电话：拨过去 TA 就坐到对面，再点一次 TA 离席；占卜进行中点不动
     else if (spot.key === 'phone') {
@@ -594,7 +593,7 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
 
   return (
     <div ref={rootRef} style={styles.root}>
-      <style>{CSS + WORKSHOP_CSS + FREE_DRAW_CSS + DUO_CSS}</style>
+      <style>{CSS + WORKSHOP_CSS + FREE_DRAW_CSS + DUO_CSS + DUO_RECORDS_CSS}</style>
 
       {/* ── 房间 ─────────────────────────────── */}
       <div style={roomBox}>
@@ -645,8 +644,8 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
         ))}
       </div>
 
-      {/* ── 和 TA 一起占卜（TA 在座时一直挂着，去牌意之书时隐藏不卸载）── */}
-      {taSeated && frame.w > 0 && (phase === 'room' || phase === 'book') && (
+      {/* ── 和 TA 一起占卜（TA 在座时一直挂着，去牌意之书、占卜记录时隐藏不卸载）── */}
+      {taSeated && frame.w > 0 && (phase === 'room' || phase === 'book' || phase === 'records') && (
         <DuoTable
           key={charId || 'default'}
           charId={charId}
@@ -702,7 +701,7 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
               <li><b>电话</b>请{who}坐到对面，再点一次{who}离席。占卜进行中电话点不动。</li>
               <li><b>戳一戳</b>{who}坐在对面、没在抽牌的时候，戳戳{who}。</li>
               <li><b>窗外的月亮</b>{who}的接口设置，这份说明也在里面。</li>
-              <li><b>壁炉边的书架</b>占卜记录，下一版开放。</li>
+              <li><b>壁炉边的书架</b>占卜记录。和{who}一起占卜的每一场都收在这里，可以翻看、导出。</li>
               <li><b>天球仪</b>称号，之后开放。</li>
               <li><b>猫爪</b>离开小屋。占卜进行中会问你暂时离开，还是结束占卜。</li>
             </ul>
@@ -969,6 +968,21 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
           data={workshop}
           update={updateWorkshop}
           initialKind={workshopKind}
+          onClose={() => setPhase('room')}
+          onToast={setToast}
+        />
+      )}
+
+      {/* ── 占卜记录（壁炉边的书架）──────────────── */}
+      {phase === 'records' && (
+        <DuoRecords
+          charId={charId}
+          who={who}
+          userName={userProfile?.name || ''}
+          workshop={workshop}
+          tarotMeaning={meaningOf}
+          lenormandMeaning={lenormandOf}
+          closeLabel={duoActive && taSeated ? '回桌前' : '合上'}
           onClose={() => setPhase('room')}
           onToast={setToast}
         />
@@ -1281,12 +1295,20 @@ const CSS = `
   cursor: pointer;
   padding: 0;
   z-index: 10;
+  outline: none;
+  -webkit-tap-highlight-color: transparent;
   transition: box-shadow 0.25s ease, background 0.25s ease;
 }
-.tarot-hotspot:hover, .tarot-hotspot:focus-visible {
+/* 只有鼠标悬停和键盘选中时才描金框；手机点完不会留框 */
+.tarot-hotspot:focus-visible {
   background: rgba(217,185,120,0.12);
   box-shadow: inset 0 0 0 1px rgba(217,185,120,0.55), 0 0 18px rgba(217,185,120,0.3);
-  outline: none;
+}
+@media (hover: hover) and (pointer: fine) {
+  .tarot-hotspot:hover {
+    background: rgba(217,185,120,0.12);
+    box-shadow: inset 0 0 0 1px rgba(217,185,120,0.55), 0 0 18px rgba(217,185,120,0.3);
+  }
 }
 .tarot-hotspot-label {
   position: absolute;
@@ -1304,8 +1326,10 @@ const CSS = `
   transition: opacity 0.2s ease;
   pointer-events: none;
 }
-.tarot-hotspot:hover .tarot-hotspot-label,
 .tarot-hotspot:focus-visible .tarot-hotspot-label { opacity: 1; }
+@media (hover: hover) and (pointer: fine) {
+  .tarot-hotspot:hover .tarot-hotspot-label { opacity: 1; }
+}
 
 .tarot-hint { animation: tarotShimmer 1.1s ease-in-out 1 both; }
 @keyframes tarotShimmer {

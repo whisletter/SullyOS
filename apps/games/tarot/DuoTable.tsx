@@ -471,7 +471,7 @@ export function DuoTable(props: DuoTableProps) {
     const { ta, user } = names;
     let s = peekDuoSession(charId).session ?? sessionRef.current;
     if (!s) {
-      s = newDuoSession(charId, ta, user);
+      s = newDuoSession(charId);
       sessionRef.current = s;
       saveDuoSession(s);
       setSession(s);
@@ -817,7 +817,7 @@ export function DuoTable(props: DuoTableProps) {
     const p = pokeRef.current;
     p.count = now - p.last > POKE_RESET_MS ? 1 : p.count + 1;
     p.last = now;
-    const line = pickPokeLine(p.count, p.line, names.user);
+    const line = pickPokeLine(p.count, p.line, names);
     p.line = line;
     setBubble({ text: line, kind: 'poke', key: now });
     if (pokeTimer.current !== null) window.clearTimeout(pokeTimer.current);
