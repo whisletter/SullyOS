@@ -2,6 +2,10 @@ import React, { useMemo, useState, useEffect, useCallback } from 'react';
 import { TAROT_DECK, TarotCard, SUIT_INFO } from './cards';
 import { getMeaning } from './meanings';
 import { CardFace, CardBack, CARD_RATIO } from './CardFace';
+import { useOS } from '../../../context/OSContext';
+// 房间图和代码放在同一个文件夹，由 Vite 打包。想换背景，直接用同名图片覆盖这两张即可。
+import roomEmptyUrl from './room-empty.jpg';
+import roomOccupiedUrl from './room-occupied.jpg';
 
 /**
  * 塔罗 — 最小可玩版。
@@ -13,16 +17,16 @@ import { CardFace, CardBack, CARD_RATIO } from './CardFace';
  * 牌组工坊（墙上的画）、称号（天球仪）、呼叫 TA（电话）。
  * 点这些位置现在会提示「还没开」，不会报错。
  *
- * 组件不依赖项目里任何东西，只用 React，所以可以单独拿去别的项目用。
- * 角色名和头像从 props 进来，代码里不写死任何具体角色。
+ * 角色名和头像默认读当前选中的角色（useOS），也可以从 props 传进来覆盖。
+ * 代码里不写死任何具体角色。
  */
 
 export interface TarotAppProps {
   /** 游戏大厅返回，由 registry 的 GameProps 传进来 */
   onBack: () => void;
-  /** 当前角色的名字，用来显示「TA 坐在对面」那类文案；没传就用「TA」 */
+  /** 角色名，不传就读当前选中的角色；都没有时显示「TA」 */
   characterName?: string;
-  /** 当前角色头像，传了会显示在椅子上方的小铭牌里 */
+  /** 角色头像，不传就读当前选中的角色 */
   characterAvatar?: string;
 }
 
@@ -36,9 +40,9 @@ interface DrawnCard {
 const GOLD = '#d9b978';
 const PARCHMENT = '#efe3c8';
 
-/** 房间图路径。图片放 public/games/tarot/ 下 */
-const ROOM_EMPTY = '/games/tarot/room-empty.jpg';
-const ROOM_OCCUPIED = '/games/tarot/room-occupied.jpg';
+/** 房间图：空座位 / TA 在座 */
+const ROOM_EMPTY = roomEmptyUrl;
+const ROOM_OCCUPIED = roomOccupiedUrl;
 
 /** 洗牌：Fisher–Yates */
 function shuffle<T>(input: T[]): T[] {
@@ -71,7 +75,10 @@ const HOTSPOTS: Hotspot[] = [
 ];
 
 export function TarotApp({ characterName, characterAvatar, onBack }: TarotAppProps) {
-  const who = characterName?.trim() || 'TA';
+  const { activeCharacterId, characters } = useOS();
+  const activeChar = characters.find((c) => c.id === activeCharacterId);
+  const who = characterName?.trim() || activeChar?.name?.trim() || 'TA';
+  const avatar = characterAvatar || activeChar?.avatar || undefined;
 
   const [phase, setPhase] = useState<Phase>('room');
   const [lampBright, setLampBright] = useState(false);
@@ -182,8 +189,8 @@ export function TarotApp({ characterName, characterAvatar, onBack }: TarotAppPro
           onClick={() => setTaSeated((v) => !v)}
           aria-label={taSeated ? `请${who}先离席` : `请${who}入座`}
         >
-          {characterAvatar && taSeated && (
-            <img src={characterAvatar} alt="" className="tarot-seat-avatar" />
+          {avatar && taSeated && (
+            <img src={avatar} alt="" className="tarot-seat-avatar" />
           )}
           <span className="tarot-seat-label">
             {taSeated ? `${who} 坐在对面` : `请 ${who} 入座`}
@@ -328,9 +335,10 @@ export function TarotApp({ characterName, characterAvatar, onBack }: TarotAppPro
 
 const styles: Record<string, React.CSSProperties> = {
   root: {
-    position: 'relative',
-    width: '100%',
-    height: '100%',
+    // 盖在游戏大厅上面，跟大富翁同一层
+    position: 'absolute',
+    inset: 0,
+    zIndex: 70,
     overflow: 'hidden',
     background: 'linear-gradient(180deg, #170d24 0%, #241538 40%, #1a0f28 100%)',
     color: PARCHMENT,
@@ -374,6 +382,7 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     gap: 8,
     padding: '10px 12px',
+    paddingTop: 'calc(10px + var(--safe-top, 0px))',
     zIndex: 20,
   },
   overlay: {
