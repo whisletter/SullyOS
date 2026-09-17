@@ -23,12 +23,57 @@ export const FREE_DRAW_ASSET_ID = 'tarot_free_draw_v1';
 
 /** 每类最多同时摆几副 */
 const MAX_PER_KIND = 3;
+/** 拿到眼前时牌的宽度 */
+const INSPECT_CARD_W = 170;
+
+/**
+ * 猫爪返回键，和小屋左上角那个一样（样式是 TarotApp 里的 .tarot-paw）。
+ * 工坊也用这个。gradientId 每处不同，免得页面里出现重复的 SVG id。
+ */
+export function PawButton({ onClick, label = '回小屋', gradientId }: { onClick: () => void; label?: string; gradientId: string }) {
+  return (
+    <button className="tarot-paw" onClick={onClick} aria-label={label} title={label}>
+      <svg width={20} height={20} viewBox="0 0 24 24" aria-hidden="true">
+        <defs>
+          <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#f3dca4" />
+            <stop offset="100%" stopColor="#c89c52" />
+          </linearGradient>
+        </defs>
+        <g fill={`url(#${gradientId})`}>
+          <ellipse cx="5.9" cy="10.4" rx="1.9" ry="2.4" transform="rotate(-20 5.9 10.4)" />
+          <ellipse cx="9.5" cy="6.2" rx="2" ry="2.6" transform="rotate(-6 9.5 6.2)" />
+          <ellipse cx="14.5" cy="6.2" rx="2" ry="2.6" transform="rotate(6 14.5 6.2)" />
+          <ellipse cx="18.1" cy="10.4" rx="1.9" ry="2.4" transform="rotate(20 18.1 10.4)" />
+          <path d="M12 11.4c-2.6 0-5.7 3.2-5.7 5.9 0 1.6 1.2 2.7 2.7 2.7 1.2 0 1.9-.6 3-.6s1.8.6 3 .6c1.5 0 2.7-1.1 2.7-2.7 0-2.7-3.1-5.9-5.7-5.9z" />
+        </g>
+      </svg>
+    </button>
+  );
+}
+
+/** 金色小书图标 */
+function BookIcon({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="#d9b978" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 6.5C10.2 5.2 7.6 4.6 4 4.8v13.4c3.6-.2 6.2.4 8 1.7 1.8-1.3 4.4-1.9 8-1.7V4.8c-3.6-.2-6.2.4-8 1.7z" />
+      <path d="M12 6.5v13.4" />
+      <path d="M7 8.6c1.2 0 2.2.2 3 .6M7 11.6c1.2 0 2.2.2 3 .6M14 9.2c.8-.4 1.8-.6 3-.6M14 12.2c.8-.4 1.8-.6 3-.6" strokeWidth="1.2" />
+    </svg>
+  );
+}
 
 /** 桌上每张牌的高度（px），宽度按比例算 */
 const TABLE_CARD_H = 112;
 const SLOT_GAP_X = 14;
 const SLOT_GAP_Y = 22;
 const TABLE_PAD = 14;
+/** 抽牌区扇形里每张牌背的宽度，手指点得准一点 */
+const FAN_CARD_W = 48;
+/** 扇形的转轴在牌顶往下多少 px（越大扇面越平） */
+const FAN_PIVOT = 300;
+/** 被按住的那张抬起多少 */
+const FAN_LIFT = 22;
 
 interface FreeDeckState {
   deckId: string;
@@ -109,14 +154,24 @@ function remainingOf(state: FreeDeckState, pool: PoolCard[], table: TableCard[])
   return fresh.length ? [...kept, ...fresh] : kept;
 }
 
+/**
+ * 最近一次的数据留在内存里：从随心抽跳去牌意之书再回来时，组件会重新挂载，
+ * 这时写库可能还没落盘，直接用内存里的就不会读到旧数据。
+ */
+let freeCache: FreeDrawData | null = null;
+
 function useFreeDrawStore() {
-  const [data, setData] = useState<FreeDrawData>(emptyFree);
-  const [loaded, setLoaded] = useState(false);
+  const [data, setData] = useState<FreeDrawData>(() => freeCache ?? emptyFree());
+  const [loaded, setLoaded] = useState(freeCache !== null);
   const ref = useRef<FreeDrawData>(data);
   const readOk = useRef(false);
   const timer = useRef<number | null>(null);
 
   useEffect(() => {
+    if (freeCache) {
+      readOk.current = true;
+      return;
+    }
     let alive = true;
     (async () => {
       let next = emptyFree();
@@ -130,6 +185,7 @@ function useFreeDrawStore() {
       }
       if (!alive) return;
       readOk.current = ok;
+      if (ok) freeCache = next;
       ref.current = next;
       setData(next);
       setLoaded(true);
@@ -155,6 +211,7 @@ function useFreeDrawStore() {
     ref.current = next;
     setData(next);
     if (!readOk.current) return;
+    freeCache = next;
     if (timer.current !== null) window.clearTimeout(timer.current);
     timer.current = window.setTimeout(flush, 400);
   }, [flush]);
@@ -172,12 +229,14 @@ interface FreeDrawProps {
   onClose: () => void;
   onToast: (text: string) => void;
   onOpenWorkshop: (kind: DeckKind) => void;
+  /** 跳去牌意之书（看完回到随心抽） */
+  onOpenBook: (kind: DeckKind) => void;
 }
 
 type AskState = { deckId: string } | null;
 
 export function FreeDraw({
-  workshop, entryKind, tarotMeaning, lenormandMeaning, onClose, onToast, onOpenWorkshop,
+  workshop, entryKind, tarotMeaning, lenormandMeaning, onClose, onToast, onOpenWorkshop, onOpenBook,
 }: FreeDrawProps) {
   const { data, loaded, update } = useFreeDrawStore();
 
@@ -185,8 +244,18 @@ export function FreeDraw({
   const [activeDeckId, setActiveDeckId] = useState<string | null>(null);
   const [ask, setAsk] = useState<AskState>(null);
   const [confirmClear, setConfirmClear] = useState(false);
-  const [sheetId, setSheetId] = useState<string | null>(null);
   const [justDropped, setJustDropped] = useState<string | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  /** 上一次点桌上牌的时间，用来认双击 */
+  const lastTap = useRef<{ id: string; t: number } | null>(null);
+  /** 桌上每张牌的 DOM，放大动画要知道它在哪 */
+  const cardEls = useRef<Record<string, HTMLDivElement | null>>({});
+
+  // ── 放大看牌 ──
+  // measure：大牌先按最终位置排好（看不见）→ from：瞬间挪回桌上那张牌的位置和大小
+  // → open：带动画飞到眼前 → leave：飞回去，结束后卸载
+  const bigRef = useRef<HTMLDivElement>(null);
+  const [inspect, setInspect] = useState<{ id: string; stage: 'measure' | 'from' | 'open' | 'leave'; t: string } | null>(null);
 
   // 第一次进来还没选过牌组 → 直接打开选牌页
   useEffect(() => {
@@ -210,7 +279,8 @@ export function FreeDraw({
     const ro = new ResizeObserver(measure);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [picking]);
+    // 加载完、从选牌页回来时桌面才出现，要重新量
+  }, [picking, loaded]);
 
   // ── 每副牌的池子 ──
   const pools = useMemo(() => {
@@ -452,18 +522,68 @@ export function FreeDraw({
     }
     setDragPos(null);
     if (cancelled) return;
-    // 没拖动 = 点了一下：牌背朝上就翻开，已经翻开就看牌意
+    // 没拖动 = 点了一下：牌背朝上就翻开；已经翻开的牌快速点两下，拿到眼前看
     const card = data.cards.find((c) => c.id === d.id);
     if (!card) return;
+    const now = Date.now();
+    const prevTap = lastTap.current;
     if (!card.faceUp) {
       update((prev) => ({
         ...prev,
         zTop: prev.zTop + 1,
         cards: prev.cards.map((c) => (c.id === card.id ? { ...c, faceUp: true, z: prev.zTop + 1 } : c)),
       }));
-    } else {
-      setSheetId(card.id);
+      lastTap.current = { id: card.id, t: now };
+      return;
     }
+    if (prevTap && prevTap.id === card.id && now - prevTap.t < 340) {
+      lastTap.current = null;
+      setInspect({ id: card.id, stage: 'measure', t: 'none' });
+    } else {
+      lastTap.current = { id: card.id, t: now };
+    }
+  };
+
+  /** 大牌从 bigRef 的最终位置变到桌上那张牌的位置，需要的 transform */
+  const transformToTableCard = (id: string): string | null => {
+    const big = bigRef.current;
+    const small = cardEls.current[id];
+    if (!big || !small) return null;
+    const b = big.getBoundingClientRect();
+    const r = small.getBoundingClientRect();
+    if (b.width === 0 || r.width === 0) return null;
+    const dx = r.left + r.width / 2 - (b.left + b.width / 2);
+    const dy = r.top + r.height / 2 - (b.top + b.height / 2);
+    return `translate(${dx}px, ${dy}px) scale(${r.width / b.width})`;
+  };
+
+  useLayoutEffect(() => {
+    if (!inspect || inspect.stage !== 'measure') return;
+    const t = transformToTableCard(inspect.id) ?? 'scale(0.6)';
+    setInspect({ ...inspect, stage: 'from', t });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inspect]);
+
+  useEffect(() => {
+    if (!inspect || inspect.stage !== 'from') return;
+    // 等浏览器先画出「在桌上」的那一帧，再开始飞
+    let raf2 = 0;
+    const raf1 = window.requestAnimationFrame(() => {
+      raf2 = window.requestAnimationFrame(() => {
+        setInspect((cur) => (cur && cur.stage === 'from' ? { ...cur, stage: 'open', t: 'none' } : cur));
+      });
+    });
+    return () => {
+      window.cancelAnimationFrame(raf1);
+      window.cancelAnimationFrame(raf2);
+    };
+  }, [inspect]);
+
+  const closeInspect = () => {
+    if (!inspect || inspect.stage === 'leave') return;
+    const t = transformToTableCard(inspect.id) ?? 'scale(0.6)';
+    setInspect({ ...inspect, stage: 'leave', t });
+    window.setTimeout(() => setInspect(null), 420);
   };
 
   // ── 清空 ──
@@ -485,7 +605,7 @@ export function FreeDraw({
     }));
     setConfirmClear(false);
     setActiveDeckId(null);
-    setSheetId(null);
+    setInspect(null);
     onToast('桌子收拾干净了，牌都回到牌堆');
   };
 
@@ -511,8 +631,30 @@ export function FreeDraw({
     return <GenericCardFace width={width} ratio={CARD_RATIOS.oracle} image={pc.image} symbol="✧" title={pc.name} />;
   };
 
-  const sheetCard = sheetId ? data.cards.find((c) => c.id === sheetId) ?? null : null;
-  const sheetPool = sheetCard ? (pools[sheetCard.deckId] ?? []).find((p) => p.key === sheetCard.cardKey) : undefined;
+  const inspectCard = inspect ? data.cards.find((c) => c.id === inspect.id) ?? null : null;
+  const inspectPool = inspectCard ? (pools[inspectCard.deckId] ?? []).find((p) => p.key === inspectCard.cardKey) : undefined;
+
+  // ── 扇形：按住左右滑动挑牌，松手抽出 ──
+  const fanRef = useRef<HTMLDivElement>(null);
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const scrub = useRef<{ pointerId: number } | null>(null);
+
+  /** 手指位置 → 扇形里第几张。按手指相对转轴的角度算，和牌的实际旋转一致 */
+  const fanIndexAt = (clientX: number, clientY: number, count: number, angleSpan: number, cardH: number): number | null => {
+    const el = fanRef.current;
+    if (!el || count === 0) return null;
+    const rect = el.getBoundingClientRect();
+    // 手指离开扇形区域太远就算放弃
+    if (clientY < rect.top - 70 || clientY > rect.bottom + 50) return null;
+    if (count === 1) return 0;
+    const cx = rect.left + rect.width / 2;
+    const pivotY = rect.bottom - cardH + FAN_PIVOT;
+    const angle = (Math.atan2(clientX - cx, pivotY - clientY) * 180) / Math.PI;
+    const step = angleSpan / (count - 1);
+    const idx = Math.round((angle + angleSpan / 2) / step);
+    return Math.min(count - 1, Math.max(0, idx));
+  };
+
   const userDeckOf = (deckId: string) => workshop.decks.find((d) => d.id === deckId) ?? null;
 
   if (!loaded) {
@@ -538,23 +680,24 @@ export function FreeDraw({
 
   const fanKeys = activeDeck ? remaining[activeDeck.deckId] ?? [] : [];
   const fanCount = fanKeys.length;
-  const fanAngle = fanCount > 40 ? 70 : fanCount > 12 ? 56 : Math.max(14, fanCount * 5);
+  const fanAngle = fanCount > 40 ? 64 : fanCount > 12 ? 52 : Math.max(14, fanCount * 5);
   const fanRatio = activeDeck ? CARD_RATIOS[activeDeck.kind] : 1.7;
+  const fanCardH = Math.round(FAN_CARD_W * fanRatio);
 
   return (
     <div className="fd-root">
       {/* ① 顶部 + 牌组栏 */}
       <div className="fd-top">
-        <button className="tarot-chip tarot-chip-ghost tarot-chip-sm" onClick={onClose}>‹ 回小屋</button>
+        <PawButton onClick={onClose} gradientId="fdPawGold" />
         <h2 className="fd-title">随心抽</h2>
         <div className="fd-top-right">
           <button
-            className="fd-icon-btn"
-            onClick={() => update((prev) => ({ ...prev, showMeaning: !prev.showMeaning }))}
-            aria-label={data.showMeaning ? '点牌时显示牌意（已开）' : '点牌时显示牌意（已关）'}
-            title={data.showMeaning ? '显示牌意：开' : '显示牌意：关'}
+            className={menuOpen ? 'fd-icon-btn fd-icon-btn-on' : 'fd-icon-btn'}
+            onClick={() => setMenuOpen((v) => !v)}
+            aria-label="牌意设置"
+            aria-expanded={menuOpen}
           >
-            {data.showMeaning ? '意' : '隐'}
+            <BookIcon size={18} />
           </button>
           <button
             className={confirmClear ? 'tarot-chip tarot-chip-sm ws-danger' : 'tarot-chip tarot-chip-ghost tarot-chip-sm'}
@@ -592,24 +735,55 @@ export function FreeDraw({
       {/* ② 抽牌区 */}
       {activeDeck ? (
         <div className="fd-draw">
-          <div className="fd-fan" style={{ height: Math.round(40 * fanRatio) + 58 }}>
+          <div
+            className="fd-fan"
+            ref={fanRef}
+            style={{ height: fanCardH + FAN_LIFT + 12 }}
+            onPointerDown={(e: React.PointerEvent<HTMLDivElement>) => {
+              if (e.button !== undefined && e.button !== 0) return;
+              try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* 忽略 */ }
+              scrub.current = { pointerId: e.pointerId };
+              setHoverIdx(fanIndexAt(e.clientX, e.clientY, fanCount, fanAngle, fanCardH));
+            }}
+            onPointerMove={(e: React.PointerEvent<HTMLDivElement>) => {
+              if (!scrub.current || scrub.current.pointerId !== e.pointerId) return;
+              const idx = fanIndexAt(e.clientX, e.clientY, fanCount, fanAngle, fanCardH);
+              setHoverIdx((prev) => (prev === idx ? prev : idx));
+            }}
+            onPointerUp={(e: React.PointerEvent<HTMLDivElement>) => {
+              if (!scrub.current || scrub.current.pointerId !== e.pointerId) return;
+              scrub.current = null;
+              const idx = fanIndexAt(e.clientX, e.clientY, fanCount, fanAngle, fanCardH);
+              setHoverIdx(null);
+              if (idx !== null && fanKeys[idx]) drawCard(fanKeys[idx]);
+            }}
+            onPointerCancel={() => {
+              scrub.current = null;
+              setHoverIdx(null);
+            }}
+          >
             {fanKeys.map((key, i) => {
               const angle = fanCount > 1 ? -fanAngle / 2 + (fanAngle / (fanCount - 1)) * i : 0;
+              const hot = hoverIdx === i;
               return (
-                <button
+                <div
                   key={key}
-                  className="fd-fan-card"
-                  style={{ transform: `rotate(${angle}deg)`, zIndex: i }}
-                  onClick={() => drawCard(key)}
-                  aria-label={`抽第 ${i + 1} 张`}
+                  className={hot ? 'fd-fan-card fd-fan-card-hot' : 'fd-fan-card'}
+                  style={{
+                    transform: `rotate(${angle}deg)${hot ? ` translateY(-${FAN_LIFT}px)` : ''}`,
+                    transformOrigin: `50% ${FAN_PIVOT}px`,
+                    zIndex: hot ? 500 : i,
+                  }}
                 >
-                  <CardBack width={40} ratio={fanRatio} image={activeUserDeck?.back} />
-                </button>
+                  <CardBack width={FAN_CARD_W} ratio={fanRatio} image={activeUserDeck?.back} />
+                </div>
               );
             })}
           </div>
           <div className="fd-draw-actions">
-            <span className="fd-draw-name">{nameOf(activeDeck.kind, activeDeck.deckId)} · 点牌抽出</span>
+            <span className="fd-draw-name">
+              {hoverIdx !== null ? `第 ${hoverIdx + 1} 张 · 松手抽出` : `${nameOf(activeDeck.kind, activeDeck.deckId)} · 按住左右滑动挑牌`}
+            </span>
             <button className="tarot-chip tarot-chip-ghost tarot-chip-sm" onClick={() => reshuffleDeck(activeDeck.deckId)}>
               洗牌
             </button>
@@ -626,7 +800,7 @@ export function FreeDraw({
       <div className="fd-scroll" ref={scrollRef}>
         <div className="fd-table" ref={tableRef} style={{ height: tableHeight }}>
           {data.cards.length === 0 && (
-            <p className="fd-empty">抽出来的牌会落在这里<br />按住牌可以拖动、叠放，点一下翻开</p>
+            <p className="fd-empty">抽出来的牌会落在这里<br />按住牌拖动、叠放，点一下翻开<br />翻开的牌快速点两下，拿到眼前看</p>
           )}
           {data.cards.map((card) => {
             const pc = (pools[card.deckId] ?? []).find((p) => p.key === card.cardKey);
@@ -636,12 +810,20 @@ export function FreeDraw({
             return (
               <div
                 key={card.id}
+                ref={(el: HTMLDivElement | null) => { cardEls.current[card.id] = el; }}
                 className={
                   'fd-card' +
                   (dragPos?.id === card.id ? ' fd-card-dragging' : '') +
                   (justDropped === card.id ? ' fd-card-drop' : '')
                 }
-                style={{ left: pos.x * tableW, top: pos.y, zIndex: card.z, width: w, height: TABLE_CARD_H }}
+                style={{
+                  left: pos.x * tableW,
+                  top: pos.y,
+                  zIndex: card.z,
+                  width: w,
+                  height: TABLE_CARD_H,
+                  visibility: inspect?.id === card.id ? 'hidden' : undefined,
+                }}
                 onPointerDown={(e: React.PointerEvent<HTMLDivElement>) => onCardPointerDown(e, card)}
                 onPointerMove={onCardPointerMove}
                 onPointerUp={(e: React.PointerEvent<HTMLDivElement>) => endDrag(e, false)}
@@ -688,83 +870,139 @@ export function FreeDraw({
         </div>
       )}
 
-      {/* 看一张牌 */}
-      {sheetCard && (
-        <div className="ws-mask" onClick={() => setSheetId(null)}>
-          <div className="ws-sheet fd-sheet" onClick={(e: React.MouseEvent) => e.stopPropagation()}>
-            <div className="ws-sheet-card">{renderCardFace(sheetCard, 120, sheetPool, true)}</div>
-            <p className="fd-sheet-deck">{nameOf(sheetCard.kind, sheetCard.deckId)}</p>
+      {/* 📖 牌意菜单 */}
+      {menuOpen && (
+        <div className="fd-menu-mask" onClick={() => setMenuOpen(false)}>
+          <div className="fd-menu" onClick={(e: React.MouseEvent) => e.stopPropagation()}>
+            <button
+              className="fd-menu-row"
+              onClick={() => update((prev) => ({ ...prev, showMeaning: !prev.showMeaning }))}
+              role="switch"
+              aria-checked={data.showMeaning}
+            >
+              <span>显示牌意</span>
+              <span className={data.showMeaning ? 'fd-switch fd-switch-on' : 'fd-switch'}><i /></span>
+            </button>
+            <button
+              className="fd-menu-row"
+              onClick={() => {
+                setMenuOpen(false);
+                onOpenBook(activeDeck?.kind ?? data.decks[0]?.kind ?? entryKind);
+              }}
+            >
+              <span>查找一下？</span>
+              <span className="fd-menu-go">牌意之书 ›</span>
+            </button>
+          </div>
+        </div>
+      )}
 
-            {sheetPool && (
-              <h3 className="ws-sheet-title fd-sheet-name">
-                {sheetPool.name}
-                {sheetCard.kind === 'tarot' && <span className="ws-badge">{sheetCard.reversed ? '逆位' : '正位'}</span>}
-                {sheetPool.lenormandId !== undefined && <span className="ws-badge">{sheetPool.lenormandId}</span>}
-              </h3>
-            )}
+      {/* 拿到眼前看一张牌 */}
+      {inspect && inspectCard && (
+        <div
+          className={`fd-inspect fd-inspect-${inspect.stage}`}
+          onClick={closeInspect}
+        >
+          <div className="fd-inspect-body">
+            <div
+              className="fd-inspect-card"
+              ref={bigRef}
+              onClick={(e: React.MouseEvent) => e.stopPropagation()}
+              style={{
+                transform: inspect.t,
+                opacity: inspect.stage === 'measure' ? 0 : 1,
+                transition: inspect.stage === 'open' || inspect.stage === 'leave'
+                  ? 'transform 0.42s cubic-bezier(.2,.8,.25,1)'
+                  : 'none',
+              }}
+            >
+              <span className="fd-magic" aria-hidden="true" />
+              <span className="fd-sparkles" aria-hidden="true">
+                <i /><i /><i /><i /><i /><i />
+              </span>
+              <span className="fd-inspect-face">
+                {renderCardFace(inspectCard, INSPECT_CARD_W, inspectPool, true)}
+              </span>
+            </div>
 
-            {data.showMeaning && sheetPool ? (
-              <div className="fd-sheet-meaning">
-                {sheetPool.tarotId !== undefined && (
-                  <p>{sheetCard.reversed ? tarotMeaning(sheetPool.tarotId).rev : tarotMeaning(sheetPool.tarotId).up}</p>
-                )}
-                {sheetPool.lenormandId !== undefined && (
-                  <>
-                    <p><b>关键词</b>{lenormandMeaning(sheetPool.lenormandId).keywords}</p>
-                    <p><b>时间</b>{lenormandMeaning(sheetPool.lenormandId).time}</p>
-                  </>
-                )}
-                {sheetPool.oracle && (
-                  sheetPool.oracle.meaning.trim()
-                    ? <p>{sheetPool.oracle.meaning}</p>
-                    : <p className="fd-muted">这张还没写牌意</p>
-                )}
-              </div>
-            ) : (
-              sheetPool && <p className="fd-muted" style={{ textAlign: 'center' }}>牌意已隐藏，去牌意之书里找找看</p>
-            )}
+            <div className="fd-inspect-info" onClick={(e: React.MouseEvent) => e.stopPropagation()}>
+              <p className="fd-sheet-deck">{nameOf(inspectCard.kind, inspectCard.deckId)}</p>
+              {inspectPool && (
+                <h3 className="ws-sheet-title fd-sheet-name">
+                  {inspectPool.name}
+                  {inspectCard.kind === 'tarot' && <span className="ws-badge">{inspectCard.reversed ? '逆位' : '正位'}</span>}
+                  {inspectPool.lenormandId !== undefined && <span className="ws-badge">{inspectPool.lenormandId}</span>}
+                </h3>
+              )}
 
-            <div className="ws-sheet-actions">
-              {sheetCard.kind === 'tarot' && (
+              {data.showMeaning && inspectPool ? (
+                <div className="fd-sheet-meaning">
+                  {inspectPool.tarotId !== undefined && (
+                    <p>{inspectCard.reversed ? tarotMeaning(inspectPool.tarotId).rev : tarotMeaning(inspectPool.tarotId).up}</p>
+                  )}
+                  {inspectPool.lenormandId !== undefined && (
+                    <>
+                      <p><b>关键词</b>{lenormandMeaning(inspectPool.lenormandId).keywords}</p>
+                      <p><b>时间</b>{lenormandMeaning(inspectPool.lenormandId).time}</p>
+                    </>
+                  )}
+                  {inspectPool.oracle && (
+                    inspectPool.oracle.meaning.trim()
+                      ? <p>{inspectPool.oracle.meaning}</p>
+                      : <p className="fd-muted" style={{ textAlign: 'center' }}>这张还没写牌意</p>
+                  )}
+                </div>
+              ) : (
+                inspectPool && <p className="fd-muted" style={{ textAlign: 'center' }}>牌意已隐藏，点右上角 📖 可以去牌意之书找找</p>
+              )}
+
+              <button className="tarot-chip fd-put-down" onClick={closeInspect}>放下</button>
+
+              <div className="fd-inspect-more">
+                {inspectCard.kind === 'tarot' && (
+                  <button
+                    className="tarot-chip tarot-chip-ghost tarot-chip-sm"
+                    onClick={() => update((prev) => ({
+                      ...prev,
+                      cards: prev.cards.map((c) => (c.id === inspectCard.id ? { ...c, reversed: !c.reversed } : c)),
+                    }))}
+                  >
+                    转一下
+                  </button>
+                )}
                 <button
                   className="tarot-chip tarot-chip-ghost tarot-chip-sm"
-                  onClick={() => update((prev) => ({
-                    ...prev,
-                    cards: prev.cards.map((c) => (c.id === sheetCard.id ? { ...c, reversed: !c.reversed } : c)),
-                  }))}
+                  onClick={() => {
+                    const id = inspectCard.id;
+                    closeInspect();
+                    window.setTimeout(() => {
+                      update((prev) => ({
+                        ...prev,
+                        cards: prev.cards.map((c) => (c.id === id ? { ...c, faceUp: false } : c)),
+                      }));
+                    }, 420);
+                  }}
                 >
-                  转一下
+                  盖回去
                 </button>
-              )}
-              <button
-                className="tarot-chip tarot-chip-ghost tarot-chip-sm"
-                onClick={() => {
-                  update((prev) => ({
-                    ...prev,
-                    cards: prev.cards.map((c) => (c.id === sheetCard.id ? { ...c, faceUp: false } : c)),
-                  }));
-                  setSheetId(null);
-                }}
-              >
-                盖回去
-              </button>
-              <button
-                className="tarot-chip tarot-chip-ghost tarot-chip-sm"
-                onClick={() => {
-                  // 收回牌堆：放到牌堆最底下
-                  update((prev) => ({
-                    ...prev,
-                    cards: prev.cards.filter((c) => c.id !== sheetCard.id),
-                    decks: prev.decks.map((d) =>
-                      d.deckId === sheetCard.deckId ? { ...d, order: [...d.order, sheetCard.cardKey] } : d,
-                    ),
-                  }));
-                  setSheetId(null);
-                }}
-              >
-                收回牌堆
-              </button>
-              <button className="tarot-chip tarot-chip-sm" onClick={() => setSheetId(null)}>关闭</button>
+                <button
+                  className="tarot-chip tarot-chip-ghost tarot-chip-sm"
+                  onClick={() => {
+                    // 收回牌堆：放到那副牌的最底下
+                    const card = inspectCard;
+                    setInspect(null);
+                    update((prev) => ({
+                      ...prev,
+                      cards: prev.cards.filter((c) => c.id !== card.id),
+                      decks: prev.decks.map((d) =>
+                        d.deckId === card.deckId ? { ...d, order: [...d.order, card.cardKey] } : d,
+                      ),
+                    }));
+                  }}
+                >
+                  收回牌堆
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -892,10 +1130,12 @@ export const FREE_DRAW_CSS = `
 .fd-title { margin: 0; font-size: 17px; font-weight: 500; letter-spacing: 0.14em; }
 .fd-top-right { display: flex; align-items: center; gap: 8px; }
 .fd-icon-btn {
-  width: 30px; height: 30px; border-radius: 50%;
+  width: 34px; height: 34px; border-radius: 50%;
   border: 1px solid rgba(217,185,120,0.55); background: rgba(12,6,22,0.6);
-  color: #d9b978; font-family: inherit; font-size: 13px; cursor: pointer; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; padding: 0;
 }
+.fd-icon-btn-on { background: rgba(217,185,120,0.18); border-color: #d9b978; }
 
 .fd-decks {
   display: flex; gap: 8px; padding: 2px 14px 10px;
@@ -919,17 +1159,16 @@ export const FREE_DRAW_CSS = `
   border-style: dashed; padding: 5px 12px;
 }
 
-.fd-draw { border-bottom: 1px solid rgba(217,185,120,0.25); padding: 8px 0 8px; }
-.fd-fan { position: relative; width: 100%; display: flex; justify-content: center; overflow: hidden; }
+.fd-draw { border-bottom: 1px solid rgba(217,185,120,0.25); padding: 4px 0 8px; }
+.fd-fan {
+  position: relative; width: 100%; display: flex; justify-content: center; overflow: hidden;
+  touch-action: none; user-select: none; -webkit-user-select: none; cursor: pointer;
+}
 .fd-fan-card {
-  position: absolute; bottom: 0; border: none; background: transparent; padding: 0; cursor: pointer;
-  transform-origin: 50% 230px; line-height: 0;
-  transition: transform 0.15s ease, filter 0.15s ease;
+  position: absolute; bottom: 0; line-height: 0; pointer-events: none;
+  transition: transform 0.12s ease, filter 0.12s ease;
 }
-.fd-fan-card:hover, .fd-fan-card:focus-visible {
-  filter: brightness(1.35) drop-shadow(0 0 8px rgba(217,185,120,0.6));
-  outline: none; z-index: 200 !important;
-}
+.fd-fan-card-hot { filter: brightness(1.35) drop-shadow(0 0 10px rgba(240,205,130,0.75)); }
 .fd-draw-actions { display: flex; align-items: center; gap: 8px; padding: 6px 14px 0; }
 .fd-draw-name { flex: 1; font-size: 11px; color: rgba(239,227,200,0.6); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fd-draw-collapsed {
@@ -937,7 +1176,10 @@ export const FREE_DRAW_CSS = `
   color: rgba(239,227,200,0.45); border-bottom: 1px solid rgba(217,185,120,0.25);
 }
 
-.fd-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; }
+.fd-scroll {
+  flex: 1; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch;
+  position: relative; z-index: 0; isolation: isolate; /* 桌上牌的层级只在桌面里比，不会盖住弹窗 */
+}
 .fd-table { position: relative; width: 100%; }
 .fd-empty {
   position: absolute; left: 0; right: 0; top: 38%; margin: 0; text-align: center;
@@ -960,7 +1202,86 @@ export const FREE_DRAW_CSS = `
   pointer-events: none;
 }
 
-.fd-sheet { max-height: 86%; overflow-y: auto; }
+.fd-menu-mask { position: absolute; inset: 0; z-index: 40; }
+.fd-menu {
+  position: absolute; right: 14px; top: calc(56px + var(--safe-top, 0px));
+  width: 210px; background: #251639; border: 1px solid rgba(217,185,120,0.5);
+  border-radius: 14px; padding: 6px; box-shadow: 0 12px 30px rgba(0,0,0,0.5);
+  animation: tarotReveal 0.18s ease both;
+}
+.fd-menu-row {
+  width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  border: none; background: transparent; color: #efe3c8; font-family: inherit; font-size: 14px;
+  padding: 11px 10px; border-radius: 10px; cursor: pointer; text-align: left;
+}
+.fd-menu-row + .fd-menu-row { border-top: 1px solid rgba(217,185,120,0.18); border-radius: 0 0 10px 10px; }
+.fd-menu-row:active { background: rgba(217,185,120,0.1); }
+.fd-menu-go { font-size: 12px; color: #d9b978; }
+.fd-switch {
+  position: relative; width: 38px; height: 22px; border-radius: 11px; flex-shrink: 0;
+  background: rgba(239,227,200,0.18); transition: background 0.2s ease;
+}
+.fd-switch i {
+  position: absolute; left: 3px; top: 3px; width: 16px; height: 16px; border-radius: 50%;
+  background: #efe3c8; transition: transform 0.2s ease;
+}
+.fd-switch-on { background: #d9b978; }
+.fd-switch-on i { transform: translateX(16px); background: #1c1030; }
+
+/* 拿到眼前看 */
+.fd-inspect {
+  position: absolute; inset: 0; z-index: 50;
+  background: rgba(8,4,16,0.78);
+  transition: background 0.4s ease;
+}
+.fd-inspect-measure, .fd-inspect-from, .fd-inspect-leave { background: rgba(8,4,16,0); }
+.fd-inspect-body {
+  position: absolute; inset: 0; overflow-y: auto;
+  display: flex; flex-direction: column; align-items: center;
+  padding: calc(56px + var(--safe-top, 0px)) 20px 32px; box-sizing: border-box;
+}
+.fd-inspect-card { position: relative; line-height: 0; transform-origin: 50% 50%; will-change: transform; margin-top: 12px; }
+.fd-inspect-face {
+  position: relative; display: inline-block; border-radius: 10px;
+  box-shadow: 0 0 0 1px rgba(240,205,130,0.6), 0 0 26px rgba(240,200,120,0.55), 0 0 60px rgba(217,185,120,0.25);
+}
+.fd-magic {
+  position: absolute; inset: -34px; border-radius: 40px; pointer-events: none;
+  background: radial-gradient(ellipse at center, rgba(255,220,150,0.42) 0%, rgba(217,185,120,0.16) 45%, rgba(217,185,120,0) 72%);
+  animation: fdMagic 2.6s ease-in-out infinite;
+  opacity: 0; transition: opacity 0.5s ease;
+}
+.fd-inspect-open .fd-magic { opacity: 1; }
+@keyframes fdMagic {
+  0%, 100% { transform: scale(0.96); filter: brightness(1); }
+  50% { transform: scale(1.04); filter: brightness(1.25); }
+}
+.fd-sparkles { position: absolute; inset: -26px; pointer-events: none; opacity: 0; transition: opacity 0.6s ease 0.15s; }
+.fd-inspect-open .fd-sparkles { opacity: 1; }
+.fd-sparkles i {
+  position: absolute; width: 6px; height: 6px; border-radius: 50%;
+  background: #fbe3a8; box-shadow: 0 0 8px 2px rgba(251,227,168,0.8);
+  animation: fdTwinkle 2.2s ease-in-out infinite;
+}
+.fd-sparkles i:nth-child(1) { left: 6%; top: 12%; animation-delay: 0s; }
+.fd-sparkles i:nth-child(2) { right: 4%; top: 22%; animation-delay: 0.5s; }
+.fd-sparkles i:nth-child(3) { left: 0; top: 58%; animation-delay: 1.1s; width: 4px; height: 4px; }
+.fd-sparkles i:nth-child(4) { right: 8%; bottom: 10%; animation-delay: 0.8s; }
+.fd-sparkles i:nth-child(5) { left: 30%; bottom: 0; animation-delay: 1.5s; width: 4px; height: 4px; }
+.fd-sparkles i:nth-child(6) { right: 30%; top: 0; animation-delay: 1.8s; width: 4px; height: 4px; }
+@keyframes fdTwinkle {
+  0%, 100% { opacity: 0; transform: scale(0.4) translateY(4px); }
+  50% { opacity: 1; transform: scale(1) translateY(-4px); }
+}
+.fd-inspect-info {
+  width: 100%; max-width: 360px; margin-top: 26px;
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  opacity: 0; transform: translateY(10px); transition: opacity 0.35s ease 0.18s, transform 0.35s ease 0.18s;
+}
+.fd-inspect-open .fd-inspect-info { opacity: 1; transform: none; }
+.fd-inspect-leave .fd-inspect-info { transition-delay: 0s; transition-duration: 0.18s; }
+.fd-put-down { margin-top: 8px; padding: 9px 34px; font-size: 14px; letter-spacing: 0.2em; }
+.fd-inspect-more { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
 .fd-sheet-deck { margin: -4px 0 0; text-align: center; font-size: 11px; color: rgba(239,227,200,0.5); }
 .fd-sheet-name { display: flex; align-items: center; justify-content: center; gap: 8px; }
 .fd-sheet-meaning { display: flex; flex-direction: column; gap: 6px; }

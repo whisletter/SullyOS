@@ -229,6 +229,8 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
   const [focus, setFocus] = useState<number | null>(null);
   /** 去工坊时先停在哪个分类 */
   const [workshopKind, setWorkshopKind] = useState<DeckKind>('tarot');
+  /** 牌意之书合上后回到哪里（从随心抽进去就回随心抽） */
+  const [bookReturn, setBookReturn] = useState<Phase>('room');
 
   const drawDeck = getActiveDeck(workshop, drawKind);
   const drawRatio = CARD_RATIOS[drawKind];
@@ -410,7 +412,7 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
       return;
     }
     if (spot.key === 'tarot' || spot.key === 'lenormand' || spot.key === 'oracle') openDeck(spot.key);
-    else if (spot.key === 'book') setPhase('book');
+    else if (spot.key === 'book') { setBookReturn('room'); setPhase('book'); }
     else if (spot.key === 'lamp') setLampBright((v) => !v);
     // 电话：拨过去 TA 就坐到对面，再点一次 TA 离席
     else if (spot.key === 'phone') setTaSeated((v) => !v);
@@ -780,6 +782,12 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
           onClose={() => setPhase('room')}
           onToast={setToast}
           onOpenWorkshop={openWorkshop}
+          onOpenBook={(kind) => {
+            setEditing(null);
+            setBookKind(kind === 'lenormand' ? 'lenormand' : 'tarot');
+            setBookReturn('free');
+            setPhase('book');
+          }}
         />
       )}
 
@@ -802,9 +810,9 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
               <h2 style={styles.bookTitle}>牌意之书</h2>
               <button
                 className="tarot-chip tarot-chip-ghost"
-                onClick={() => { setEditing(null); setPhase('room'); }}
+                onClick={() => { setEditing(null); setPhase(bookReturn); setBookReturn('room'); }}
               >
-                合上
+                {bookReturn === 'free' ? '回随心抽' : '合上'}
               </button>
             </div>
 

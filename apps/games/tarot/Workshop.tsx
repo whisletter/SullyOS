@@ -7,6 +7,7 @@ import {
   UserDeck, WorkshopData, OracleCard, ImportProgress,
   activeIdOf, deckProgress, importCards, newId, patchDeck, storeCardImage,
 } from './decks';
+import { PawButton } from './FreeDraw';
 
 /**
  * 牌组工坊：点墙上的画进来。
@@ -480,22 +481,24 @@ export function Workshop({ data, update, onClose, onToast, initialKind = 'tarot'
   return (
     <div className="ws-root">
       <div className="ws-top">
-        <button
-          className="tarot-chip tarot-chip-ghost tarot-chip-sm"
-          onClick={() => {
-            if (busy) return;
-            if (view.type === 'deck') {
+        {view.type === 'deck' ? (
+          <button
+            className="tarot-chip tarot-chip-ghost tarot-chip-sm"
+            onClick={() => {
+              if (busy) return;
               setView({ type: 'shelf' });
               setConfirmDelete(false);
               setRenaming(null);
-            } else onClose();
-          }}
-          disabled={busy}
-        >
-          {view.type === 'deck' ? '‹ 书架' : '‹ 回小屋'}
-        </button>
+            }}
+            disabled={busy}
+          >
+            ‹ 书架
+          </button>
+        ) : (
+          <PawButton onClick={() => { if (!busy) onClose(); }} gradientId="wsPawGold" />
+        )}
         <h2 className="ws-title">牌组工坊</h2>
-        <span style={{ width: 64 }} />
+        <span style={{ width: 40 }} />
       </div>
 
       <div className="ws-tabs">
