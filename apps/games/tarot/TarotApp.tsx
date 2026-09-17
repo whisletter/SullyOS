@@ -9,6 +9,8 @@ import {
 } from './decks';
 import { FreeDraw, FREE_DRAW_CSS } from './FreeDraw';
 import { Workshop, WORKSHOP_CSS } from './Workshop';
+import { DuoTable, DUO_CSS, DuoRequest } from './DuoTable';
+import { loadDuoSession, loadDuoApi, saveDuoApi, introSeen, markIntroSeen, DuoApiSetting } from './duoStore';
 import { useOS } from '../../../context/OSContext';
 // 房间图和代码放在同一个文件夹，由 Vite 打包。想换背景，直接用同名图片覆盖即可。
 // 平板（屏幕偏宽）用 2:3 的这两张：
@@ -32,6 +34,10 @@ import roomOccupiedPhoneUrl from './room-occupied-phone.webp';
  * 选牌阵列表最上面是「随心抽」（FreeDraw.tsx）：多副牌自由抽、桌上拖动叠放，桌面会保存。
  *
  * 手机 / 平板按屏幕比例自动选图，两套图各有一套点击热区（见 SCENES）。
+ *
+ * 和 TA 一起占卜（DuoTable.tsx）：TA 在座时点托盘进双人，不在座时还是单人抽牌，两条路分开。
+ * 占卜进行中电话点不动，猫爪会问「暂时离开」还是「结束占卜」。
+ * 窗外的月亮是 TA 的接口设置，壁炉边的书架是占卜记录（下一版），TA 在座时可以戳他。
  * 角色名默认读当前选中的角色（useOS），也可以从 props 传进来覆盖。
  */
 
@@ -90,6 +96,14 @@ const HOTSPOTS_TABLET: Hotspot[] = [
   { key: 'orrery', label: '称号', left: '76%', top: '47%', width: '13%', height: '14%', ready: false },
   { key: 'phone', label: '电话', left: '87%', top: '54%', width: '13%', height: '14%', ready: true },
   { key: 'painting', label: '牌组工坊', left: '51%', top: '2%', width: '26%', height: '24%', ready: true },
+  { key: 'moon', label: '接口设置', left: '12%', top: '4%', width: '14%', height: '11%', ready: true },
+  { key: 'shelf', label: '占卜记录', left: '89%', top: '0%', width: '11%', height: '9%', ready: true },
+];
+
+/** 平板 · TA 在座：多一块戳 TA 的区域。放在最前面，和画、天球仪重叠的地方让给它们 */
+const HOTSPOTS_TABLET_OCCUPIED: Hotspot[] = [
+  { key: 'ta', label: '戳一戳', left: '18%', top: '19%', width: '60%', height: '40%', ready: true },
+  ...HOTSPOTS_TABLET,
 ];
 
 /** 手机 · 空座位图的热区 */
@@ -102,10 +116,13 @@ const HOTSPOTS_PHONE_EMPTY: Hotspot[] = [
   { key: 'orrery', label: '称号', left: '76%', top: '51%', width: '12%', height: '11%', ready: false },
   { key: 'phone', label: '电话', left: '88%', top: '53%', width: '12%', height: '12%', ready: true },
   { key: 'painting', label: '牌组工坊', left: '51%', top: '18%', width: '26%', height: '18%', ready: true },
+  { key: 'moon', label: '接口设置', left: '12%', top: '19%', width: '14%', height: '9%', ready: true },
+  { key: 'shelf', label: '占卜记录', left: '89%', top: '13%', width: '11%', height: '12%', ready: true },
 ];
 
 /** 手机 · TA 在座图的热区（这张图比例更长，物件位置略有不同） */
 const HOTSPOTS_PHONE_OCCUPIED: Hotspot[] = [
+  { key: 'ta', label: '戳一戳', left: '17%', top: '29%', width: '62%', height: '28%', ready: true },
   { key: 'lenormand', label: '雷诺曼', left: '0%', top: '56.5%', width: '21%', height: '4.8%', ready: true },
   { key: 'tarot', label: '塔罗牌', left: '0%', top: '61.3%', width: '17%', height: '4.5%', ready: true },
   { key: 'oracle', label: '神谕卡', left: '0%', top: '65.8%', width: '12%', height: '7%', ready: true },
@@ -114,6 +131,8 @@ const HOTSPOTS_PHONE_OCCUPIED: Hotspot[] = [
   { key: 'orrery', label: '称号', left: '76%', top: '49%', width: '12%', height: '11%', ready: false },
   { key: 'phone', label: '电话', left: '88%', top: '52%', width: '12%', height: '11%', ready: true },
   { key: 'painting', label: '牌组工坊', left: '52%', top: '16%', width: '25%', height: '17%', ready: true },
+  { key: 'moon', label: '接口设置', left: '12%', top: '18%', width: '14%', height: '9%', ready: true },
+  { key: 'shelf', label: '占卜记录', left: '89%', top: '11%', width: '11%', height: '12%', ready: true },
 ];
 
 /** 一张房间图的全部配置 */
@@ -151,7 +170,7 @@ const SCENES: Record<'phone' | 'tablet', { empty: Scene; occupied: Scene }> = {
     occupied: {
       src: roomOccupiedUrl,
       ratio: 1.5,
-      hotspots: HOTSPOTS_TABLET,
+      hotspots: HOTSPOTS_TABLET_OCCUPIED,
       glowAt: '6% 46%',
     },
   },
@@ -182,7 +201,8 @@ function PawIcon({ size = 20 }: { size?: number }) {
 }
 
 export function TarotApp({ characterName, onBack }: TarotAppProps) {
-  const { activeCharacterId, characters } = useOS();
+  const { activeCharacterId, characters, userProfile, apiConfig } = useOS();
+  const charId = activeCharacterId || '';
   const activeChar = characters.find((c) => c.id === activeCharacterId);
   const who = characterName?.trim() || activeChar?.name?.trim() || 'TA';
 
@@ -210,6 +230,33 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
   phaseRef.current = phase;
   const [lampBright, setLampBright] = useState(false);
   const [taSeated, setTaSeated] = useState(false);
+
+  // ── 和 TA 一起占卜 ──
+  /** 有没有进行中的一场（没结束占卜）。进行中电话点不动，猫爪要先问 */
+  const [duoActive, setDuoActive] = useState(false);
+  const [duoRequest, setDuoRequest] = useState<DuoRequest | null>(null);
+  const duoNonce = useRef(0);
+  const sendDuo = useCallback((req: { type: 'tray'; kind: DeckKind } | { type: 'paw' } | { type: 'poke' }) => {
+    duoNonce.current += 1;
+    setDuoRequest({ ...req, nonce: duoNonce.current } as DuoRequest);
+  }, []);
+  /** 第一次进来弹一次玩法说明，之后在月亮里能再看 */
+  const [showIntro, setShowIntro] = useState(() => !introSeen());
+  const [apiOpen, setApiOpen] = useState(false);
+  const [apiDraft, setApiDraft] = useState<DuoApiSetting>(() => loadDuoApi());
+
+  // 上次「暂时离开」的占卜还在：TA 直接坐在对面
+  useEffect(() => {
+    let alive = true;
+    setDuoActive(false);
+    loadDuoSession(charId).then((s) => {
+      if (alive && s) {
+        setDuoActive(true);
+        setTaSeated(true);
+      }
+    });
+    return () => { alive = false; };
+  }, [charId]);
   const [hintPlaying, setHintPlaying] = useState(true);
   const [toast, setToast] = useState<string | null>(null);
 
@@ -407,17 +454,30 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
   }, []);
 
   const handleHotspot = useCallback((spot: Hotspot) => {
+    if (spot.key === 'shelf') {
+      setToast('占卜记录下一版开放，记录已经在帮你存了');
+      return;
+    }
     if (!spot.ready) {
       setToast(`${spot.label}还没开，下一版见`);
       return;
     }
-    if (spot.key === 'tarot' || spot.key === 'lenormand' || spot.key === 'oracle') openDeck(spot.key);
+    if (spot.key === 'tarot' || spot.key === 'lenormand' || spot.key === 'oracle') {
+      // TA 在对面：一起占卜；不在：自己抽
+      if (taSeated) sendDuo({ type: 'tray', kind: spot.key });
+      else openDeck(spot.key);
+    }
     else if (spot.key === 'book') { setBookReturn('room'); setPhase('book'); }
     else if (spot.key === 'lamp') setLampBright((v) => !v);
-    // 电话：拨过去 TA 就坐到对面，再点一次 TA 离席
-    else if (spot.key === 'phone') setTaSeated((v) => !v);
+    // 电话：拨过去 TA 就坐到对面，再点一次 TA 离席；占卜进行中点不动
+    else if (spot.key === 'phone') {
+      if (duoActive) setToast(`占卜进行中，点猫爪结束占卜后才能挂电话`);
+      else setTaSeated((v) => !v);
+    }
     else if (spot.key === 'painting') openWorkshop('tarot');
-  }, [openDeck, openWorkshop]);
+    else if (spot.key === 'moon') { setApiDraft(loadDuoApi()); setApiOpen(true); }
+    else if (spot.key === 'ta') sendDuo({ type: 'poke' });
+  }, [openDeck, openWorkshop, taSeated, duoActive, sendDuo]);
 
   const variant: 'phone' | 'tablet' =
     frame.w > 0 && frame.h / frame.w >= PHONE_ASPECT ? 'phone' : 'tablet';
@@ -436,6 +496,23 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
     const h = frame.w * imgRatio;
     return { position: 'absolute', lineHeight: 0, width: frame.w, height: h, left: 0, top: frame.h - h };
   }, [frame, variant, imgRatio]);
+
+  /** 房间图的位置（px），给双人占卜往桌布上摆牌 */
+  const roomRect = useMemo(() => {
+    const b = roomBox as { left?: unknown; top?: unknown; width?: unknown; height?: unknown };
+    const num = (v: unknown, fb: number) => (typeof v === 'number' ? v : fb);
+    return {
+      left: num(b.left, 0),
+      top: num(b.top, 0),
+      width: num(b.width, frame.w),
+      height: num(b.height, frame.w * imgRatio),
+    };
+  }, [roomBox, frame.w, imgRatio]);
+
+  const closeIntro = () => {
+    markIntroSeen();
+    setShowIntro(false);
+  };
 
   const tarotBookList = useMemo(() => {
     if (bookFilter === 'all') return TAROT_DECK;
@@ -517,7 +594,7 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
 
   return (
     <div ref={rootRef} style={styles.root}>
-      <style>{CSS + WORKSHOP_CSS + FREE_DRAW_CSS}</style>
+      <style>{CSS + WORKSHOP_CSS + FREE_DRAW_CSS + DUO_CSS}</style>
 
       {/* ── 房间 ─────────────────────────────── */}
       <div style={roomBox}>
@@ -568,14 +645,109 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
         ))}
       </div>
 
-      {/* 顶部：猫爪返回。灯的明暗只靠点桌上的煤油灯 */}
+      {/* ── 和 TA 一起占卜（TA 在座时一直挂着，去牌意之书时隐藏不卸载）── */}
+      {taSeated && frame.w > 0 && (phase === 'room' || phase === 'book') && (
+        <DuoTable
+          key={charId || 'default'}
+          charId={charId}
+          char={activeChar ?? null}
+          userProfile={userProfile}
+          apiConfig={apiConfig}
+          who={who}
+          workshop={workshop}
+          tarotMeaning={meaningOf}
+          lenormandMeaning={lenormandOf}
+          variant={variant}
+          room={roomRect}
+          frame={frame}
+          visible={phase === 'room'}
+          request={duoRequest}
+          onSessionChange={setDuoActive}
+          onLeave={onBack}
+          onToast={setToast}
+          onOpenBook={(kind) => {
+            setEditing(null);
+            setBookKind(kind === 'lenormand' ? 'lenormand' : 'tarot');
+            setBookReturn('room');
+            setPhase('book');
+          }}
+        />
+      )}
+
+      {/* 顶部：猫爪返回。灯的明暗只靠点桌上的煤油灯；占卜进行中先问暂时离开还是结束 */}
       <div style={styles.topBar}>
-        <button className="tarot-paw" onClick={onBack} aria-label="离开小屋" title="离开小屋">
+        <button
+          className="tarot-paw"
+          onClick={() => (duoActive && taSeated && phase === 'room' ? sendDuo({ type: 'paw' }) : onBack())}
+          aria-label="离开小屋"
+          title="离开小屋"
+          style={{ pointerEvents: 'auto' }}
+        >
           <PawIcon size={20} />
         </button>
       </div>
 
       {toast && <div className="tarot-toast">{toast}</div>}
+
+      {/* ── 第一次进来：隐藏按钮说明 ── */}
+      {showIntro && phase === 'room' && (
+        <div className="duo-mask" style={{ zIndex: 45 }} onClick={closeIntro}>
+          <div className="duo-sheet" onClick={(e: React.MouseEvent) => e.stopPropagation()}>
+            <h3 className="duo-sheet-title">小屋里能点的地方</h3>
+            <ul className="duo-intro">
+              <li><b>桌上三个木托盘</b>从近到远是神谕、塔罗、雷诺曼。{who}不在时自己抽牌，{who}坐在对面时一起占卜。</li>
+              <li><b>皮面书</b>牌意之书，双击牌意可以改写。</li>
+              <li><b>煤油灯</b>把小屋调亮、调暗。</li>
+              <li><b>墙上的画</b>牌组工坊，上传和管理你的牌。</li>
+              <li><b>电话</b>请{who}坐到对面，再点一次{who}离席。占卜进行中电话点不动。</li>
+              <li><b>戳一戳</b>{who}坐在对面、没在抽牌的时候，戳戳{who}。</li>
+              <li><b>窗外的月亮</b>{who}的接口设置，这份说明也在里面。</li>
+              <li><b>壁炉边的书架</b>占卜记录，下一版开放。</li>
+              <li><b>天球仪</b>称号，之后开放。</li>
+              <li><b>猫爪</b>离开小屋。占卜进行中会问你暂时离开，还是结束占卜。</li>
+            </ul>
+            <button className="tarot-chip duo-primary" onClick={closeIntro}>知道了</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── 窗外的月亮：TA 的接口 ── */}
+      {apiOpen && (
+        <div className="duo-mask" style={{ zIndex: 45 }} onClick={() => setApiOpen(false)}>
+          <div className="duo-sheet" onClick={(e: React.MouseEvent) => e.stopPropagation()}>
+            <h3 className="duo-sheet-title">{who}的接口</h3>
+            <p className="duo-small">和{who}一起占卜时，出题、解牌、聊天都走这里。三项都空着，就用 App 设置里的主 API。</p>
+            {([
+              ['baseUrl', 'Base URL', 'https://…/v1', 'text'],
+              ['apiKey', 'API Key', 'sk-…', 'password'],
+              ['model', '模型', '模型名', 'text'],
+            ] as const).map(([field, label, placeholder, type]) => (
+              <label key={field} className="duo-field">
+                <span>{label}</span>
+                <input
+                  className="duo-input"
+                  type={type}
+                  value={apiDraft[field]}
+                  placeholder={placeholder}
+                  autoComplete="off"
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setApiDraft({ ...apiDraft, [field]: e.target.value })}
+                />
+              </label>
+            ))}
+            <div className="duo-panel-actions">
+              <button className="tarot-chip tarot-chip-ghost tarot-chip-sm" onClick={() => { setApiOpen(false); setShowIntro(true); }}>玩法说明</button>
+              <div style={{ flex: 1 }} />
+              <button className="tarot-chip tarot-chip-ghost tarot-chip-sm" onClick={() => setApiOpen(false)}>取消</button>
+              <button
+                className="tarot-chip tarot-chip-sm"
+                onClick={() => { saveDuoApi(apiDraft); setApiOpen(false); setToast('接口存好了'); }}
+              >
+                保存
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── 神谕还没有牌 ─────────────────────── */}
       {phase === 'needDeck' && (
@@ -812,7 +984,7 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
                 className="tarot-chip tarot-chip-ghost"
                 onClick={() => { setEditing(null); setPhase(bookReturn); setBookReturn('room'); }}
               >
-                {bookReturn === 'free' ? '回随心抽' : '合上'}
+                {bookReturn === 'free' ? '回随心抽' : duoActive && taSeated ? '回桌前' : '合上'}
               </button>
             </div>
 
@@ -1037,6 +1209,8 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '10px 12px',
     paddingTop: 'calc(10px + var(--safe-top, 0px))',
     zIndex: 20,
+    // 整条横栏不挡点击，只有猫爪能点（占卜时顶部中间还有「对话」按钮）
+    pointerEvents: 'none',
   },
   overlay: {
     position: 'absolute',
