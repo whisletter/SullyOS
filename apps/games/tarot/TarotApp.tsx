@@ -5,8 +5,9 @@ import { LENORMAND_DECK, getLenormand, LenormandMeaning } from './lenormand';
 import { CardFace, CardBack, GenericCardFace } from './CardFace';
 import { SpreadId, getSpread, spreadsFor, slotOfPick, fillWho } from './spreads';
 import {
-  useWorkshop, getActiveDeck, DeckKind, CARD_RATIOS, OracleCard, WorkshopData,
+  useWorkshop, getActiveDeck, activeIdOf, buildDeckPool, DeckKind, CARD_RATIOS, WorkshopData, PoolCard, DECK_LABEL,
 } from './decks';
+import { FreeDraw, FREE_DRAW_CSS } from './FreeDraw';
 import { Workshop, WORKSHOP_CSS } from './Workshop';
 import { useOS } from '../../../context/OSContext';
 // 房间图和代码放在同一个文件夹，由 Vite 打包。想换背景，直接用同名图片覆盖即可。
@@ -28,6 +29,7 @@ import roomOccupiedPhoneUrl from './room-occupied-phone.webp';
  * 牌阵定义在 spreads.ts，按牌组区分；雷诺曼的牌意在 lenormand.ts，塔罗在 meanings.ts。
  * 牌意之书里双击可以改写塔罗 / 雷诺曼的牌意，改写存在数据库里，会进备份。
  * 墙上的画是牌组工坊（Workshop.tsx）。
+ * 选牌阵列表最上面是「随心抽」（FreeDraw.tsx）：多副牌自由抽、桌上拖动叠放，桌面会保存。
  *
  * 手机 / 平板按屏幕比例自动选图，两套图各有一套点击热区（见 SCENES）。
  * 角色名默认读当前选中的角色（useOS），也可以从 props 传进来覆盖。
@@ -42,17 +44,11 @@ export interface TarotAppProps {
   characterAvatar?: string;
 }
 
-type Phase = 'room' | 'spread' | 'needDeck' | 'shuffle' | 'fan' | 'result' | 'book' | 'workshop';
+type Phase = 'room' | 'spread' | 'needDeck' | 'shuffle' | 'fan' | 'result' | 'book' | 'workshop' | 'free';
 
-/** 抽牌池里的一张牌，三副牌统一成这个样子 */
-interface PoolCard {
-  key: string;
-  name: string;
-  /** 上传的牌面（blobref 令牌），没有就画默认牌面 */
-  image?: string;
-  tarotId?: number;
-  lenormandId?: number;
-  oracle?: OracleCard;
+/** 按工坊里桌上正在用的牌组，拼出这副牌的抽牌池 */
+function buildPool(data: WorkshopData, kind: DeckKind): PoolCard[] {
+  return buildDeckPool(data, kind, activeIdOf(data, kind));
 }
 
 interface DrawnCard {
@@ -60,23 +56,8 @@ interface DrawnCard {
   reversed: boolean;
 }
 
-const DECK_LABEL: Record<DeckKind, string> = { tarot: '塔罗', lenormand: '雷诺曼', oracle: '神谕' };
-
-/** 按工坊里桌上正在用的牌组，拼出这副牌的抽牌池 */
-function buildPool(data: WorkshopData, kind: DeckKind): PoolCard[] {
-  const deck = getActiveDeck(data, kind);
-  if (kind === 'tarot') {
-    return TAROT_DECK.map((c) => ({ key: `t${c.id}`, name: c.name, tarotId: c.id, image: deck?.faces[c.id] }));
-  }
-  if (kind === 'lenormand') {
-    return LENORMAND_DECK.map((c) => ({ key: `l${c.id}`, name: c.name, lenormandId: c.id, image: deck?.faces[c.id] }));
-  }
-  return (deck?.oracle ?? []).map((c) => ({ key: c.id, name: c.name, oracle: c, image: c.image }));
-}
-
 const GOLD = '#d9b978';
 const PARCHMENT = '#efe3c8';
-
 
 /** 洗牌：Fisher–Yates */
 function shuffle<T>(input: T[]): T[] {
@@ -534,7 +515,7 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
 
   return (
     <div ref={rootRef} style={styles.root}>
-      <style>{CSS + WORKSHOP_CSS}</style>
+      <style>{CSS + WORKSHOP_CSS + FREE_DRAW_CSS}</style>
 
       {/* ── 房间 ─────────────────────────────── */}
       <div style={roomBox}>
@@ -617,6 +598,18 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
             {DECK_LABEL[drawKind]} · {drawDeck ? drawDeck.name : drawKind === 'oracle' ? '' : '基础牌组'} · 选一个牌阵
           </p>
           <div className="tarot-spread-list">
+            <button className="tarot-spread-item tarot-spread-free" onClick={() => setPhase('free')}>
+              <span className="tarot-spread-icon tarot-spread-icon-free" aria-hidden="true">
+                <i /><i /><i />
+              </span>
+              <span className="tarot-spread-text">
+                <span className="tarot-spread-name">
+                  随心抽
+                  <em>不限张数</em>
+                </span>
+                <span className="tarot-spread-desc">几副牌一起摆上桌，想抽几张抽几张，牌可以随意挪动</span>
+              </span>
+            </button>
             {spreadsFor(drawKind).map((sp) => {
               const poolSize = buildPool(workshop, drawKind).length;
               const enough = poolSize >= sp.positions.length;
@@ -774,6 +767,20 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
             </div>
           </div>
         </div>
+      )}
+
+      {/* ── 随心抽 ───────────────────────────── */}
+      {phase === 'free' && (
+        <FreeDraw
+          workshop={workshop}
+          entryKind={drawKind}
+          who={who}
+          tarotMeaning={meaningOf}
+          lenormandMeaning={lenormandOf}
+          onClose={() => setPhase('room')}
+          onToast={setToast}
+          onOpenWorkshop={openWorkshop}
+        />
       )}
 
       {/* ── 牌组工坊 ─────────────────────────── */}
@@ -1334,6 +1341,12 @@ const CSS = `
 }
 
 .tarot-spread-item:disabled { opacity: 0.45; cursor: default; }
+.tarot-spread-free { border-color: rgba(217,185,120,0.6); background: rgba(217,185,120,0.08); }
+.tarot-spread-icon-free { position: relative; height: 22px; display: block; }
+.tarot-spread-icon-free i { position: absolute; top: 3px; }
+.tarot-spread-icon-free i:nth-child(1) { left: 6px; transform: rotate(-14deg); }
+.tarot-spread-icon-free i:nth-child(2) { left: 14px; top: 0; }
+.tarot-spread-icon-free i:nth-child(3) { left: 22px; transform: rotate(12deg); }
 .tarot-spread-item:disabled:hover { border-color: rgba(217,185,120,0.35); background: rgba(40,22,62,0.55); }
 .tarot-need-text {
   margin: 0; max-width: 300px; text-align: center;

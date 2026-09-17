@@ -3,7 +3,7 @@ import { TAROT_DECK, SUIT_INFO } from './cards';
 import { lenormandName } from './lenormand';
 import { GenericCardFace, CardBack } from './CardFace';
 import {
-  DeckKind, DECK_KINDS, CARD_RATIOS, DECK_RANGE, BUILTIN_DECK_ID,
+  DeckKind, DECK_KINDS, CARD_RATIOS, DECK_RANGE, BUILTIN_DECK_ID, BUILTIN_NAME,
   UserDeck, WorkshopData, OracleCard, ImportProgress,
   activeIdOf, deckProgress, importCards, newId, patchDeck, storeCardImage,
 } from './decks';
@@ -39,7 +39,6 @@ interface Slot {
   image?: string;
 }
 
-const BUILTIN_NAME: Partial<Record<DeckKind, string>> = { tarot: '基础塔罗', lenormand: '基础雷诺曼' };
 
 const NAMING_HINT: Record<DeckKind, string> = {
   tarot: '图片按文件名编号对号入座：00 愚者 ~ 21 世界，22 ~ 77 小阿卡纳；叫 back 或「牌背」的那张会当牌背。PDF 一页一张，按页码顺序。缺的牌用默认牌面。',

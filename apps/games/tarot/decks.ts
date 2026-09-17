@@ -16,6 +16,8 @@ import { processImageToBlob } from '../../../utils/file';
 import type { CardMeaning } from './meanings';
 import type { LenormandMeaning } from './lenormand';
 import { renderPdfPages, isPdf } from './pdfCards';
+import { TAROT_DECK } from './cards';
+import { LENORMAND_DECK } from './lenormand';
 
 export type DeckKind = 'lenormand' | 'tarot' | 'oracle';
 
@@ -116,6 +118,41 @@ export function activeIdOf(data: WorkshopData, kind: DeckKind): string | undefin
   const id = data.active[kind];
   if (id && (id === BUILTIN_DECK_ID[kind] || data.decks.some((d) => d.id === id))) return id;
   return BUILTIN_DECK_ID[kind];
+}
+
+/** 基础牌组的显示名 */
+export const BUILTIN_NAME: Partial<Record<DeckKind, string>> = { tarot: '基础塔罗', lenormand: '基础雷诺曼' };
+
+export const DECK_LABEL: Record<DeckKind, string> = { tarot: '塔罗', lenormand: '雷诺曼', oracle: '神谕' };
+
+/** 牌组 id（含基础牌组）→ 名字；找不到时返回 null */
+export function deckNameOf(data: WorkshopData, kind: DeckKind, deckId: string): string | null {
+  if (deckId === BUILTIN_DECK_ID[kind]) return BUILTIN_NAME[kind] ?? null;
+  return data.decks.find((d) => d.id === deckId && d.kind === kind)?.name ?? null;
+}
+
+/** 抽牌池里的一张牌，三副牌统一成这个样子 */
+export interface PoolCard {
+  /** 在这副牌里唯一：塔罗 t0~t77，雷诺曼 l1~l36，神谕用牌自己的 id */
+  key: string;
+  name: string;
+  /** 上传的牌面（blobref 令牌），没有就画默认牌面 */
+  image?: string;
+  tarotId?: number;
+  lenormandId?: number;
+  oracle?: OracleCard;
+}
+
+/** 某一套牌（可以是基础牌组）的全部牌 */
+export function buildDeckPool(data: WorkshopData, kind: DeckKind, deckId: string | undefined): PoolCard[] {
+  const deck = deckId ? data.decks.find((d) => d.id === deckId && d.kind === kind) ?? null : null;
+  if (kind === 'tarot') {
+    return TAROT_DECK.map((c) => ({ key: `t${c.id}`, name: c.name, tarotId: c.id, image: deck?.faces[c.id] }));
+  }
+  if (kind === 'lenormand') {
+    return LENORMAND_DECK.map((c) => ({ key: `l${c.id}`, name: c.name, lenormandId: c.id, image: deck?.faces[c.id] }));
+  }
+  return (deck?.oracle ?? []).map((c) => ({ key: c.id, name: c.name, oracle: c, image: c.image }));
 }
 
 /** 已上传的张数 / 总张数 */
