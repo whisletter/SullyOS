@@ -22,6 +22,6 @@ export const GAMES: GameEntry[] = [
   { id: 'truth_or_dare', name: 'T&D', icon: '🎮' },
   { id: 'witch_poison', name: '女巫的毒药', icon: '🎮' },
   { id: 'turtle_soup', name: '海龟汤', icon: '🎮' },
-  { id: 'tarot', name: 'Tarot', icon: '🎮' },
+  { id: 'tarot', name: 'Tarot', icon: '🎮', component: React.lazy(() => import('./tarot/TarotApp')) },
   { id: 'guess', name: '猜猜看', icon: '🎮' },
 ];
