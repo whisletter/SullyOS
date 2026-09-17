@@ -3,6 +3,8 @@ import { TAROT_DECK, TarotCard, SUIT_INFO } from './cards';
 import { getMeaning, CardMeaning } from './meanings';
 import { CardFace, CardBack, CARD_RATIO } from './CardFace';
 import { SPREADS, SpreadId, getSpread, fillWho } from './spreads';
+import { useWorkshop, getActiveDeck } from './decks';
+import { Workshop, WORKSHOP_CSS } from './Workshop';
 import { useOS } from '../../../context/OSContext';
 // 房间图和代码放在同一个文件夹，由 Vite 打包。想换背景，直接用同名图片覆盖即可。
 // 平板（屏幕偏宽）用 2:3 的这两张：
@@ -27,7 +29,8 @@ import roomOccupiedPhoneUrl from './room-occupied-phone.webp';
  * 点这些位置现在会提示「还没开」，不会报错。
  *
  * 手机 / 平板按屏幕比例自动选图，两套图各有一套点击热区（见 SCENES）。
- * 牌意之书里双击某张牌的牌意可以改写，改动存在本机（localStorage）。
+ * 牌意之书里双击某张牌的牌意可以改写。
+ * 点墙上的画进牌组工坊（Workshop.tsx），上传的牌组和牌意改写都存在数据库里（decks.ts），会进备份。
  *
  * 角色名默认读当前选中的角色（useOS），也可以从 props 传进来覆盖。
  * 代码里不写死任何具体角色。
@@ -42,7 +45,7 @@ export interface TarotAppProps {
   characterAvatar?: string;
 }
 
-type Phase = 'room' | 'spread' | 'shuffle' | 'fan' | 'result' | 'book';
+type Phase = 'room' | 'spread' | 'shuffle' | 'fan' | 'result' | 'book' | 'workshop';
 
 interface DrawnCard {
   card: TarotCard;
@@ -81,7 +84,7 @@ const HOTSPOTS_TABLET: Hotspot[] = [
   { key: 'lamp', label: '煤油灯', left: '0%', top: '36%', width: '11%', height: '22%', ready: true },
   { key: 'orrery', label: '称号', left: '76%', top: '47%', width: '13%', height: '14%', ready: false },
   { key: 'phone', label: '电话', left: '87%', top: '54%', width: '13%', height: '14%', ready: true },
-  { key: 'painting', label: '牌组工坊', left: '51%', top: '2%', width: '26%', height: '24%', ready: false },
+  { key: 'painting', label: '牌组工坊', left: '51%', top: '2%', width: '26%', height: '24%', ready: true },
 ];
 
 /** 手机 · 空座位图的热区 */
@@ -91,7 +94,7 @@ const HOTSPOTS_PHONE_EMPTY: Hotspot[] = [
   { key: 'lamp', label: '煤油灯', left: '0%', top: '42%', width: '12%', height: '16%', ready: true },
   { key: 'orrery', label: '称号', left: '76%', top: '51%', width: '12%', height: '11%', ready: false },
   { key: 'phone', label: '电话', left: '88%', top: '53%', width: '12%', height: '12%', ready: true },
-  { key: 'painting', label: '牌组工坊', left: '51%', top: '18%', width: '26%', height: '18%', ready: false },
+  { key: 'painting', label: '牌组工坊', left: '51%', top: '18%', width: '26%', height: '18%', ready: true },
 ];
 
 /** 手机 · TA 在座图的热区（这张图比例更长，物件位置略有不同） */
@@ -101,7 +104,7 @@ const HOTSPOTS_PHONE_OCCUPIED: Hotspot[] = [
   { key: 'lamp', label: '煤油灯', left: '0%', top: '40%', width: '12%', height: '17%', ready: true },
   { key: 'orrery', label: '称号', left: '76%', top: '49%', width: '12%', height: '11%', ready: false },
   { key: 'phone', label: '电话', left: '88%', top: '52%', width: '12%', height: '11%', ready: true },
-  { key: 'painting', label: '牌组工坊', left: '52%', top: '16%', width: '25%', height: '17%', ready: false },
+  { key: 'painting', label: '牌组工坊', left: '52%', top: '16%', width: '25%', height: '17%', ready: true },
 ];
 
 /** 一张房间图的全部配置 */
@@ -147,27 +150,6 @@ const SCENES: Record<'phone' | 'tablet', { empty: Scene; occupied: Scene }> = {
 
 /** 屏幕高/宽超过这个值就算手机，用瘦长图 */
 const PHONE_ASPECT = 1.75;
-
-/** 牌意改写存在本机 */
-const MEANING_OVERRIDE_KEY = 'sullyos.tarot.meaningOverrides.v1';
-type MeaningOverrides = Record<number, CardMeaning>;
-
-function loadMeaningOverrides(): MeaningOverrides {
-  try {
-    const raw = window.localStorage.getItem(MEANING_OVERRIDE_KEY);
-    return raw ? (JSON.parse(raw) as MeaningOverrides) : {};
-  } catch {
-    return {};
-  }
-}
-
-function saveMeaningOverrides(data: MeaningOverrides) {
-  try {
-    window.localStorage.setItem(MEANING_OVERRIDE_KEY, JSON.stringify(data));
-  } catch {
-    // 存储满了或被禁用时，本次会话里改动仍然有效
-  }
-}
 
 /** 猫爪图标，金色渐变 */
 function PawIcon({ size = 20 }: { size?: number }) {
@@ -233,7 +215,10 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
   const [bookFilter, setBookFilter] = useState<'all' | 'major' | 'minor'>('all');
 
   // 牌意改写
-  const [overrides, setOverrides] = useState<MeaningOverrides>(() => loadMeaningOverrides());
+  const { data: workshop, update: updateWorkshop } = useWorkshop();
+  const overrides = workshop.meaningOverrides;
+  /** 桌上正在用的塔罗牌组，null = 基础牌组 */
+  const tarotDeck = getActiveDeck(workshop, 'tarot');
   const [editing, setEditing] = useState<{ id: number; up: string; rev: string } | null>(null);
   const lastTap = useRef<{ id: number; t: number } | null>(null);
 
@@ -260,22 +245,26 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
     const def = getMeaning(editing.id);
     const up = editing.up.trim();
     const rev = editing.rev.trim();
-    const next = { ...overrides };
-    if (up === def.up && rev === def.rev) delete next[editing.id];
-    else next[editing.id] = { up: up || def.up, rev: rev || def.rev };
-    setOverrides(next);
-    saveMeaningOverrides(next);
+    const id = editing.id;
+    updateWorkshop((prev) => {
+      const next = { ...prev.meaningOverrides };
+      if (up === def.up && rev === def.rev) delete next[id];
+      else next[id] = { up: up || def.up, rev: rev || def.rev };
+      return { ...prev, meaningOverrides: next };
+    }).catch(() => setToast('保存失败，可能是存储空间不够了'));
     setEditing(null);
-  }, [editing, overrides]);
+  }, [editing, updateWorkshop]);
 
   const resetEdit = useCallback(() => {
     if (!editing) return;
-    const next = { ...overrides };
-    delete next[editing.id];
-    setOverrides(next);
-    saveMeaningOverrides(next);
+    const id = editing.id;
+    updateWorkshop((prev) => {
+      const next = { ...prev.meaningOverrides };
+      delete next[id];
+      return { ...prev, meaningOverrides: next };
+    }).catch(() => setToast('保存失败，可能是存储空间不够了'));
     setEditing(null);
-  }, [editing, overrides]);
+  }, [editing, updateWorkshop]);
 
   // 首次进入，物件依次闪一遍金光，之后安静下来
   useEffect(() => {
@@ -342,6 +331,7 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
     else if (spot.key === 'lamp') setLampBright((v) => !v);
     // 电话：拨过去 TA 就坐到对面，再点一次 TA 离席
     else if (spot.key === 'phone') setTaSeated((v) => !v);
+    else if (spot.key === 'painting') setPhase('workshop');
   }, []);
 
   const variant: 'phone' | 'tablet' =
@@ -369,7 +359,7 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
 
   return (
     <div ref={rootRef} style={styles.root}>
-      <style>{CSS}</style>
+      <style>{CSS + WORKSHOP_CSS}</style>
 
       {/* ── 房间 ─────────────────────────────── */}
       <div style={roomBox}>
@@ -512,7 +502,7 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
                   disabled={isPicked}
                   aria-label={`第 ${i + 1} 张`}
                 >
-                  <CardBack width={66} />
+                  <CardBack width={66} image={tarotDeck?.back} />
                 </button>
               );
             })}
@@ -551,10 +541,15 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
                   >
                     {flipped[i] ? (
                       <span className="tarot-flip-in">
-                        <CardFace card={d.card} reversed={d.reversed} width={spread.cardWidth} />
+                        <CardFace
+                          card={d.card}
+                          reversed={d.reversed}
+                          width={spread.cardWidth}
+                          image={tarotDeck?.faces[d.card.id]}
+                        />
                       </span>
                     ) : (
-                      <CardBack width={spread.cardWidth} />
+                      <CardBack width={spread.cardWidth} image={tarotDeck?.back} />
                     )}
                   </button>
                 </div>
@@ -599,6 +594,16 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
             </div>
           </div>
         </div>
+      )}
+
+      {/* ── 牌组工坊 ─────────────────────────── */}
+      {phase === 'workshop' && (
+        <Workshop
+          data={workshop}
+          update={updateWorkshop}
+          onClose={() => setPhase('room')}
+          onToast={setToast}
+        />
       )}
 
       {/* ── 牌意之书 ─────────────────────────── */}

@@ -22,7 +22,7 @@ export interface Spread {
   positions: SpreadPosition[];
   /** 结果页排几列（位置按顺序从左到右、从上到下填） */
   columns: number;
-  /** 结果页每张牌的宽度 */
+  /** 结果页每张牌的宽度（塔罗 12×7，六张时缩小一点免得超出手机屏幕） */
   cardWidth: number;
 }
 
@@ -33,7 +33,7 @@ export const SPREADS: Spread[] = [
     desc: '一个问题，一张牌，直接给答案',
     positions: [{ label: '指引', hint: '此刻最需要知道的事' }],
     columns: 1,
-    cardWidth: 150,
+    cardWidth: 140,
   },
   {
     id: 'three',
@@ -45,7 +45,7 @@ export const SPREADS: Spread[] = [
       { label: '未来', hint: '照这样下去会走向哪里' },
     ],
     columns: 3,
-    cardWidth: 96,
+    cardWidth: 90,
   },
   {
     id: 'six',
@@ -60,7 +60,7 @@ export const SPREADS: Spread[] = [
       { label: '未来走向', hint: '这段关系接下来的方向' },
     ],
     columns: 2,
-    cardWidth: 84,
+    cardWidth: 72,
   },
 ];
 
