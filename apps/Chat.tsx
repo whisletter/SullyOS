@@ -132,6 +132,7 @@ const HIDDEN_FROM_MAIN_CHAT_SOURCES = new Set([
     'story_theater_memory',
     'monopoly',
     'witch_poison',
+    'tarot',
 ]);
 
 const isVisibleChatMessage = (message: Message, hideSystemLogs = false) => (
