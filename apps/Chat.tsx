@@ -123,10 +123,19 @@ const CollaborationWindow = React.lazy(() => import('../features/collaboration/C
 const HISTORY_WINDOW_RADIUS = 25;
 const HISTORY_WINDOW_BATCH_SIZE = 30;
 
+// 这些 source 的消息只走独立的对话框展示（陪伴/游戏各自的 UI），
+// 但仍然正常落库、正常被 ContextBuilder / 记忆宫殿收编——只是不出现在主聊天气泡流里。
+// 加新的「像陪伴一样隐藏」的小游戏，把它的 chatMirror source 加进这个数组就行。
+const HIDDEN_FROM_MAIN_CHAT_SOURCES = new Set([
+    'date',
+    'call',
+    'story_theater_memory',
+    'monopoly',
+    'witch_poison',
+]);
+
 const isVisibleChatMessage = (message: Message, hideSystemLogs = false) => (
-    message.metadata?.source !== 'date'
-    && message.metadata?.source !== 'call'
-    && message.metadata?.source !== 'story_theater_memory'
+    !HIDDEN_FROM_MAIN_CHAT_SOURCES.has(message.metadata?.source as string)
     && !message.metadata?.proactiveHint
     && !(hideSystemLogs && message.role === 'system' && message.type !== 'score_card')
 );
@@ -983,7 +992,7 @@ const Chat: React.FC = () => {
             // 不在视觉层过滤 hideBeforeMessageId —— 用户能往上滚回看，
             // 上下文截断仅作用于发给 LLM 的 prompt（在 chatPrompts.ts 里处理）。
             const chatScopeMsgs = recent
-                .filter(m => m.metadata?.source !== 'date' && m.metadata?.source !== 'call' && m.metadata?.source !== 'story_theater_memory')
+                .filter(m => !HIDDEN_FROM_MAIN_CHAT_SOURCES.has(m.metadata?.source as string))
                 .filter(m => !(currentChar?.hideSystemLogs && m.role === 'system' && m.type !== 'score_card'));
             // totalCount 走 charId 索引全量计数，包含群聊消息（以及上面被过滤的约会/通话
             // 消息）——它们永远不会出现在单聊列表里。直接拿它算「加载历史消息」会出现
