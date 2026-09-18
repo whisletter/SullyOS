@@ -12,6 +12,10 @@ import { resolveActiveIdentityAccount, ensureCharMainAccount } from '../utils/fo
 import { ensureNpcPool } from '../utils/forumNpcSeed';
 import { runQuotaBatch, runTopicRefresh } from '../utils/forumBatch';
 import { ensureRegulars } from '../utils/forumSocial';
+import * as social from '../utils/forumSocial';
+import { ensureCharAltAccount } from '../utils/forumCharIdentity';
+import * as ai from '../utils/forumAi';
+import { runForumArchivePass } from '../utils/forumArchiveRunner';
 import { FORUM_DEFAULTS, type ForumTopicTag } from '../utils/forumConstants';
 import { ForumLogo, FORUM_APP_NAME } from '../utils/forumLogo';
 import type { HotNewsItem } from '../types';
@@ -62,7 +66,7 @@ const NAV_ITEMS: { id: ForumSection['kind']; icon: React.ElementType; label: str
 ];
 
 const ForumApp: React.FC = () => {
-  const { closeApp, apiConfig, characters, userProfile, realtimeConfig, addToast } = useOS();
+  const { closeApp, apiConfig, characters, userProfile, realtimeConfig, addToast, memoryPalaceConfig } = useOS();
 
   const [section, setSection] = useState<ForumSection>({ kind: 'home' });
   const [history, setHistory] = useState<ForumSection[]>([]);
@@ -119,6 +123,18 @@ const ForumApp: React.FC = () => {
       // 必须在账号池建好之后调，否则抽不到人。
       await ensureRegulars(account.id).catch(e => console.warn('[Forum] 常客名单初始化失败:', e));
 
+      // TA 的小号：只在第一次建，名字和风格由 TA 自己定（一次调用）。
+      // 失败就跳过，下次进 App 再试，不拿随机名字把这个号定死。
+      if (hasApiConfig) {
+        for (const char of characters || []) {
+          if (!char.id) continue;
+          await ensureCharAltAccount(apiConfig, {
+            id: char.id, name: char.name,
+            systemPrompt: (char as any).systemPrompt, worldview: (char as any).worldview,
+          }).catch(e => console.warn('[Forum] 角色小号建号失败:', e));
+        }
+      }
+
       const settings = await db.getForumSettings(account.id);
       if (cancelled) return;
       setHeatLevel(settings.heatLevel || FORUM_DEFAULTS.defaultHeatLevel);
@@ -126,6 +142,14 @@ const ForumApp: React.FC = () => {
 
       // 打开App顺手做的免费维护：物理清扫过期内容（失败不影响进入）
       await feed.sweepExpiredContent().catch(e => console.warn('[Forum] 清扫失败:', e));
+
+      // 长期归档（轨道A）：扫沉寂帖子入队，顺带处理最多两条。扫描本身零 API 成本，
+      // 只有真扫出东西才会调轻量模型。角色没开记忆宫殿/自动归档就整趟跳过。
+      runForumArchivePass({
+        characters: (characters || []) as any,
+        lightLLM: memoryPalaceConfig?.lightLLM,
+        userName: userProfile?.name || '用户',
+      }).catch(e => console.warn('[Forum] 归档失败:', e));
 
       // 自然触发批量生成：当前 slot 缺批次就生成一批（17 个分区各 1 条，一次调用）
       try {
@@ -147,6 +171,53 @@ const ForumApp: React.FC = () => {
         console.warn('[Forum] 自然触发批量生成失败:', e?.message || String(e));
       } finally {
         if (!cancelled) setGeneratingFirstBatch(false);
+      }
+
+      // 共管账号：一天 6 档，每档在窗口内用哈希算出一个当天固定的触发分钟。
+      // 一次最多补发一档——长时间没打开也不会一口气刷出好几条。
+      if (hasApiConfig) {
+        try {
+          const now = new Date();
+          const dateKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+          const minutesOfDay = now.getHours() * 60 + now.getMinutes();
+          const sharedAccounts = (await db.getAllForumAccounts())
+            .filter(a => a.ownerType === 'shared' && a.status === 'active');
+          for (const acc of sharedAccounts) {
+            const due = scheduler.findDueSharedAccountBand(acc.id, dateKey, minutesOfDay);
+            if (!due) continue;
+            const post = await ai.runSharedAccountExclusivePost({
+              apiConfig, sharedAccountId: acc.id, bandLabel: due.band.label,
+            });
+            scheduler.markSharedAccountBandFired(acc.id, dateKey, due.bandIndex);
+            if (post && !cancelled) setFeedRefreshKey(k => k + 1);
+            break; // 一次进 App 只处理一个共管账号的一档，别连着烧调用
+          }
+        } catch (e: any) {
+          console.warn('[Forum] 共管账号定时动态失败:', e?.message || String(e));
+        }
+      }
+
+      // 好友申请：让 TA 自己决定通不通过。一次进 App 只处理一条，控制调用次数。
+      if (hasApiConfig) {
+        try {
+          const charSideAccounts = (await db.getAllForumAccounts())
+            .filter(a => (a.ownerType === 'char' || a.ownerType === 'shared') && a.status === 'active');
+          for (const target of charSideAccounts) {
+            const pending = await db.getForumRelationsTo(target.id, 'pending');
+            if (pending.length === 0) continue;
+            const req = pending[0];
+            const accepted = await ai.runFriendRequestDecision({
+              apiConfig,
+              requesterAccountId: req.fromAccountId,
+              targetAccountId: target.id,
+              userDisplayName: userProfile?.name,
+            });
+            if (accepted) await social.acceptFriendRequest(req.fromAccountId, target.id);
+            break;
+          }
+        } catch (e: any) {
+          console.warn('[Forum] 好友申请判断失败:', e?.message || String(e));
+        }
       }
 
      } catch (e: any) {
@@ -424,10 +495,6 @@ const ForumApp: React.FC = () => {
           characters={characters}
           onSwitch={handleSwitchIdentity}
           onClose={() => setIdentitySheetOpen(false)}
-          onOpenSharedProfile={charId => {
-            setIdentitySheetOpen(false);
-            navigate({ kind: 'profile', accountId: `facc_shared_${charId}` });
-          }}
         />
       )}
     </div>
