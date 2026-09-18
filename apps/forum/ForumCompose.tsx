@@ -6,6 +6,7 @@ import * as feed from '../../utils/forumFeed';
 import { filesToForumImageTokens, FORUM_MAX_POST_IMAGES } from '../../utils/forumImagePick';
 import TokenImg from '../../components/os/TokenImg';
 import { useOS } from '../../context/OSContext';
+import { pinForumPostIfEligible } from '../../utils/forumMemoryBridge';
 
 interface Props {
   activeAccount: db.ForumAccount;
@@ -27,7 +28,7 @@ type ComposeType = 'text' | 'image' | 'music' | 'article';
  * 图不塞进 content，单独存 post.images，正文喂给 AI 时才不会被一长串令牌污染。
  */
 const ForumCompose: React.FC<Props> = ({ activeAccount, onDone }) => {
-  const { addToast } = useOS();
+  const { addToast, characters } = useOS();
   const [composeType, setComposeType] = useState<ComposeType>('text');
   const [title, setTitle] = useState('');
   const [text, setText] = useState('');
@@ -79,7 +80,7 @@ const ForumCompose: React.FC<Props> = ({ activeAccount, onDone }) => {
     setSubmitting(true);
     try {
       const now = Date.now();
-      await feed.createPost({
+      const newPost: db.ForumPost = {
         id: db.createForumPostId(),
         authorAccountId: activeAccount.id,
         postKind: 'organic',
@@ -94,7 +95,13 @@ const ForumCompose: React.FC<Props> = ({ activeAccount, onDone }) => {
         isOwnedByUserSide: true,
         likes: [],
         visibility: 'public',
-      });
+      };
+      await feed.createPost(newPost);
+
+      // 写即时便利贴，让 TA 在聊天里能提起你刚发的这条。
+      // 小号发的不会写进去——那是 pinForumPostIfEligible 里判断的，这里不用分情况调用。
+      await pinForumPostIfEligible(newPost, characters || []);
+
       addToast('发布成功', 'success');
       onDone();
     } finally {
