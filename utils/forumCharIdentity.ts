@@ -16,6 +16,7 @@ import { safeFetchJson, extractJson } from './safeApi';
 import * as db from './forumDb';
 import type { ForumAccount } from './forumDb';
 import type { ForumApiConfig } from './forumAi';
+import { canOpenAlt } from './forumSuspicion';
 
 export interface CharAltSeedInput {
   id: string;
@@ -57,6 +58,12 @@ export async function ensureCharAltAccount(
   const existing = await getCharAltAccount(char.id);
   if (existing) return existing;
   if (!apiConfig?.baseUrl || !apiConfig?.apiKey || !apiConfig?.model) return null;
+
+  // 掉马注销之后不能立刻开新号：销号次数有上限（跟用户一样 5 次），而且要过冷却期。
+  // 不然刚抓到它的小号、转头就冒出一个新的，"抓到"这件事就没有分量了。
+  const charAccounts = (await db.getForumAccountsByOwnerType('char')).filter(a => a.charId === char.id);
+  const openable = await canOpenAlt({ type: 'char', charId: char.id }, charAccounts);
+  if (!openable.allowed) return null;
 
   const personaBrief = [char.systemPrompt, char.worldview]
     .filter(Boolean).join('\n').slice(0, 1200);

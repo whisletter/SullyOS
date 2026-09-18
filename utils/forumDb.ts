@@ -49,6 +49,12 @@ export interface ForumAccount {
   profession?: string;
   /** 蓝V认证，不是新账号类型，只是普通 npc 账号上的标记。全局账号池占比20%。 [交接3 五] */
   isVerified?: boolean;
+  /**
+   * 角色小号的"自我设定"：TA 给自己这个小号定的说话风格/伪装方向，只进生成提示词，
+   * 任何界面都不显示，用户也看不到 —— 显示出来这号就白开了。
+   * 不复用 bio，因为 bio 是公开签名，会出现在主页和搜索结果里。
+   */
+  altPersonaNote?: string;
 
   createdAt: number;
   updatedAt: number;
@@ -202,7 +208,7 @@ export interface ForumSettings {
 // ==================== 数据库连接 ====================
 
 const DB_NAME = 'SullyOS_Forum';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 const STORE_ACCOUNTS = 'accounts';
 const STORE_POSTS = 'posts';
@@ -213,6 +219,7 @@ const STORE_DM_MESSAGES = 'dm_messages';
 const STORE_SETTINGS = 'settings';
 const STORE_AI_TASKS = 'ai_tasks';
 const STORE_RELATIONS = 'relations';
+const STORE_SUSPICIONS = 'suspicions';
 
 let dbCache: IDBDatabase | null = null;
 
@@ -282,6 +289,16 @@ function openDb(): Promise<IDBDatabase> {
         store.createIndex('fromAccountId', 'fromAccountId', { unique: false });
         store.createIndex('toAccountId', 'toAccountId', { unique: false });
         store.createIndex('status', 'status', { unique: false });
+      }
+
+      // v3 新增：小号怀疑/掉马记录。
+      // 老的 identity_awareness 表（两个是/否开关）表达不了"怀疑但没确认"这个中间态，
+      // 也记不住怀疑的是哪个号，所以另起一张。老表保留不动，避免动到任何已有数据。
+      if (!db.objectStoreNames.contains(STORE_SUSPICIONS)) {
+        const store = db.createObjectStore(STORE_SUSPICIONS, { keyPath: 'id' });
+        store.createIndex('observerKey', 'observerKey', { unique: false });
+        store.createIndex('targetAccountId', 'targetAccountId', { unique: false });
+        store.createIndex('stage', 'stage', { unique: false });
       }
     };
 
@@ -685,6 +702,71 @@ export async function getForumRelationsTo(accountId: string, status?: ForumRelat
   return status ? all.filter(r => r.status === status) : all;
 }
 
+// ==================== Suspicions（小号怀疑与掉马）====================
+
+/**
+ * suspected —— 观察者起了疑，但还没当面挑明
+ * confronted —— 已经当面对质过，对方否认或还没表态
+ * admitted  —— 对方承认了这个号就是自己的小号（掉马）
+ * denied    —— 对方明确否认。否认不代表清白，观察者可以继续怀疑、再次对质。
+ */
+export type ForumSuspicionStage = 'suspected' | 'confronted' | 'admitted' | 'denied';
+
+/** 掉马之后当事人的选择。 */
+export type ForumSuspicionOutcome = 'kept' | 'burned';
+
+export interface ForumSuspicion {
+  /** `${observerKey}__${targetAccountId}` */
+  id: string;
+  /** 谁在怀疑：'user' 或角色 id。 */
+  observerKey: string;
+  /** 怀疑哪个账号。 */
+  targetAccountId: string;
+  stage: ForumSuspicionStage;
+  /** 观察者自己写下的依据，掉马后也能回看是怎么被认出来的。 */
+  reason?: string;
+  /** 只有 stage='admitted' 时有值。 */
+  outcome?: ForumSuspicionOutcome;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export function makeForumSuspicionId(observerKey: string, targetAccountId: string): string {
+  return `${observerKey}__${targetAccountId}`;
+}
+
+export async function saveForumSuspicion(row: ForumSuspicion): Promise<void> {
+  const db = await openDb();
+  const tx = db.transaction(STORE_SUSPICIONS, 'readwrite');
+  tx.objectStore(STORE_SUSPICIONS).put(row);
+  return txDone(tx);
+}
+
+export async function getForumSuspicion(observerKey: string, targetAccountId: string): Promise<ForumSuspicion | null> {
+  const db = await openDb();
+  const tx = db.transaction(STORE_SUSPICIONS, 'readonly');
+  const row = await reqResult<ForumSuspicion | undefined>(
+    tx.objectStore(STORE_SUSPICIONS).get(makeForumSuspicionId(observerKey, targetAccountId))
+  );
+  return row || null;
+}
+
+/** 某个观察者的全部怀疑记录（用来回流进上下文 / 展示）。 */
+export async function getForumSuspicionsByObserver(observerKey: string): Promise<ForumSuspicion[]> {
+  const db = await openDb();
+  const tx = db.transaction(STORE_SUSPICIONS, 'readonly');
+  const idx = tx.objectStore(STORE_SUSPICIONS).index('observerKey');
+  return (await reqResult<ForumSuspicion[]>(idx.getAll(observerKey))) || [];
+}
+
+/** 针对某个账号的全部怀疑记录（判断这个号有没有掉过马）。 */
+export async function getForumSuspicionsByTarget(targetAccountId: string): Promise<ForumSuspicion[]> {
+  const db = await openDb();
+  const tx = db.transaction(STORE_SUSPICIONS, 'readonly');
+  const idx = tx.objectStore(STORE_SUSPICIONS).index('targetAccountId');
+  return (await reqResult<ForumSuspicion[]>(idx.getAll(targetAccountId))) || [];
+}
+
 // ==================== Settings ====================
 
 const DEFAULT_SETTINGS_BASE: Omit<ForumSettings, 'id' | 'activeIdentityAccountId'> = {
@@ -798,6 +880,7 @@ export interface ForumBackupData {
   dmMessages: ForumDmMessage[];
   settings: ForumSettings[];
   relations?: ForumRelation[];
+  suspicions?: ForumSuspicion[];
 }
 
 export async function exportForumAll(): Promise<ForumBackupData> {
@@ -806,7 +889,7 @@ export async function exportForumAll(): Promise<ForumBackupData> {
     const tx = db.transaction(storeName, 'readonly');
     return reqResult<T[]>(tx.objectStore(storeName).getAll());
   };
-  const [accounts, posts, comments, altBudgets, identityAwareness, dmMessages, settings, relations] = await Promise.all([
+  const [accounts, posts, comments, altBudgets, identityAwareness, dmMessages, settings, relations, suspicions] = await Promise.all([
     getAll<ForumAccount>(STORE_ACCOUNTS),
     getAll<ForumPost>(STORE_POSTS),
     getAll<ForumComment>(STORE_COMMENTS),
@@ -815,8 +898,9 @@ export async function exportForumAll(): Promise<ForumBackupData> {
     getAll<ForumDmMessage>(STORE_DM_MESSAGES),
     getAll<ForumSettings>(STORE_SETTINGS),
     getAll<ForumRelation>(STORE_RELATIONS),
+    getAll<ForumSuspicion>(STORE_SUSPICIONS),
   ]);
-  return { accounts, posts, comments, altBudgets, identityAwareness, dmMessages, settings, relations };
+  return { accounts, posts, comments, altBudgets, identityAwareness, dmMessages, settings, relations, suspicions };
 }
 
 export async function importForumAll(backup: ForumBackupData): Promise<void> {
@@ -839,6 +923,7 @@ export async function importForumAll(backup: ForumBackupData): Promise<void> {
   await clearAndFill(STORE_DM_MESSAGES, backup.dmMessages || []);
   await clearAndFill(STORE_SETTINGS, backup.settings || []);
   await clearAndFill(STORE_RELATIONS, backup.relations || []);
+  await clearAndFill(STORE_SUSPICIONS, backup.suspicions || []);
 }
 
 /** 一键清空全部（本轮不接入 UI，仅保留函数以后接 [交接4 一]）。 */
@@ -846,7 +931,7 @@ export async function wipeForumAllData(): Promise<void> {
   const db = await openDb();
   const stores = [
     STORE_ACCOUNTS, STORE_POSTS, STORE_COMMENTS, STORE_ALT_BUDGETS,
-    STORE_IDENTITY_AWARENESS, STORE_DM_MESSAGES, STORE_RELATIONS,
+    STORE_IDENTITY_AWARENESS, STORE_DM_MESSAGES, STORE_RELATIONS, STORE_SUSPICIONS,
   ];
   for (const s of stores) {
     const tx = db.transaction(s, 'readwrite');

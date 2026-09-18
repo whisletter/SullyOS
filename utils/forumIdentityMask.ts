@@ -22,6 +22,7 @@
 import * as db from './forumDb';
 import type { ForumAccount } from './forumDb';
 import { getRelationState } from './forumSocial';
+import { listSuspicions } from './forumSuspicion';
 
 // ==================== 一、描述单个账号 ====================
 
@@ -138,6 +139,33 @@ export async function buildForumContextForChar(charId: string, userDisplayName: 
     lines.push(`- 你在论坛上已经认出${userDisplayName}的账号：${knownUserAccounts.join('、')}`);
   } else {
     lines.push(`- 你还没在论坛上跟${userDisplayName}互加好友，所以论坛上哪个号是${userDisplayName}，你并不知道`);
+  }
+
+  // 怀疑回流：TA 自己记下的疑心要带回上下文，否则每次都从零开始，
+  // "盯着某个号看了很久"这种连续性根本不存在。
+  const suspicions = await listSuspicions(charId);
+  if (suspicions.length > 0) {
+    const accountById = new Map(accounts.map(a => [a.id, a]));
+    const suspicionLines: string[] = [];
+    for (const row of suspicions) {
+      const target = accountById.get(row.targetAccountId);
+      if (!target) continue;
+      const who = `@${target.handle}（${target.displayName}）`;
+      const why = row.reason ? `，你当初的理由：${row.reason}` : '';
+      if (row.stage === 'suspected') {
+        suspicionLines.push(`- 你怀疑 ${who} 可能是${userDisplayName}的小号，还没跟对方挑明${why}`);
+      } else if (row.stage === 'confronted') {
+        suspicionLines.push(`- 你已经当面问过 ${who} 是不是${userDisplayName}，对方还没给你准话${why}`);
+      } else if (row.stage === 'denied') {
+        suspicionLines.push(`- 你问过 ${who}，对方否认了。信不信由你${why}`);
+      } else if (row.stage === 'admitted') {
+        const tail = row.outcome === 'burned' ? '，后来把那个号注销了' : '，而且还在继续用那个号';
+        suspicionLines.push(`- ${who} 已经承认了就是${userDisplayName}的小号${tail}`);
+      }
+    }
+    if (suspicionLines.length > 0) {
+      lines.push('', '【你对某些账号的疑心】', ...suspicionLines);
+    }
   }
 
   lines.push('（论坛上其他账号对你来说就是普通网友，谁是谁得靠你自己从言行里判断。）');

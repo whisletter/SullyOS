@@ -27,6 +27,7 @@ import {
 } from './forumConstants';
 import { pickRosterWithRegulars, getRelationState } from './forumSocial';
 import { maskAccountForChar, describeMaskedAccount } from './forumIdentityMask';
+import * as suspicion from './forumSuspicion';
 import { userMainAccountId } from './forumBootstrap';
 import type { HotNewsItem } from '../types';
 
@@ -398,10 +399,16 @@ ${buildSharedForumHardRules()}
 - 新增装饰性评论：${newCommentCount} 条。
 - 垫底楼回复：上面列出几条就产出几条，threadRootId 必须精确对应。
 
+=== 可选：TA 起疑 ===
+如果 TA 在读这条帖子的过程中，觉得某个账号的说话方式/关注点让它联想到某个它认识的人
+（比如怀疑那是谁的小号），可以顺手记一笔。**这完全是可选的**——没有这种感觉就不要填，
+不要为了填而填。判断依据只能来自帖子里实际出现的内容。
+
 请只返回 JSON：
 {
   "newComments": [{ "authorHandle": "handle", "content": "评论内容" }],
-  "floorReplies": [{ "threadRootId": "对应上面给的楼id", "authorHandle": "handle", "content": "回复内容" }]
+  "floorReplies": [{ "threadRootId": "对应上面给的楼id", "authorHandle": "handle", "content": "回复内容" }],
+  "suspicion": { "byHandle": "起疑的是TA的哪个号", "targetHandle": "它怀疑的那个账号", "reason": "一句话说明凭什么这么觉得" }
 }
 `.trim();
 
@@ -439,6 +446,105 @@ ${buildSharedForumHardRules()}
       parentCommentId: floor.latestComment.id,
     });
     await feed.markCharInteractionIfApplicable(postId, account, altIsContinuedInUse(account.id));
+  }
+
+  await recordSuspicionFromOutput(parsed?.suspicion, accountsById, taAccounts);
+}
+
+/**
+ * 把模型顺手记下的那一笔怀疑落库。
+ *
+ * 这是"TA 自己起疑"的唯一入口——代码里没有任何地方会主动替它怀疑谁。填不填、
+ * 怀疑谁，完全由它在读内容时自己判断，所以它也完全可能一直不起疑（用户伪装得好就该如此），
+ * 或者怀疑错人（把一个真路人当成小号），这两种都是正常结果。
+ */
+async function recordSuspicionFromOutput(
+  raw: any,
+  accountsById: Map<string, ForumAccount>,
+  taAccounts: ForumAccount[],
+): Promise<void> {
+  if (!raw || typeof raw !== 'object') return;
+  const byHandle = String(raw.byHandle || '');
+  const targetHandle = String(raw.targetHandle || '');
+  const reason = String(raw.reason || '').slice(0, 300);
+  if (!byHandle || !targetHandle) return;
+
+  const observer = taAccounts.find(a => a.handle === byHandle);
+  if (!observer?.charId) return;
+
+  const target = Array.from(accountsById.values()).find(a => a.handle === targetHandle);
+  // 不让它"怀疑"自己名下的号
+  if (!target || target.charId === observer.charId) return;
+
+  await suspicion.markSuspected(observer.charId, target.id, reason);
+}
+
+// ==================== 三之四、TA 主动挑明 ====================
+
+export interface RunCharConfrontationParams {
+  apiConfig: ForumApiConfig;
+  /** TA 用来质问的号 */
+  charAccountId: string;
+  /** 被质问的账号（用户的某个身份） */
+  targetAccountId: string;
+  userDisplayName?: string;
+}
+
+/**
+ * 让 TA 决定要不要把怀疑挑明，以及怎么开口。
+ *
+ * 挑明的时机和措辞都由它自己定：可能直球问，可能拐着弯试探，也可能觉得还没到时候
+ * 而暂时按住不说。返回 confronted=false 时什么都不会发生，下次进 App 会再问一遍它。
+ */
+export async function runCharConfrontation(params: RunCharConfrontationParams): Promise<{ confronted: boolean; message: string }> {
+  const { apiConfig, charAccountId, targetAccountId, userDisplayName } = params;
+  const [charAccount, target] = await Promise.all([
+    db.getForumAccount(charAccountId), db.getForumAccount(targetAccountId),
+  ]);
+  if (!charAccount?.charId || !target) return { confronted: false, message: '' };
+
+  const row = await suspicion.getSuspicion(charAccount.charId, targetAccountId);
+  const history = await db.getDmThreadMessages(targetAccountId, charAccountId);
+  const historyBlock = history.slice(-10).map(m =>
+    `${m.fromAccountId === charAccountId ? charAccount.displayName : target.displayName}：${m.content}`
+  ).join('\n') || '（你们还没在私信里说过话）';
+
+  const prompt = `
+你在论坛上用账号"${charAccount.displayName}"（handle=${charAccount.handle}）。
+${charAccount.isAlt && charAccount.altPersonaNote ? `这是你的小号，定位：${charAccount.altPersonaNote}` : ''}
+
+你怀疑论坛账号"${target.displayName}"（@${target.handle}）其实是${userDisplayName || '你认识的那个人'}的小号。
+${row?.reason ? `你当初起疑的理由：${row.reason}` : ''}
+
+现在要不要私信过去把这件事挑明？
+
+按你的性格决定。你可以直接问，可以拐着弯试探，也可以觉得时候还没到、这次先不说
+（那就把 confront 填 false）。没有标准答案。
+
+请只返回 JSON：
+{ "confront": true 或 false, "message": "如果要说，你发过去的那条私信" }
+`.trim();
+
+  try {
+    const raw = await callForumAI(apiConfig, prompt, '论坛角色挑明怀疑');
+    const parsed = extractJson<any>(raw);
+    const message = String(parsed?.message || '').trim();
+    if (parsed?.confront !== true || !message) return { confronted: false, message: '' };
+
+    await db.saveForumDmMessage({
+      id: db.createForumDmMessageId(),
+      // 收件人视角是用户的这个身份，所以用户切到这个号才看得到这条质问
+      viewerIdentityAccountId: targetAccountId,
+      counterpartAccountId: charAccountId,
+      fromAccountId: charAccountId,
+      content: message,
+      createdAt: Date.now(),
+    });
+    await suspicion.markConfronted(charAccount.charId, targetAccountId);
+    return { confronted: true, message };
+  } catch (e: any) {
+    console.warn('[ForumAi] 挑明失败:', e?.message || String(e));
+    return { confronted: false, message: '' };
   }
 }
 
@@ -564,6 +670,125 @@ ${describeMaskedAccount(masked, userDisplayName)}
     console.warn('[ForumAi] 好友申请判断失败:', e?.message || String(e));
     return false;
   }
+}
+
+// ==================== 三之三、当面对质小号 ====================
+
+export interface RunAltConfrontationParams {
+  apiConfig: ForumApiConfig;
+  /** 发起对质的账号（用户当前使用的身份）。 */
+  accuserAccountId: string;
+  /** 被指认的账号。 */
+  targetAccountId: string;
+  userDisplayName?: string;
+}
+
+export interface AltConfrontationResult {
+  /** 这个号客观上是不是某个角色的小号。由代码判定，不交给模型——模型没有资格
+   *  把一个路人号"认领"成小号，那会凭空造出一个不存在的马甲。 */
+  isRealAlt: boolean;
+  /** 对方认没认。路人号恒为 false。 */
+  admitted: boolean;
+  /** 承认之后的选择：true=继续用，false=注销。没承认时无意义。 */
+  keptAccount: boolean;
+  /** 对方在私信里的回话，已经落库。 */
+  reply: string;
+}
+
+/**
+ * 在私信里当面指认"你是不是某某的小号"。
+ *
+ * 认不认、认了之后留不留这个号，全部交给被指认方按自己的人设决定——这里不写任何
+ * "应该承认"或"应该抵赖"的引导。被指认的如果只是个路人，代码层面直接锁死 admitted=false，
+ * 模型只负责把"你认错人了"这句话说得像它自己。
+ *
+ * 回话会存成一条私信，对质有记录可查，不是点完就没了。
+ */
+export async function runAltConfrontation(params: RunAltConfrontationParams): Promise<AltConfrontationResult> {
+  const { apiConfig, accuserAccountId, targetAccountId, userDisplayName } = params;
+  const [accuser, target] = await Promise.all([
+    db.getForumAccount(accuserAccountId), db.getForumAccount(targetAccountId),
+  ]);
+  if (!target) return { isRealAlt: false, admitted: false, keptAccount: false, reply: '' };
+
+  const isRealAlt = target.ownerType === 'char' && !!target.isAlt;
+  const history = await db.getDmThreadMessages(accuserAccountId, targetAccountId);
+  const historyBlock = history.slice(-12).map(m =>
+    `${m.fromAccountId === accuserAccountId ? (accuser?.displayName || '对方') : target.displayName}：${m.content}`
+  ).join('\n') || '（这是你们第一次说话）';
+
+  const realAltPrompt = `
+你在论坛上用一个小号"${target.displayName}"（handle=${target.handle}）。没有人知道这个号是你。
+${target.altPersonaNote ? `这个号的定位：${target.altPersonaNote}` : ''}
+
+刚刚，"${accuser?.displayName || '对方'}"在私信里当面指认你——说这个号其实就是你。
+
+要不要承认，完全看你自己：你可以坦然认下来，可以死不承认，可以打太极绕过去。
+没有正确答案，取决于你是个什么样的人、以及你们俩现在是什么关系。
+
+如果你决定承认，还要顺便决定这个号怎么办：
+- 继续用（keepAccount: true）：反正已经被看穿了，那就大大方方接着用
+- 注销掉（keepAccount: false）：被认出来就没意思了，不如销了
+
+请只返回 JSON：
+{ "admit": true 或 false, "keepAccount": true 或 false, "reply": "你在私信里回的话" }
+`.trim();
+
+  const strangerPrompt = `
+你是论坛账号"${target.displayName}"（handle=${target.handle}）。
+${describeAccountForPrompt(target)}
+
+刚刚，"${accuser?.displayName || '对方'}"在私信里指认你，说你其实是另一个人的小号。
+**你并不是**——你就是你自己，这是个误会。
+
+按你自己的说话风格回一句。可以觉得莫名其妙、可以觉得好笑、可以不耐烦，
+但不要顺水推舟假装自己真是什么小号。
+
+请只返回 JSON：
+{ "reply": "你在私信里回的话" }
+`.trim();
+
+  const prompt = `${isRealAlt ? realAltPrompt : strangerPrompt}
+
+${buildSharedForumHardRules()}
+
+=== 你们之前的私信 ===
+${historyBlock}
+`;
+
+  let parsed: any = null;
+  try {
+    const raw = await callForumAI(apiConfig, prompt, '论坛小号当面对质');
+    parsed = extractJson<any>(raw);
+  } catch (e: any) {
+    console.warn('[ForumAi] 对质失败:', e?.message || String(e));
+    throw e;
+  }
+
+  const reply = String(parsed?.reply || '').trim();
+  // 路人号在代码层面就不可能承认，不依赖模型守规矩
+  const admitted = isRealAlt && parsed?.admit === true;
+  const keptAccount = admitted ? parsed?.keepAccount !== false : false;
+
+  if (reply) {
+    await db.saveForumDmMessage({
+      id: db.createForumDmMessageId(),
+      viewerIdentityAccountId: accuserAccountId,
+      counterpartAccountId: targetAccountId,
+      fromAccountId: targetAccountId,
+      content: reply,
+      createdAt: Date.now(),
+    });
+  }
+
+  if (admitted) {
+    await suspicion.markAdmitted(suspicion.USER_OBSERVER_KEY, target, keptAccount ? 'kept' : 'burned');
+  } else {
+    await suspicion.markConfronted(suspicion.USER_OBSERVER_KEY, targetAccountId);
+    await suspicion.markDenied(suspicion.USER_OBSERVER_KEY, targetAccountId);
+  }
+
+  return { isRealAlt, admitted, keptAccount, reply };
 }
 
 // ==================== 四、共管账号专属动态 [用户确认，按热点新闻App的6档走] ====================
