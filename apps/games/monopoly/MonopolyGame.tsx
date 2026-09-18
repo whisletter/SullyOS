@@ -514,6 +514,8 @@ const ChatCard: React.FC<{
   onToggle: () => void;
   onSend: (text: string, to: 'ta' | 'dealer') => void;
   onAskTa: () => void;
+  onEditEntry: (id: number, text: string) => void;
+  onDeleteEntry: (id: number) => void;
   taHint: boolean;
   typing: 'dealer' | 'ta' | null;
   aiMissing: boolean;
@@ -521,9 +523,23 @@ const ChatCard: React.FC<{
   unread: number;
   height: number;
   onHeight: (h: number) => void;
-}> = ({ g, chat, open, onToggle, onSend, onAskTa, taHint, typing, aiMissing, avatars, unread, height, onHeight }) => {
+}> = ({ g, chat, open, onToggle, onSend, onAskTa, onEditEntry, onDeleteEntry, taHint, typing, aiMissing, avatars, unread, height, onHeight }) => {
   const [draft, setDraft] = useState('');
   const [tab, setTab] = useState<'chat' | 'engine'>('chat');
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editDraft, setEditDraft] = useState('');
+  const editRef = useRef<HTMLTextAreaElement | null>(null);
+  useEffect(() => { if (editingId != null) { editRef.current?.focus(); editRef.current?.select(); } }, [editingId]);
+  useEffect(() => { if (!open) { setEditingId(null); setEditDraft(''); } }, [open]);
+  const startEdit = (e: ChatEntry) => { setEditingId(e.id); setEditDraft(e.text); };
+  const cancelEdit = () => { setEditingId(null); setEditDraft(''); };
+  const saveEdit = () => {
+    if (editingId == null) return;
+    const t = editDraft.trim();
+    if (t) onEditEntry(editingId, t); else onDeleteEntry(editingId);
+    setEditingId(null); setEditDraft('');
+  };
+  const removeEdit = () => { if (editingId != null) onDeleteEntry(editingId); setEditingId(null); setEditDraft(''); };
   const endRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{ y: number; h: number } | null>(null);
   const n = g.profiles.names;
@@ -607,22 +623,51 @@ const ChatCard: React.FC<{
               : <pre key={line.id} className={`rounded-xl px-2.5 py-2 text-[11px] leading-[1.55] whitespace-pre-wrap break-words font-mono ${line.kind === 'error' ? 'bg-amber-50/90 text-amber-800 border border-amber-200' : 'bg-white/70 text-slate-600 border border-white'}`}>{line.text}</pre>
           ))}
           {tab === 'chat' && chat.filter(e => e.from !== 'engine').map(e => {
-            if (e.from === 'system') return <div key={e.id} className="text-center text-[10px] text-[#b07a28] bg-[#fff4e0]/80 rounded-lg px-2 py-1 whitespace-pre-wrap">{e.text}</div>;
+            const editing = editingId === e.id;
+            const editBox = (align: 'left' | 'right', width: string) => (
+              <div className={`flex flex-col gap-1 ${width} ${align === 'right' ? 'items-end' : 'items-start'}`}>
+                <textarea
+                  ref={editRef}
+                  value={editDraft}
+                  onChange={ev => setEditDraft(ev.target.value)}
+                  onKeyDown={ev => {
+                    if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); saveEdit(); }
+                    if (ev.key === 'Escape') { ev.preventDefault(); cancelEdit(); }
+                  }}
+                  rows={Math.min(6, Math.max(2, editDraft.split('\n').length))}
+                  className="w-full resize-none rounded-[16px] border-2 border-rose-300 bg-white px-3 py-2 text-[13px] leading-6 text-slate-700 outline-none"
+                />
+                <div className="flex gap-1.5">
+                  <button onClick={removeEdit} className="h-7 px-2.5 rounded-full bg-white border border-red-200 text-red-400 text-[11px] font-bold active:scale-95">删除</button>
+                  <button onClick={cancelEdit} className="h-7 px-2.5 rounded-full bg-white border border-slate-200 text-slate-400 text-[11px] font-bold active:scale-95">取消</button>
+                  <button onClick={saveEdit} className="h-7 px-3 rounded-full bg-rose-400 text-white text-[11px] font-bold active:scale-95">保存</button>
+                </div>
+              </div>
+            );
+            if (e.from === 'system') return (
+              <div key={e.id} onDoubleClick={() => startEdit(e)} className="text-center text-[10px] text-[#b07a28] bg-[#fff4e0]/80 rounded-lg px-2 py-1 whitespace-pre-wrap cursor-pointer">
+                {editing ? editBox('left', 'max-w-[90%] mx-auto text-left') : e.text}
+              </div>
+            );
             if (e.from === 'dealer') return (
-              <div key={e.id} className="mx-3 rounded-[18px] bg-white/65 border border-white px-3 py-2">
+              <div key={e.id} className="mx-3 rounded-[18px] bg-white/65 border border-white px-3 py-2" onDoubleClick={() => !editing && startEdit(e)}>
                 <div className="text-[10px] font-black text-rose-300 mb-0.5">🎩 {DEALER_NAME}</div>
-                <div className="text-[12px] leading-5 text-slate-600 whitespace-pre-wrap break-words">{e.text}</div>
+                {editing ? editBox('left', 'w-full') : <div className="text-[12px] leading-5 text-slate-600 whitespace-pre-wrap break-words cursor-pointer">{e.text}</div>}
               </div>
             );
             if (e.from === 'ta') return (
               <div key={e.id} className="flex items-start gap-2 pr-6">
                 <MiniAvatar src={avatars.ta} label={n.ta} ring="ring-violet-300" />
-                <div className="rounded-[20px] rounded-tl-md bg-[#f1eafd]/95 border border-white px-3 py-2 text-[13px] leading-6 text-slate-700 whitespace-pre-wrap break-words">{e.text}</div>
+                {editing
+                  ? editBox('left', 'max-w-[85%]')
+                  : <div onDoubleClick={() => startEdit(e)} className="rounded-[20px] rounded-tl-md bg-[#f1eafd]/95 border border-white px-3 py-2 text-[13px] leading-6 text-slate-700 whitespace-pre-wrap break-words cursor-pointer">{e.text}</div>}
               </div>
             );
             return (
               <div key={e.id} className="flex justify-end pl-8">
-                <div className="rounded-[20px] rounded-tr-md bg-gradient-to-br from-[#fb9fb6] to-[#f37c9c] text-white px-3 py-2 text-[13px] leading-6 whitespace-pre-wrap break-words">{e.text}</div>
+                {editing
+                  ? editBox('right', 'max-w-[85%]')
+                  : <div onDoubleClick={() => startEdit(e)} className="rounded-[20px] rounded-tr-md bg-gradient-to-br from-[#fb9fb6] to-[#f37c9c] text-white px-3 py-2 text-[13px] leading-6 whitespace-pre-wrap break-words cursor-pointer">{e.text}</div>}
               </div>
             );
           })}
@@ -739,6 +784,14 @@ const MonopolyGame: React.FC<{ onBack: () => void }> = ({ onBack }) => {
     setChat(chatRef.current);
     if (!chatOpenRef.current && (from === 'dealer' || from === 'ta' || from === 'system')) setUnread(u => u + 1);
     return entry;
+  };
+  const editChatEntry = (id: number, text: string) => {
+    chatRef.current = chatRef.current.map(e => (e.id === id ? { ...e, text } : e));
+    setChat(chatRef.current);
+  };
+  const deleteChatEntry = (id: number) => {
+    chatRef.current = chatRef.current.filter(e => e.id !== id);
+    setChat(chatRef.current);
   };
   const enqueue = (task: () => Promise<void>) => {
     queueRef.current = queueRef.current.then(task).catch(err => {
@@ -1098,7 +1151,7 @@ const MonopolyGame: React.FC<{ onBack: () => void }> = ({ onBack }) => {
         </main>
       </div>
 
-      <ChatCard g={g} chat={chat} open={chatOpen} onToggle={() => { setChatOpen(v => !v); setUnread(0); }} onSend={handleSend} onAskTa={askTa} taHint={taHint && inGame} typing={typing} aiMissing={aiMissing} avatars={avatars} unread={unread} height={sheetH} onHeight={setSheetH} />
+      <ChatCard g={g} chat={chat} open={chatOpen} onToggle={() => { setChatOpen(v => !v); setUnread(0); }} onSend={handleSend} onAskTa={askTa} onEditEntry={editChatEntry} onDeleteEntry={deleteChatEntry} taHint={taHint && inGame} typing={typing} aiMissing={aiMissing} avatars={avatars} unread={unread} height={sheetH} onHeight={setSheetH} />
 
       {g.phase === 'lock' && (
         <div className="absolute inset-0 z-[79] bg-[#fbe3ea]/55 backdrop-blur-sm flex items-end sm:items-center justify-center p-4">
