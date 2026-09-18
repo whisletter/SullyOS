@@ -125,13 +125,16 @@ const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, ap
     setRefreshing(true);
     try {
       const allAccounts = await db.getAllForumAccounts();
-      // taAccounts：所有角色的论坛账号（主号 + 目前仍在用的小号），@谁就该由谁回复
-      // [交接4 二.3.4]。掉马确认流程UI还没做，这里先把"active状态的char账号"都当作
-      // "继续沿用"处理，等掉马UI接上后再收窄。
+      // taAccounts：所有角色的论坛账号（主号 + 小号）。用不用、用哪个由 TA 自己判断，
+      // 只有"@了TA的楼"是必回的。
       const taAccounts = allAccounts.filter(a => a.ownerType === 'char' && a.status === 'active');
       await ai.runPostRefresh({
         apiConfig, postId: post.id, heatLevel, taAccounts,
-        altIsContinuedInUse: () => true, // 同上，掉马UI接上前的占位判断
+        // [用户确认] 小号回复暂时不算"角色互动过"，所以不触发永久保留。
+        // 原因：小号在帖子下面随手接几句就把帖子永久钉住的话，三天水线形同虚设，
+        // 本地存储只涨不降；而且按原设计，小号本来就要等掉马确认之后才算数。
+        // 等掉马机制做完，这里换成按真实的"是否已掉马且继续沿用"来判断。
+        altIsContinuedInUse: () => false,
       });
       await load();
       addToast('刷新完成', 'success');

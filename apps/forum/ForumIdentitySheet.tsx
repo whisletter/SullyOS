@@ -2,13 +2,13 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { X } from '@phosphor-icons/react';
 import * as db from '../../utils/forumDb';
 import { FORUM_DEFAULTS } from '../../utils/forumConstants';
+import { ensureSharedAccount } from '../../utils/forumBootstrap';
 import type { CharacterProfile } from '../../types';
 
 interface Props {
   activeAccount: db.ForumAccount;
   characters: CharacterProfile[];
   onSwitch: (accountId: string) => void;
-  onOpenSharedProfile: (charId: string) => void;
   onClose: () => void;
 }
 
@@ -16,7 +16,7 @@ interface Props {
  * [交接5 4.8] "..." 账号切换弹层：主号常驻 + 小号(三态) + 共管账号(存在才显示，
  * 是跳转不是切换) + 注销小号按钮（常驻显示，二次确认，不需要"已被发现"前置条件）。
  */
-const ForumIdentitySheet: React.FC<Props> = ({ activeAccount, characters, onSwitch, onOpenSharedProfile, onClose }) => {
+const ForumIdentitySheet: React.FC<Props> = ({ activeAccount, characters, onSwitch, onClose }) => {
   const [mainAccount, setMainAccount] = useState<db.ForumAccount | null>(null);
   const [altAccount, setAltAccount] = useState<db.ForumAccount | null>(null);
   const [altBudget, setAltBudget] = useState<db.ForumAltBudget | null>(null);
@@ -24,6 +24,9 @@ const ForumIdentitySheet: React.FC<Props> = ({ activeAccount, characters, onSwit
   const [creatingAlt, setCreatingAlt] = useState(false);
   const [altHandle, setAltHandle] = useState('');
   const [confirmingBurn, setConfirmingBurn] = useState(false);
+  /** 共管账号建号：一个角色一个号，多角色时先让用户选给谁建。 */
+  const [pickingSharedChar, setPickingSharedChar] = useState(false);
+  const [creatingShared, setCreatingShared] = useState(false);
 
   const load = useCallback(async () => {
     const userAccounts = await db.getForumAccountsByOwnerType('user');
@@ -56,6 +59,19 @@ const ForumIdentitySheet: React.FC<Props> = ({ activeAccount, characters, onSwit
     await load();
   };
 
+  /** [用户确认] 直接在切换账号这里建，不走"加好友邀请共管"那套流程。 */
+  const handleCreateShared = async (char: CharacterProfile) => {
+    if (!char.id) return;
+    setCreatingShared(true);
+    try {
+      await ensureSharedAccount(char.id, `${char.name}和我`, char.avatar);
+      setPickingSharedChar(false);
+      await load();
+    } finally {
+      setCreatingShared(false);
+    }
+  };
+
   const handleBurnAlt = async () => {
     if (!altAccount || !altBudget) return;
     await db.saveForumAccount({ ...altAccount, status: 'deactivated', updatedAt: Date.now() });
@@ -64,6 +80,9 @@ const ForumIdentitySheet: React.FC<Props> = ({ activeAccount, characters, onSwit
     setConfirmingBurn(false);
     await load();
   };
+
+  const sharedCharIds = new Set(sharedAccounts.map(a => a.charId).filter(Boolean));
+  const charactersWithoutShared = (characters || []).filter(c => c.id && !sharedCharIds.has(c.id));
 
   const Row: React.FC<{ label: string; sub?: string; active?: boolean; onClick?: () => void; disabled?: boolean }> = ({ label, sub, active, onClick, disabled }) => (
     <button
@@ -119,9 +138,47 @@ const ForumIdentitySheet: React.FC<Props> = ({ activeAccount, characters, onSwit
           <Row label="+ 创建新小号" onClick={() => setCreatingAlt(true)} />
         )}
 
+        {/* 共管账号现在是可以"登录"的身份，不再只是跳转看主页——切过去之后发的帖
+            就以这个号的名义出现在论坛上。底层身份解析本来就允许共管号，这里补上入口。 */}
         {sharedAccounts.map(acc => (
-          <Row key={acc.id} label={`${acc.displayName}（共管账号）`} sub="跳转到独立主页" onClick={() => onOpenSharedProfile(acc.charId!)} />
+          <Row
+            key={acc.id}
+            label={`${acc.displayName}（共管账号）`}
+            sub="切换后以这个号发帖"
+            active={activeAccount.id === acc.id}
+            onClick={() => onSwitch(acc.id)}
+          />
         ))}
+
+        {charactersWithoutShared.length > 0 && (
+          pickingSharedChar ? (
+            <div className="px-4 py-3 rounded-xl space-y-2" style={{ background: 'rgba(127,127,127,0.08)' }}>
+              <div className="text-[12px] opacity-60">给哪个角色建共管账号？</div>
+              {charactersWithoutShared.map(char => (
+                <button
+                  key={char.id}
+                  onClick={() => handleCreateShared(char)}
+                  disabled={creatingShared}
+                  className="w-full text-left px-3 py-2 rounded-lg text-sm disabled:opacity-40"
+                  style={{ background: 'rgba(127,127,127,0.12)' }}
+                >
+                  {char.name}
+                </button>
+              ))}
+              <button onClick={() => setPickingSharedChar(false)} className="text-sm opacity-50">取消</button>
+            </div>
+          ) : (
+            <Row
+              label="+ 创建共管账号"
+              sub="你和TA共用一个号，双方都能用它发帖"
+              onClick={() => {
+                // 只有一个角色就别多问一步，直接建
+                if (charactersWithoutShared.length === 1) handleCreateShared(charactersWithoutShared[0]);
+                else setPickingSharedChar(true);
+              }}
+            />
+          )
+        )}
 
         {altAccount && (
           <div className="pt-2">

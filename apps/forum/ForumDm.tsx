@@ -17,7 +17,7 @@ interface Props {
  * 不自动触发（对应 InstantPushConfig.autoTriggerOnSend 关闭时的手动⚡体验）。
  */
 const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig }) => {
-  const { addToast } = useOS();
+  const { addToast, userProfile } = useOS();
   const [threads, setThreads] = useState<{ counterpartAccountId: string; lastMessage: db.ForumDmMessage }[]>([]);
   const [accountsById, setAccountsById] = useState<Map<string, db.ForumAccount>>(new Map());
   const [openCounterpartId, setOpenCounterpartId] = useState<string | null>(null);
@@ -79,7 +79,13 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig }) => {
     }
     setTriggering(true);
     try {
-      await ai.runDmReply({ apiConfig, viewerIdentityAccountId: activeAccount.id, counterpartAccountId: openCounterpartId });
+      await ai.runDmReply({
+        apiConfig,
+        viewerIdentityAccountId: activeAccount.id,
+        counterpartAccountId: openCounterpartId,
+        // 名字只有在 TA 已经认出"这个号就是本人"时才会被用上，遮罩层里判断
+        userDisplayName: userProfile?.name,
+      });
       const msgs = await db.getDmThreadMessages(activeAccount.id, openCounterpartId);
       setMessages(msgs);
       await loadThreads();
@@ -88,7 +94,7 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig }) => {
     } finally {
       setTriggering(false);
     }
-  }, [openCounterpartId, apiConfig, activeAccount.id, addToast, loadThreads]);
+  }, [openCounterpartId, apiConfig, activeAccount.id, addToast, loadThreads, userProfile]);
 
   // ── 聊天窗口 ──
   if (openCounterpartId) {
