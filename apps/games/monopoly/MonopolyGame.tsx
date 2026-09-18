@@ -12,6 +12,7 @@ import { callGameAI } from '../shared/ai';
 import { extractModelIds } from '../../../utils/modelList';
 import { createChatMirror } from '../shared/chatMirror';
 import { detectSex, readNames, readPersona } from '../shared/profile';
+import Modal from '../../../components/os/Modal';
 import {
   AI_TEMPERATURE, BIRD_TEXT, CHAT_MIRROR, DEALER_API, DEALER_NAME, DUEL_HINT, FUNCTION_CARDS, GAME_NUMBERS,
   INTENSITY_NOTES, INTENSITY_RANGES, LEVEL_NAMES, LEVEL_STEPS, LEVELS_FOOTER, MARK_PARTS, OPENING_REMINDER,
@@ -623,51 +624,24 @@ const ChatCard: React.FC<{
               : <pre key={line.id} className={`rounded-xl px-2.5 py-2 text-[11px] leading-[1.55] whitespace-pre-wrap break-words font-mono ${line.kind === 'error' ? 'bg-amber-50/90 text-amber-800 border border-amber-200' : 'bg-white/70 text-slate-600 border border-white'}`}>{line.text}</pre>
           ))}
           {tab === 'chat' && chat.filter(e => e.from !== 'engine').map(e => {
-            const editing = editingId === e.id;
-            const editBox = (align: 'left' | 'right', width: string) => (
-              <div className={`flex flex-col gap-1 ${width} ${align === 'right' ? 'items-end' : 'items-start'}`}>
-                <textarea
-                  ref={editRef}
-                  value={editDraft}
-                  onChange={ev => setEditDraft(ev.target.value)}
-                  onKeyDown={ev => {
-                    if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); saveEdit(); }
-                    if (ev.key === 'Escape') { ev.preventDefault(); cancelEdit(); }
-                  }}
-                  rows={Math.min(6, Math.max(2, editDraft.split('\n').length))}
-                  className="w-full resize-none rounded-[16px] border-2 border-rose-300 bg-white px-3 py-2 text-[13px] leading-6 text-slate-700 outline-none"
-                />
-                <div className="flex gap-1.5">
-                  <button onClick={removeEdit} className="h-7 px-2.5 rounded-full bg-white border border-red-200 text-red-400 text-[11px] font-bold active:scale-95">删除</button>
-                  <button onClick={cancelEdit} className="h-7 px-2.5 rounded-full bg-white border border-slate-200 text-slate-400 text-[11px] font-bold active:scale-95">取消</button>
-                  <button onClick={saveEdit} className="h-7 px-3 rounded-full bg-rose-400 text-white text-[11px] font-bold active:scale-95">保存</button>
-                </div>
-              </div>
-            );
             if (e.from === 'system') return (
-              <div key={e.id} onDoubleClick={() => startEdit(e)} className="text-center text-[10px] text-[#b07a28] bg-[#fff4e0]/80 rounded-lg px-2 py-1 whitespace-pre-wrap cursor-pointer">
-                {editing ? editBox('left', 'max-w-[90%] mx-auto text-left') : e.text}
-              </div>
+              <div key={e.id} onDoubleClick={() => startEdit(e)} className="text-center text-[10px] text-[#b07a28] bg-[#fff4e0]/80 rounded-lg px-2 py-1 whitespace-pre-wrap cursor-pointer">{e.text}</div>
             );
             if (e.from === 'dealer') return (
-              <div key={e.id} className="mx-3 rounded-[18px] bg-white/65 border border-white px-3 py-2" onDoubleClick={() => !editing && startEdit(e)}>
+              <div key={e.id} className="mx-3 rounded-[18px] bg-white/65 border border-white px-3 py-2 cursor-pointer" onDoubleClick={() => startEdit(e)}>
                 <div className="text-[10px] font-black text-rose-300 mb-0.5">🎩 {DEALER_NAME}</div>
-                {editing ? editBox('left', 'w-full') : <div className="text-[12px] leading-5 text-slate-600 whitespace-pre-wrap break-words cursor-pointer">{e.text}</div>}
+                <div className="text-[12px] leading-5 text-slate-600 whitespace-pre-wrap break-words">{e.text}</div>
               </div>
             );
             if (e.from === 'ta') return (
               <div key={e.id} className="flex items-start gap-2 pr-6">
                 <MiniAvatar src={avatars.ta} label={n.ta} ring="ring-violet-300" />
-                {editing
-                  ? editBox('left', 'max-w-[85%]')
-                  : <div onDoubleClick={() => startEdit(e)} className="rounded-[20px] rounded-tl-md bg-[#f1eafd]/95 border border-white px-3 py-2 text-[13px] leading-6 text-slate-700 whitespace-pre-wrap break-words cursor-pointer">{e.text}</div>}
+                <div onDoubleClick={() => startEdit(e)} className="rounded-[20px] rounded-tl-md bg-[#f1eafd]/95 border border-white px-3 py-2 text-[13px] leading-6 text-slate-700 whitespace-pre-wrap break-words cursor-pointer">{e.text}</div>
               </div>
             );
             return (
               <div key={e.id} className="flex justify-end pl-8">
-                {editing
-                  ? editBox('right', 'max-w-[85%]')
-                  : <div onDoubleClick={() => startEdit(e)} className="rounded-[20px] rounded-tr-md bg-gradient-to-br from-[#fb9fb6] to-[#f37c9c] text-white px-3 py-2 text-[13px] leading-6 whitespace-pre-wrap break-words cursor-pointer">{e.text}</div>}
+                <div onDoubleClick={() => startEdit(e)} className="rounded-[20px] rounded-tr-md bg-gradient-to-br from-[#fb9fb6] to-[#f37c9c] text-white px-3 py-2 text-[13px] leading-6 whitespace-pre-wrap break-words cursor-pointer">{e.text}</div>
               </div>
             );
           })}
@@ -680,7 +654,6 @@ const ChatCard: React.FC<{
             <textarea
               value={draft}
               onChange={e => setDraft(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
               rows={1}
               placeholder={`对${n.ta}说点什么（不会马上回）`}
               className="flex-1 min-w-0 max-h-24 resize-none rounded-[18px] bg-white/85 border border-rose-100 px-3 py-2 text-[13px] leading-5 outline-none focus:border-rose-300"
@@ -691,6 +664,25 @@ const ChatCard: React.FC<{
           <div className="mt-1 text-[9px] text-rose-300 text-center">打「飞鸟」或「404」立刻停 · 点💞才会调用一次 API</div>
         </div>
       </div>
+
+      <Modal
+        isOpen={editingId != null}
+        title="编辑这条消息"
+        onClose={cancelEdit}
+        footer={<>
+          <button onClick={removeEdit} className="flex-1 py-3 bg-red-50 text-red-500 font-bold rounded-2xl active:scale-[0.98] transition-transform">删除</button>
+          <button onClick={cancelEdit} className="flex-1 py-3 bg-slate-100 rounded-2xl active:scale-[0.98] transition-transform">取消</button>
+          <button onClick={saveEdit} className="flex-1 py-3 bg-rose-400 text-white font-bold rounded-2xl active:scale-[0.98] transition-transform">保存</button>
+        </>}
+      >
+        <textarea
+          ref={editRef}
+          value={editDraft}
+          onChange={ev => setEditDraft(ev.target.value)}
+          onKeyDown={ev => { if (ev.key === 'Escape') { ev.preventDefault(); cancelEdit(); } }}
+          className="w-full h-40 bg-slate-100 rounded-2xl p-4 resize-none focus:ring-1 focus:ring-rose-300 transition-all text-sm leading-relaxed outline-none"
+        />
+      </Modal>
     </div>
   );
 };
