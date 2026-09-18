@@ -591,8 +591,23 @@ ${groupLogStr}\n`;
             console.error('Failed to inject music atmosphere:', e);
         }
 
+        // 论坛身份：让 TA 知道自己在论坛上是哪个号（主号/小号/共管号），以及它认得出
+        // 的用户账号有哪些。走遮罩层拼串，绝不会把"某个号是用户的小号"泄给它——
+        // 认不认得出，是好友关系决定的，不是账号类型决定的。
+        // 论坛数据在独立的 IndexedDB 里，读失败不该拖垮整条系统提示词。
+        let forumIdentityText = '';
+        try {
+            if (char?.id) {
+                const { buildForumContextForChar } = await import('./forumIdentityMask');
+                forumIdentityText = await buildForumContextForChar(char.id, userProfile?.name || '用户');
+            }
+        } catch (e) {
+            console.warn('Failed to inject forum identity:', e);
+        }
+
         // 群聊背景带时间戳、随群消息实时滚动 → 易变；日记标题/生活记录变化很慢 → 稳定。
         volatileState += groupContextText;
+        volatileState += forumIdentityText;
         baseSystemPrompt += notionDiaryText;
         baseSystemPrompt += feishuDiaryText;
         baseSystemPrompt += notionNotesText;

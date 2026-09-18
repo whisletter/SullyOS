@@ -224,7 +224,19 @@ export async function sweepDormantForumPosts(
   lastSweepAt.current = now;
 
   const all = await db.getForumPostsRaw();
-  const due = all.filter(p => shouldArchiveForumPost(p, now)).slice(0, MAX_ENQUEUE_PER_SWEEP);
+
+  // [用户确认] 双方小号发的帖子不进记忆宫殿。小号内容一旦变成长期记忆，TA 等于被
+  // 直接告知"这条是谁发的"，互相猜小号的玩法就没了；TA 自己小号发的同理，那是它
+  // 私下的行为，不该沉淀成主线记忆。
+  // 注意只看"作者"：小号在别人帖子下面的评论照常参与归档，那只是一个网名在说话，
+  // 不暴露身份。
+  const accounts = await db.getAllForumAccounts();
+  const altAccountIds = new Set(accounts.filter(a => a.isAlt).map(a => a.id));
+
+  const due = all
+    .filter(p => !altAccountIds.has(p.authorAccountId))
+    .filter(p => shouldArchiveForumPost(p, now))
+    .slice(0, MAX_ENQUEUE_PER_SWEEP);
 
   let enqueued = 0;
   for (const post of due) {
