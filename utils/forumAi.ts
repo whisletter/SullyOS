@@ -25,7 +25,8 @@ import {
   buildSharedForumHardRules, FORUM_NEWS_AUTHENTICITY_RULE,
   FORUM_DEFAULTS,
 } from './forumConstants';
-import { pickRosterWithRegulars } from './forumSocial';
+import { pickRosterWithRegulars, getRelationState } from './forumSocial';
+import { maskAccountForChar, describeMaskedAccount } from './forumIdentityMask';
 import { userMainAccountId } from './forumBootstrap';
 import type { HotNewsItem } from '../types';
 
@@ -108,6 +109,16 @@ export function pickNpcPoolForBatch(
     picked.push(...filler);
   }
   return picked;
+}
+
+/**
+ * TA 自己账号的描述。跟路人不同，小号要带上它给自己写的那条人设备忘
+ * （altPersonaNote），否则模型不知道这个号该怎么说话，写出来跟主号一个味儿。
+ */
+function describeTaAccountForPrompt(account: ForumAccount): string {
+  if (!account.isAlt) return `- handle=${account.handle}（${account.displayName}）：TA 的主号，论坛上大家都知道这是谁`;
+  const note = account.altPersonaNote ? `；这个号的定位：${account.altPersonaNote}` : '';
+  return `- handle=${account.handle}（${account.displayName}）：TA 的小号，论坛上没有人知道这个号是TA${note}`;
 }
 
 function describeAccountForPrompt(account: ForumAccount): string {
@@ -338,10 +349,10 @@ export async function runPostRefresh(params: RunPostRefreshParams): Promise<void
   // 走常客名单：约六成候选是"熟面孔"，让用户的帖子下面反复出现同一批人。
   // 纯随机的话每次都是陌生 ID，用户无从分辨谁是谁，猜小号这件事根本立不起来。
   const roster = await pickRosterWithRegulars(npcAccounts, rosterSize, userMainAccountId());
-  // 路人池和 TA 账号严格分开传给模型：新增装饰评论、非@TA的垫底楼，只能从路人池里选，
-  // TA 的号只出现在"必须回复"区块，不能被顺手当成随机路人接垫底或写装饰评论——
-  // 不然就违背了"TA只在被精准点名/走共管账号定时节奏时才发声"的设计。
-  const validHandles = new Set(roster.map(a => a.handle));
+  // [用户确认·覆盖原设计] 原本禁止 TA 的号出现在非@TA的楼里，意图是"TA 只在被点名时
+  // 才发声"。现在改成把大号小号都摆在它面前，用不用、用哪个由它按人设判断——这样
+  // TA 的小号才会自然混在路人里出没，用户也才有得猜。
+  const validHandles = new Set([...roster.map(a => a.handle), ...taAccounts.map(a => a.handle)]);
   const accountByHandle = new Map<string, ForumAccount>([
     ...roster.map(a => [a.handle, a] as const),
     ...taAccounts.map(a => [a.handle, a] as const),
@@ -365,8 +376,8 @@ export async function runPostRefresh(params: RunPostRefreshParams): Promise<void
 === 路人账号池（新增装饰评论 + "随便哪个路人接"的垫底楼，只能用这些handle）===
 ${roster.map(describeAccountForPrompt).join('\n')}
 
-=== TA 专属账号（下面这些handle只能用在"必须由TA回复"区块，不能用于新增评论或其它垫底楼）===
-${taAccounts.map(describeAccountForPrompt).join('\n') || '（这次没有需要TA出面的楼，不要使用TA账号）'}
+=== TA 的账号（用不用、用哪个，按这个角色的性格自己判断）===
+${taAccounts.map(describeTaAccountForPrompt).join('\n') || '（这次没有可用的TA账号）'}
 
 === 必须由TA回复的垫底楼（这条被@了TA）===
 ${floorBlock(mustReply)}
@@ -376,9 +387,16 @@ ${floorBlock(randomlyPicked)}
 
 ${buildSharedForumHardRules()}
 
+=== TA 账号的使用规则 ===
+- "必须由TA回复"区块里的楼：一定要由 TA 的某个账号来回，用主号还是小号由你按性格判断。
+- 其它楼和新增评论：TA 的账号**可以**用也**可以**不用。它有可能正好在逛这条帖子，也可能根本没看见。
+  不要每次都让 TA 出现，那样太刻意；也不要完全不出现。
+- 用小号发言时，语气和关注点要贴着小号自己的定位走，不要写得跟主号一模一样，
+  更不要在正文里暗示"其实我是某某"——论坛上没人知道那个号是谁。
+
 === 产出数量 ===
-- 新增装饰性评论：${newCommentCount} 条（只能用路人账号池，不针对垫底楼）。
-- 垫底楼回复：上面列出几条就产出几条，threadRootId 必须精确对应，"必须由TA回复"区块的楼只能填TA专属账号的handle。
+- 新增装饰性评论：${newCommentCount} 条。
+- 垫底楼回复：上面列出几条就产出几条，threadRootId 必须精确对应。
 
 请只返回 JSON：
 {
@@ -394,7 +412,7 @@ ${buildSharedForumHardRules()}
 
   const newComments = Array.isArray(parsed?.newComments) ? parsed.newComments : [];
   for (const c of newComments) {
-    // 装饰性新评论只信任路人池，哪怕模型手滑填了TA的handle也不采纳，双重保险。
+    // 只校验"这个 handle 是否在这次给出的账号里"，不再区分路人池和 TA 账号。
     if (!validHandles.has(String(c?.authorHandle || ''))) continue;
     const account = accountByHandle.get(String(c?.authorHandle || ''));
     if (!account || !c?.content) continue;
@@ -408,10 +426,10 @@ ${buildSharedForumHardRules()}
   for (const r of floorReplies) {
     const floor = allFloors.find(f => f.threadRootId === r?.threadRootId);
     const handle = String(r?.authorHandle || '');
-    // 隔离校验：@TA的楼必须是TA专属handle；非@TA的楼不能用TA专属handle顶替路人。
+    // 只保留一条硬约束：@了TA的楼必须由TA的号来回（用主号还是小号它自己选）。
+    // 反方向的限制已取消——TA 的号现在可以出现在任何楼里。
     const isMustReplyFloor = floor && mustReplyIds.has(floor.threadRootId);
     if (isMustReplyFloor && !taHandleSet.has(handle)) continue;
-    if (!isMustReplyFloor && taHandleSet.has(handle)) continue;
     const account = accountByHandle.get(handle);
     if (!floor || !account || !r?.content) continue;
     await feed.appendComment(postId, {
@@ -430,6 +448,8 @@ export interface RunDmReplyParams {
   apiConfig: ForumApiConfig;
   viewerIdentityAccountId: string;
   counterpartAccountId: string;
+  /** 用户在聊天里的名字。只有 TA 已经认出对方是本人时才会被写进提示词。 */
+  userDisplayName?: string;
 }
 
 export async function runDmReply(params: RunDmReplyParams): Promise<void> {
@@ -444,9 +464,26 @@ export async function runDmReply(params: RunDmReplyParams): Promise<void> {
     `${m.fromAccountId === viewerIdentityAccountId ? (viewer?.displayName || '我') : counterpart.displayName}：${m.content}`
   ).join('\n');
 
+  // 对方是谁 —— 必须走身份遮罩。直接把 viewer 账号拼进提示词的话，ownerType/isAlt
+  // 会把"这是用户的小号"直接送到 TA 眼前，猜小号的玩法当场作废。
+  let viewerDescription = '一个论坛网友';
+  if (viewer) {
+    const charAccountIds = counterpart.charId
+      ? (await db.getAllForumAccounts())
+          .filter(a => a.charId === counterpart.charId && a.status === 'active')
+          .map(a => a.id)
+      : [counterpart.id];
+    const masked = await maskAccountForChar(viewer, charAccountIds);
+    viewerDescription = describeMaskedAccount(masked, params.userDisplayName);
+  }
+
   const prompt = `
 你现在扮演论坛账号"${counterpart.displayName}"（handle=${counterpart.handle}），正在私信里回复对方。
-${describeAccountForPrompt(counterpart)}
+${counterpart.isAlt && counterpart.altPersonaNote ? `这是你的小号，论坛上没人知道它是你。这个号的定位：${counterpart.altPersonaNote}` : describeAccountForPrompt(counterpart)}
+
+=== 跟你私信的这个人 ===
+${viewerDescription}
+${/* 没标"就是本人"的，对你来说就是个陌生网友，别自作主张认亲 */ ''}
 
 ${buildSharedForumHardRules()}
 
@@ -473,6 +510,62 @@ ${historyBlock}
   });
 }
 
+// ==================== 三之二、好友申请由 TA 自己判断 ====================
+
+export interface RunFriendRequestDecisionParams {
+  apiConfig: ForumApiConfig;
+  /** 发出申请的账号 */
+  requesterAccountId: string;
+  /** 收到申请的 TA 账号（主号/小号/共管号） */
+  targetAccountId: string;
+  userDisplayName?: string;
+}
+
+/**
+ * 让 TA 自己决定要不要通过一条好友申请。
+ *
+ * 它看到的申请人信息同样走身份遮罩——没加过好友的用户大号，对它来说就是个陌生网友；
+ * 用户小号任何时候都不会被标出来。所以"通过之后才认出是本人"这条链路是闭合的：
+ * 通过这个动作本身，才是认出的那一刻。
+ *
+ * @returns true=通过，false=先不通过（申请保持挂起，用户可以撤回或再等）
+ */
+export async function runFriendRequestDecision(params: RunFriendRequestDecisionParams): Promise<boolean> {
+  const { apiConfig, requesterAccountId, targetAccountId, userDisplayName } = params;
+  const [requester, target] = await Promise.all([
+    db.getForumAccount(requesterAccountId), db.getForumAccount(targetAccountId),
+  ]);
+  if (!requester || !target) return false;
+
+  const allAccounts = await db.getAllForumAccounts();
+  const charAccountIds = target.charId
+    ? allAccounts.filter(a => a.charId === target.charId && a.status === 'active').map(a => a.id)
+    : [target.id];
+  const masked = await maskAccountForChar(requester, charAccountIds);
+
+  const prompt = `
+你在论坛上用账号"${target.displayName}"（handle=${target.handle}）。
+${target.isAlt && target.altPersonaNote ? `这是你的小号，这个号的定位：${target.altPersonaNote}` : ''}
+
+有人向你发来了好友申请：
+${describeMaskedAccount(masked, userDisplayName)}
+
+按你自己的性格决定通不通过。你可以因为不认识对方而不通过，也可以随手就同意——
+没有标准答案，怎么做取决于你是个什么样的人。
+
+请只返回 JSON：{ "accept": true 或 false }
+`.trim();
+
+  try {
+    const raw = await callForumAI(apiConfig, prompt, '论坛好友申请判断');
+    const parsed = extractJson<{ accept?: boolean }>(raw);
+    return parsed?.accept === true;
+  } catch (e: any) {
+    console.warn('[ForumAi] 好友申请判断失败:', e?.message || String(e));
+    return false;
+  }
+}
+
 // ==================== 四、共管账号专属动态 [用户确认，按热点新闻App的6档走] ====================
 
 export interface RunSharedAccountExclusivePostParams {
@@ -495,7 +588,7 @@ export async function runSharedAccountExclusivePost(params: RunSharedAccountExcl
 
   const prompt = `
 现在是 ${bandLabel} 这个时段，给共管账号"${account.displayName}"（handle=${account.handle}）生成一条只属于这个
-账号自己主页的专属动态（不进公共论坛feed），可以是用户和TA共同视角的日常分享。
+账号的动态（会发在公共论坛里，所有人都看得到），可以是用户和TA共同视角的日常分享。
 
 === 可用的装饰性评论/点赞账号池 ===
 ${roster.map(describeAccountForPrompt).join('\n')}
@@ -531,9 +624,19 @@ ${buildSharedForumHardRules()}
     involvesCharInteraction: false,
     isOwnedByUserSide: true, // [交接5 4.9] 系统自动生成的专属动态同样 isOwnedByUserSide=true
     likes: [],
-    visibility: 'sharedAccountExclusive',
+    // [用户确认·覆盖交接5 4.9] 原本只在共管号自己主页可见，现在跟用户手动用共管号
+    // 发的帖走同一条路进公共 feed——否则同一个号会出现"你发的全论坛可见、它发的
+    // 只有主页看得到"这种割裂。
+    visibility: 'public',
   };
   await feed.createPost(post);
+
+  // 共管账号的自动动态同样算"用户方内容"，写一条便利贴给绑定的那个角色。
+  if (account.charId) {
+    const { upsertForumPostPin } = await import('./forumMemory');
+    await upsertForumPostPin(account.charId, post).catch(e =>
+      console.warn('[ForumAi] 共管动态便利贴写入失败:', e?.message || String(e)));
+  }
 
   const comments = Array.isArray(parsed?.comments) ? parsed.comments : [];
   for (const c of comments) {

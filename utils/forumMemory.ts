@@ -23,15 +23,31 @@
  * 便利贴——没有依据，不擅自扩大范围。
  */
 
-import type { ForumPost } from './forumDb';
+import type { ForumAccount, ForumPost } from './forumDb';
 import { MemoryNodeDB } from './memoryPalace';
 import type { LightLLMConfig, MemoryNode } from './memoryPalace';
 import { getTopicLabel, type ForumTopicTag } from './forumConstants';
 
 const PIN_DURATION_MS = 24 * 60 * 60 * 1000;
 
-function makeForumPinId(postId: string): string {
-  return `forum_pin_${postId}`;
+/**
+ * 便利贴 ID 必须带上 charId。原来只用 postId，多个角色各自的记忆宫殿会抢同一个 ID，
+ * 后写的把先写的顶掉——一条帖子只能被一个角色记住。
+ */
+function makeForumPinId(charId: string, postId: string): string {
+  return `forum_pin_${charId}_${postId}`;
+}
+
+/**
+ * 这条帖子该不该进记忆宫殿。[用户确认] 只认用户大号和共管账号，**双方小号都不算**。
+ *
+ * 小号一旦进记忆，TA 就等于直接被告知"这条是用户发的"，互相猜小号的玩法当场作废；
+ * TA 自己小号发的内容也不进——那属于它私下的行为，没必要变成长期记忆去污染主线。
+ */
+export function isPostEligibleForMemory(authorAccount: ForumAccount | null | undefined): boolean {
+  if (!authorAccount) return false;
+  if (authorAccount.isAlt) return false;
+  return authorAccount.ownerType === 'user' || authorAccount.ownerType === 'shared';
 }
 
 /** 内容摘要，供便利贴用。没有 messageFormat.ts 里 summarizeMomentForPin 的原实现可抄，
@@ -59,10 +75,10 @@ export async function upsertForumPostPin(
   const content = summarizeForumPostForPin(post);
   if (!content.trim()) return;
 
-  const existing = await MemoryNodeDB.getById(makeForumPinId(post.id));
+  const existing = await MemoryNodeDB.getById(makeForumPinId(charId, post.id));
   const createdAt = existing?.createdAt || post.createdAt || now;
   const node: MemoryNode = {
-    id: makeForumPinId(post.id),
+    id: makeForumPinId(charId, post.id),
     charId,
     content,
     room: 'living_room',
@@ -84,6 +100,6 @@ export async function upsertForumPostPin(
 }
 
 /** 帖子被删/被三天水线物理清扫时，同步删掉对应便利贴（如果还在）。 */
-export async function deleteForumPostPin(postId: string): Promise<void> {
-  await MemoryNodeDB.delete(makeForumPinId(postId));
+export async function deleteForumPostPin(charId: string, postId: string): Promise<void> {
+  await MemoryNodeDB.delete(makeForumPinId(charId, postId));
 }
