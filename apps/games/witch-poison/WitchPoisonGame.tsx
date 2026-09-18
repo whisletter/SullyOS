@@ -12,13 +12,14 @@ import { callGameAI } from '../shared/ai';
 import { createChatMirror } from '../shared/chatMirror';
 import { readNames, readPersona } from '../shared/profile';
 import {
-  ENDING_FALLBACK, FALLBACK_POISON_LINES, FALLBACK_SAFE_LINES, NARRATOR_EAT, NARRATOR_RESULT_POISON,
-  NARRATOR_RESULT_SAFE, NARRATOR_START_LINES, TOTAL_CANDIES, buildEndingPrompt, buildSystemPrompt, buildTurnPrompt,
+  ENDING_FALLBACK, FALLBACK_POISON_CHOICE_NOTES, FALLBACK_POISON_LINES, FALLBACK_SAFE_LINES, NARRATOR_EAT,
+  NARRATOR_RESULT_POISON, NARRATOR_RESULT_SAFE, NARRATOR_START_LINES, POISON_PICK_USER_PROMPT, TOTAL_CANDIES,
+  buildEndingPrompt, buildPoisonPickSystem, buildSystemPrompt, buildTurnPrompt,
 } from './content';
 
 export interface WitchPoisonGameProps { onBack: () => void }
 
-type Phase = 'intro' | 'pickPoison' | 'countdown' | 'playing' | 'result';
+type Phase = 'intro' | 'deciding' | 'pickPoison' | 'countdown' | 'playing' | 'result';
 type Who = 'user' | 'char';
 
 interface Bubble {
@@ -155,6 +156,7 @@ const WitchPoisonGame: React.FC<WitchPoisonGameProps> = ({ onBack }) => {
   const [charPickHint, setCharPickHint] = useState<number | null>(null);
   const [countdownN, setCountdownN] = useState(3);
   const [loser, setLoser] = useState<Who | null>(null);
+  const [decidingNote, setDecidingNote] = useState(() => FALLBACK_POISON_CHOICE_NOTES[Math.floor(Math.random() * FALLBACK_POISON_CHOICE_NOTES.length)]);
 
   const bubbleIdRef = useRef(0);
   const lastSafeLine = useRef<string | null>(null);
@@ -180,10 +182,29 @@ const WitchPoisonGame: React.FC<WitchPoisonGameProps> = ({ onBack }) => {
     [eaten],
   );
 
-  // ── 开局：给自己（char）偷偷选一颗毒药 ──────────────────────────────────
-  const startGame = () => {
-    const secret = Math.floor(Math.random() * TOTAL_CANDIES);
-    setCharPoison(secret);
+  // ── 开局：让 char 自己代入人设「决定」毒药藏在哪一颗 ──────────────────────
+  //   只在这里问一次 AI，拿到编号后用 setCharPoison 锁死；resolvePick 等其余
+  //   所有地方都只读这个 state、再也不会重新调 AI 问这件事——AI 没有回头改答案的入口。
+  async function decideCharPoison(): Promise<number> {
+    try {
+      const reply = await callGameAI({
+        api: apiConfig,
+        temperature: 1,
+        label: names.ta,
+        system: buildPoisonPickSystem(persona, names.ta, names.user),
+        messages: [{ role: 'user', content: POISON_PICK_USER_PROMPT }],
+        meta: { appName: '女巫的毒药', charId: charId || undefined, charName: names.ta, purpose: '女巫的毒药 · 选毒药' },
+      });
+      const m = (reply || '').match(/\d{1,2}/);
+      if (m) {
+        const n = parseInt(m[0], 10);
+        if (n >= 1 && n <= TOTAL_CANDIES) return n - 1;
+      }
+    } catch (e) { console.warn('[witch_poison] AI 选毒药失败，改用随机', e); }
+    return Math.floor(Math.random() * TOTAL_CANDIES);
+  }
+
+  const startGame = async () => {
     setUserPoison(null);
     setEaten(new Set());
     setVanishing(new Set());
@@ -192,6 +213,10 @@ const WitchPoisonGame: React.FC<WitchPoisonGameProps> = ({ onBack }) => {
     setBubbles([]);
     setLoser(null);
     setTurn('user');
+    setPhase('deciding');
+    setDecidingNote(FALLBACK_POISON_CHOICE_NOTES[Math.floor(Math.random() * FALLBACK_POISON_CHOICE_NOTES.length)]);
+    const secret = await decideCharPoison();
+    setCharPoison(secret);
     setPhase('pickPoison');
     addBubble('narrator', NARRATOR_START_LINES.pickPoison);
   };
@@ -226,7 +251,7 @@ const WitchPoisonGame: React.FC<WitchPoisonGameProps> = ({ onBack }) => {
         label: names.ta,
         system: buildSystemPrompt(persona, names.ta, names.user),
         messages: [{ role: 'user', content: buildTurnPrompt(actorName, names.ta, idx, hit, remaining.length - 1) }],
-        meta: { appName: '与昼', charId: charId || undefined, charName: names.ta, purpose: '女巫的毒药 · 反应' },
+        meta: { appName: '女巫的毒药', charId: charId || undefined, charName: names.ta, purpose: '女巫的毒药 · 反应' },
       });
       const t = (reply || '').trim().replace(/^["“'‘]+|["”'’]+$/g, '');
       if (t) return t;
@@ -242,7 +267,7 @@ const WitchPoisonGame: React.FC<WitchPoisonGameProps> = ({ onBack }) => {
         label: names.ta,
         system: buildSystemPrompt(persona, names.ta, names.user),
         messages: [{ role: 'user', content: buildEndingPrompt(loserIsUser ? names.user : names.ta, loserIsUser) }],
-        meta: { appName: '与昼', charId: charId || undefined, charName: names.ta, purpose: '女巫的毒药 · 结局' },
+        meta: { appName: '女巫的毒药', charId: charId || undefined, charName: names.ta, purpose: '女巫的毒药 · 结局' },
       });
       const t = (reply || '').trim().replace(/^["“'‘]+|["”'’]+$/g, '');
       if (t) return t;
@@ -323,6 +348,14 @@ const WitchPoisonGame: React.FC<WitchPoisonGameProps> = ({ onBack }) => {
                 onClick={startGame}
                 className="mt-2 px-8 py-3 rounded-full bg-gradient-to-br from-[#c9a2f5] to-[#f4a8c8] text-white font-bold text-[14px] shadow-[0_10px_24px_rgba(180,120,220,.35)] active:scale-95"
               >开始游戏</button>
+            </div>
+          )}
+
+          {phase === 'deciding' && (
+            <div className="flex-1 flex flex-col items-center justify-center text-center gap-3 py-8">
+              <div className="text-[46px] wp-float">🔮</div>
+              <div className="text-[13px] text-[#8a6fae] font-bold">{names.ta} 正在悄悄决定要把毒药藏在哪一颗……</div>
+              <div className="text-[11px] text-[#a98bc9]">{decidingNote}</div>
             </div>
           )}
 

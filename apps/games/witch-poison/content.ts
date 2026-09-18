@@ -34,6 +34,18 @@ export const FALLBACK_POISON_LINES: string[] = [
   '月光见证，这颗正是毒药本尊。',
 ];
 
+/** 没配 API / 解析失败时，char 自己选毒药那一步的兜底"小动作"文案（不透露具体选了第几颗） */
+export const FALLBACK_POISON_CHOICE_NOTES: string[] = [
+  'TA神秘地笑了笑，什么都没说。',
+  'TA的目光在糖堆上扫了一圈。',
+  'TA悄悄用指尖点了一下某颗糖，没让你看清。',
+  'TA哼着小曲，心里已经有了主意。',
+  'TA眨了眨眼，像是藏了什么秘密。',
+  'TA的嘴角勾起一抹意味不明的笑。',
+  'TA轻轻碰了碰糖罐边缘，若无其事。',
+  'TA在心里默念了一个数字，没有说出口。',
+];
+
 export const NARRATOR_START_LINES = {
   pickPoison: '两个人都悄悄把一颗毒药藏进了糖果堆里，谁也不知道对方选的是哪一颗……',
   userPicked: '你悄悄记下了自己的那一颗，藏进了心底。',
@@ -49,6 +61,25 @@ export const ENDING_FALLBACK = (loserName: string) => [
   `游戏结束啦，${loserName}最先吃到了毒药。`,
   '按约定，输的人要接受一点小小的惩罚哦～',
 ];
+
+/**
+ * 开局时让 AI 自己代入人设「决定」把毒药藏在哪一颗（而不是纯随机）。
+ * 只在这一次调用里问、拿到编号后立刻锁进 state，之后整局都不会再问 AI 这件事，
+ * 也不会把这次问答记进聊天记录——AI 没有任何机会在游戏中途"改答案"。
+ */
+export function buildPoisonPickSystem(persona: string, taName: string, userName: string): string {
+  return [
+    `你正在和${userName}玩一个叫"女巫的毒药"的双人小游戏。`,
+    '规则：16 颗糖果排成 4x4，编号 1 到 16，你和对方各自偷偷选定 1 颗当"毒药"，藏好之后谁都不会再改。谁先吃到任意一方设下的毒药，谁就输，要接受对方的惩罚。',
+    '你是这个角色：',
+    persona || `一个和${userName}很熟悉的人`,
+    '',
+    '请完全代入这个角色的性格和小心思，自己想好要把毒药悄悄藏在哪一颗——可以考虑角色会不会有偏好的数字、会不会琢磨"对方大概率先点哪颗"之类的小心机，但不用说出来、不用解释。',
+    '只输出你选定的那颗糖的编号，1 到 16 之间的一个整数，不要输出任何别的文字、不要标点、不要加引号、不要解释原因。',
+  ].join('\n');
+}
+
+export const POISON_PICK_USER_PROMPT = '新的一局开始了，请现在就悄悄决定你要把毒药藏在第几颗糖里（1-16），只回复这个数字。';
 
 /** 给 AI 的系统提示词：反应要贴人设、要短、不能出戏 */
 export function buildSystemPrompt(persona: string, taName: string, userName: string): string {
