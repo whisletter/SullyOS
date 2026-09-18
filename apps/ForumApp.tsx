@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useOS } from '../context/OSContext';
 import {
   ArrowLeft, House, MagnifyingGlass, Bell, ChatCircleDots, BookmarkSimple,
-  UserCircle, GearSix, PaperPlaneTilt, DotsThreeVertical, Sun, Moon,
+  UserCircle, GearSix, PaperPlaneTilt, DotsThreeVertical, Sun, Moon, UsersThree,
 } from '@phosphor-icons/react';
 import { RealtimeContextManager } from '../utils/realtimeContext';
 import * as db from '../utils/forumDb';
@@ -11,6 +11,7 @@ import * as scheduler from '../utils/forumScheduler';
 import { resolveActiveIdentityAccount, ensureCharMainAccount } from '../utils/forumBootstrap';
 import { ensureNpcPool } from '../utils/forumNpcSeed';
 import { runQuotaBatch, runTopicRefresh } from '../utils/forumBatch';
+import { ensureRegulars } from '../utils/forumSocial';
 import { FORUM_DEFAULTS, type ForumTopicTag } from '../utils/forumConstants';
 import { ForumLogo, FORUM_APP_NAME } from '../utils/forumLogo';
 import type { HotNewsItem } from '../types';
@@ -25,6 +26,7 @@ import ForumIdentitySheet from './forum/ForumIdentitySheet';
 import ForumDm from './forum/ForumDm';
 import ForumCompose from './forum/ForumCompose';
 import ForumNotifications from './forum/ForumNotifications';
+import ForumFriends from './forum/ForumFriends';
 
 /** 浅色/夜色两组色值，直接照抄 MingLightApp 的日间/夜间 token，不搬它的衬线字体/纸质调性
  *  [交接5 4.11]。 */
@@ -40,6 +42,7 @@ export type ForumSection =
   | { kind: 'search' }
   | { kind: 'notifications' }
   | { kind: 'dm' }
+  | { kind: 'friends' }
   | { kind: 'collected' }
   | { kind: 'profile'; accountId?: string }
   | { kind: 'settings' }
@@ -52,6 +55,7 @@ const NAV_ITEMS: { id: ForumSection['kind']; icon: React.ElementType; label: str
   { id: 'search', icon: MagnifyingGlass, label: '搜索' },
   { id: 'notifications', icon: Bell, label: '通知' },
   { id: 'dm', icon: ChatCircleDots, label: '私信' },
+  { id: 'friends', icon: UsersThree, label: '好友' },
   { id: 'collected', icon: BookmarkSimple, label: '收藏' },
   { id: 'profile', icon: UserCircle, label: '我的' },
   { id: 'settings', icon: GearSix, label: '设置' },
@@ -110,6 +114,10 @@ const ForumApp: React.FC = () => {
       const account = await resolveActiveIdentityAccount(userProfile?.name || '我', userProfile?.avatar);
       if (cancelled) return;
       setActiveAccount(account);
+
+      // 常客名单：从路人池里固定挑 10 个，让他们在用户帖子下面反复出现。
+      // 必须在账号池建好之后调，否则抽不到人。
+      await ensureRegulars(account.id).catch(e => console.warn('[Forum] 常客名单初始化失败:', e));
 
       const settings = await db.getForumSettings(account.id);
       if (cancelled) return;
@@ -259,7 +267,20 @@ const ForumApp: React.FC = () => {
           />
         );
       case 'search':
-        return <ForumSearch onOpenPost={postId => navigate({ kind: 'post', postId })} />;
+        return (
+          <ForumSearch
+            activeAccount={activeAccount}
+            onOpenPost={postId => navigate({ kind: 'post', postId })}
+            onOpenProfile={accountId => navigate({ kind: 'profile', accountId })}
+          />
+        );
+      case 'friends':
+        return (
+          <ForumFriends
+            activeAccount={activeAccount}
+            onOpenProfile={accountId => navigate({ kind: 'profile', accountId })}
+          />
+        );
       case 'notifications':
         return <ForumNotifications activeAccount={activeAccount} onOpenPost={postId => navigate({ kind: 'post', postId })} />;
       case 'dm':
@@ -267,7 +288,13 @@ const ForumApp: React.FC = () => {
       case 'collected':
         return <ForumCollected onOpenPost={postId => navigate({ kind: 'post', postId })} />;
       case 'profile':
-        return <ForumProfile accountId={section.accountId || activeAccount.id} onOpenPost={postId => navigate({ kind: 'post', postId })} />;
+        return (
+          <ForumProfile
+            accountId={section.accountId || activeAccount.id}
+            myAccountId={activeAccount.id}
+            onOpenPost={postId => navigate({ kind: 'post', postId })}
+          />
+        );
       case 'settings':
         return (
           <ForumSettingsPanel
@@ -307,6 +334,7 @@ const ForumApp: React.FC = () => {
           {section.kind === 'search' && '搜索'}
           {section.kind === 'notifications' && '通知'}
           {section.kind === 'dm' && '私信'}
+          {section.kind === 'friends' && '好友'}
           {section.kind === 'collected' && '收藏'}
           {section.kind === 'profile' && '个人主页'}
           {section.kind === 'settings' && '设置'}
@@ -335,7 +363,7 @@ const ForumApp: React.FC = () => {
       <div className="flex-1 flex min-h-0">
         {/* 左侧细长图标导航栏，仿X，纯图标级别 [交接5 4.1] */}
         <div
-          className="shrink-0 flex flex-col items-center gap-1 py-3 border-r"
+          className="shrink-0 flex flex-col items-center gap-1 py-3 border-r overflow-y-auto no-scrollbar"
           style={{ width: 56, borderColor: themeTokens.border }}
         >
           {NAV_ITEMS.map(item => {
