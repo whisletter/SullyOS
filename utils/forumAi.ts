@@ -25,6 +25,8 @@ import {
   buildSharedForumHardRules, FORUM_NEWS_AUTHENTICITY_RULE,
   FORUM_DEFAULTS,
 } from './forumConstants';
+import { pickRosterWithRegulars } from './forumSocial';
+import { userMainAccountId } from './forumBootstrap';
 import type { HotNewsItem } from '../types';
 
 // ==================== 调用约定 ====================
@@ -333,7 +335,9 @@ export async function runPostRefresh(params: RunPostRefreshParams): Promise<void
   const { mustReply, randomlyPicked } = feed.pickFloorsForRefresh(pending, heatLevel);
 
   const rosterSize = Math.min(npcAccounts.length, 8);
-  const roster = pickNpcPoolForBatch(npcAccounts, [], rosterSize);
+  // 走常客名单：约六成候选是"熟面孔"，让用户的帖子下面反复出现同一批人。
+  // 纯随机的话每次都是陌生 ID，用户无从分辨谁是谁，猜小号这件事根本立不起来。
+  const roster = await pickRosterWithRegulars(npcAccounts, rosterSize, userMainAccountId());
   // 路人池和 TA 账号严格分开传给模型：新增装饰评论、非@TA的垫底楼，只能从路人池里选，
   // TA 的号只出现在"必须回复"区块，不能被顺手当成随机路人接垫底或写装饰评论——
   // 不然就违背了"TA只在被精准点名/走共管账号定时节奏时才发声"的设计。

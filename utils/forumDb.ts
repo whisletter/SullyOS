@@ -193,13 +193,16 @@ export interface ForumSettings {
    * 既然是独立借来的切换机制，就给它一个独立开关，不强行绑定系统主题。
    */
   darkMode?: boolean;
+  /** 常客名单：固定几个路人账号，让他们在用户的帖子下面反复出现，形成"熟面孔"。
+   *  没有熟面孔的话每次都是全新陌生 ID，用户根本无从分辨谁是 TA 的小号。 */
+  regularsAccountIds?: string[];
   updatedAt: number;
 }
 
 // ==================== 数据库连接 ====================
 
 const DB_NAME = 'SullyOS_Forum';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 const STORE_ACCOUNTS = 'accounts';
 const STORE_POSTS = 'posts';
@@ -209,6 +212,7 @@ const STORE_IDENTITY_AWARENESS = 'identity_awareness';
 const STORE_DM_MESSAGES = 'dm_messages';
 const STORE_SETTINGS = 'settings';
 const STORE_AI_TASKS = 'ai_tasks';
+const STORE_RELATIONS = 'relations';
 
 let dbCache: IDBDatabase | null = null;
 
@@ -269,6 +273,15 @@ function openDb(): Promise<IDBDatabase> {
         store.createIndex('nextRunAt', 'nextRunAt', { unique: false });
         store.createIndex('kind', 'kind', { unique: false });
         store.createIndex('targetId', 'targetId', { unique: false });
+      }
+
+      // v2 新增：好友 / 拉黑关系。一行代表一个方向（from 对 to 的态度），
+      // 互为好友时两个方向各存一行，这样"我的好友列表"用 fromAccountId 索引一次就拿到。
+      if (!db.objectStoreNames.contains(STORE_RELATIONS)) {
+        const store = db.createObjectStore(STORE_RELATIONS, { keyPath: 'id' });
+        store.createIndex('fromAccountId', 'fromAccountId', { unique: false });
+        store.createIndex('toAccountId', 'toAccountId', { unique: false });
+        store.createIndex('status', 'status', { unique: false });
       }
     };
 
@@ -608,6 +621,70 @@ export async function getDmThreadsForIdentity(viewerIdentityAccountId: string): 
     .sort((a, b) => b.lastMessage.createdAt - a.lastMessage.createdAt);
 }
 
+// ==================== Relations（好友 / 拉黑）====================
+
+/**
+ * pending  —— from 向 to 发出了好友申请，还没被处理
+ * accepted —— from 认可 to 是好友（互为好友时两个方向各一行）
+ * blocked  —— from 拉黑了 to（单向；私信是否被拦要看两个方向里有没有任何一条 blocked）
+ */
+export type ForumRelationStatus = 'pending' | 'accepted' | 'blocked';
+
+export interface ForumRelation {
+  /** `${fromAccountId}__${toAccountId}`，同一对方向只会有一行，天然幂等。 */
+  id: string;
+  fromAccountId: string;
+  toAccountId: string;
+  status: ForumRelationStatus;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export function makeForumRelationId(fromAccountId: string, toAccountId: string): string {
+  return `${fromAccountId}__${toAccountId}`;
+}
+
+export async function saveForumRelation(relation: ForumRelation): Promise<void> {
+  const db = await openDb();
+  const tx = db.transaction(STORE_RELATIONS, 'readwrite');
+  tx.objectStore(STORE_RELATIONS).put(relation);
+  return txDone(tx);
+}
+
+export async function getForumRelation(fromAccountId: string, toAccountId: string): Promise<ForumRelation | null> {
+  const db = await openDb();
+  const tx = db.transaction(STORE_RELATIONS, 'readonly');
+  const row = await reqResult<ForumRelation | undefined>(
+    tx.objectStore(STORE_RELATIONS).get(makeForumRelationId(fromAccountId, toAccountId))
+  );
+  return row || null;
+}
+
+export async function deleteForumRelation(fromAccountId: string, toAccountId: string): Promise<void> {
+  const db = await openDb();
+  const tx = db.transaction(STORE_RELATIONS, 'readwrite');
+  tx.objectStore(STORE_RELATIONS).delete(makeForumRelationId(fromAccountId, toAccountId));
+  return txDone(tx);
+}
+
+/** 这个账号发出的关系（我的好友列表 / 我发出的申请 / 我拉黑的人）。 */
+export async function getForumRelationsFrom(accountId: string, status?: ForumRelationStatus): Promise<ForumRelation[]> {
+  const db = await openDb();
+  const tx = db.transaction(STORE_RELATIONS, 'readonly');
+  const idx = tx.objectStore(STORE_RELATIONS).index('fromAccountId');
+  const all = (await reqResult<ForumRelation[]>(idx.getAll(accountId))) || [];
+  return status ? all.filter(r => r.status === status) : all;
+}
+
+/** 指向这个账号的关系（别人发给我的申请 / 谁拉黑了我）。 */
+export async function getForumRelationsTo(accountId: string, status?: ForumRelationStatus): Promise<ForumRelation[]> {
+  const db = await openDb();
+  const tx = db.transaction(STORE_RELATIONS, 'readonly');
+  const idx = tx.objectStore(STORE_RELATIONS).index('toAccountId');
+  const all = (await reqResult<ForumRelation[]>(idx.getAll(accountId))) || [];
+  return status ? all.filter(r => r.status === status) : all;
+}
+
 // ==================== Settings ====================
 
 const DEFAULT_SETTINGS_BASE: Omit<ForumSettings, 'id' | 'activeIdentityAccountId'> = {
@@ -720,6 +797,7 @@ export interface ForumBackupData {
   identityAwareness: ForumIdentityAwareness[];
   dmMessages: ForumDmMessage[];
   settings: ForumSettings[];
+  relations?: ForumRelation[];
 }
 
 export async function exportForumAll(): Promise<ForumBackupData> {
@@ -728,7 +806,7 @@ export async function exportForumAll(): Promise<ForumBackupData> {
     const tx = db.transaction(storeName, 'readonly');
     return reqResult<T[]>(tx.objectStore(storeName).getAll());
   };
-  const [accounts, posts, comments, altBudgets, identityAwareness, dmMessages, settings] = await Promise.all([
+  const [accounts, posts, comments, altBudgets, identityAwareness, dmMessages, settings, relations] = await Promise.all([
     getAll<ForumAccount>(STORE_ACCOUNTS),
     getAll<ForumPost>(STORE_POSTS),
     getAll<ForumComment>(STORE_COMMENTS),
@@ -736,8 +814,9 @@ export async function exportForumAll(): Promise<ForumBackupData> {
     getAll<ForumIdentityAwareness>(STORE_IDENTITY_AWARENESS),
     getAll<ForumDmMessage>(STORE_DM_MESSAGES),
     getAll<ForumSettings>(STORE_SETTINGS),
+    getAll<ForumRelation>(STORE_RELATIONS),
   ]);
-  return { accounts, posts, comments, altBudgets, identityAwareness, dmMessages, settings };
+  return { accounts, posts, comments, altBudgets, identityAwareness, dmMessages, settings, relations };
 }
 
 export async function importForumAll(backup: ForumBackupData): Promise<void> {
@@ -759,6 +838,7 @@ export async function importForumAll(backup: ForumBackupData): Promise<void> {
   await clearAndFill(STORE_IDENTITY_AWARENESS, backup.identityAwareness || []);
   await clearAndFill(STORE_DM_MESSAGES, backup.dmMessages || []);
   await clearAndFill(STORE_SETTINGS, backup.settings || []);
+  await clearAndFill(STORE_RELATIONS, backup.relations || []);
 }
 
 /** 一键清空全部（本轮不接入 UI，仅保留函数以后接 [交接4 一]）。 */
@@ -766,7 +846,7 @@ export async function wipeForumAllData(): Promise<void> {
   const db = await openDb();
   const stores = [
     STORE_ACCOUNTS, STORE_POSTS, STORE_COMMENTS, STORE_ALT_BUDGETS,
-    STORE_IDENTITY_AWARENESS, STORE_DM_MESSAGES,
+    STORE_IDENTITY_AWARENESS, STORE_DM_MESSAGES, STORE_RELATIONS,
   ];
   for (const s of stores) {
     const tx = db.transaction(s, 'readwrite');

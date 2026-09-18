@@ -55,6 +55,37 @@ const SCATTER_WINDOW_REFRESH_MS = 15 * 60 * 1000;
 
 const AI_MAX_RETRIES = 2;
 
+// ==================== 诊断记录 ====================
+
+/**
+ * 记录最近一次生成到底发生了什么。手机上看不到控制台，出问题时只能靠这个在
+ * 设置页里把中间过程摊开：池子多大、模型返回了多长、解析出几条、被什么理由刷掉的。
+ */
+export interface BatchDiagnostics {
+  at: number;
+  npcPoolSize: number;
+  rosterSize: number;
+  expected: number;
+  /** 模型返回的原始字符数。0 = 模型什么都没返回。 */
+  rawChars: number;
+  /** 原始返回的开头一段，用来肉眼判断是不是被截断/返回了报错文本。 */
+  rawHead: string;
+  /** JSON 解析后 posts 数组的长度。 */
+  parsedPostCount: number;
+  /** 通过校验、准备落库的条数。 */
+  acceptedCount: number;
+  /** 被刷掉的理由统计。 */
+  rejectReasons: string[];
+  savedCount: number;
+  error?: string;
+}
+
+let lastDiagnostics: BatchDiagnostics | null = null;
+
+export function getLastBatchDiagnostics(): BatchDiagnostics | null {
+  return lastDiagnostics;
+}
+
 // ==================== 调用约定（同 forumAi 的 callForumAI） ====================
 
 async function callForumAI(apiConfig: ForumApiConfig, prompt: string, purpose: string): Promise<string> {
@@ -253,18 +284,26 @@ interface QuotaDraft {
   comment?: { authorHandle: string; content: string };
 }
 
-function normalizeQuotaDrafts(raw: any, validHandles: Set<string>, commentedPostCount: number): QuotaDraft[] {
+function normalizeQuotaDrafts(
+  raw: any,
+  validHandles: Set<string>,
+  commentedPostCount: number,
+  reasons: string[],
+): QuotaDraft[] {
   const posts = Array.isArray(raw?.posts) ? raw.posts : [];
+  if (!Array.isArray(raw?.posts)) reasons.push('返回里没有 posts 数组');
   const out: QuotaDraft[] = [];
   let commentBudget = commentedPostCount;
+  let badHandle = 0;
+  let emptyContent = 0;
 
   for (const p of posts) {
     if (!p || typeof p !== 'object') continue;
     const authorHandle = String(p.authorHandle || '');
-    if (!validHandles.has(authorHandle)) continue;
+    if (!validHandles.has(authorHandle)) { badHandle++; continue; }
 
     const content = String(p.content || '').slice(0, 5000);
-    if (!content.trim()) continue;
+    if (!content.trim()) { emptyContent++; continue; }
 
     const postKind: 'news' | 'organic' = p.postKind === 'news' ? 'news' : 'organic';
     const topicTag = (FORUM_TOPIC_TAGS.some(t => t.tag === p.topicTag) ? p.topicTag : 'daily_chatter') as ForumTopicTag;
@@ -292,6 +331,9 @@ function normalizeQuotaDrafts(raw: any, validHandles: Set<string>, commentedPost
       comment,
     });
   }
+
+  if (badHandle > 0) reasons.push(`${badHandle} 条的作者 handle 不在账号池里（模型自己编了账号）`);
+  if (emptyContent > 0) reasons.push(`${emptyContent} 条正文是空的`);
   return out;
 }
 
@@ -372,25 +414,54 @@ async function generate(params: GenerateParams): Promise<ForumPost[]> {
   await ensureNpcPool();
 
   const npcAccounts = await db.getActiveNpcAccounts();
+
+  const expected = quotas.reduce((sum, q) => sum + q.count, 0);
+  const report: BatchDiagnostics = {
+    at: Date.now(),
+    npcPoolSize: npcAccounts.length,
+    rosterSize: 0,
+    expected,
+    rawChars: 0,
+    rawHead: '',
+    parsedPostCount: 0,
+    acceptedCount: 0,
+    rejectReasons: [],
+    savedCount: 0,
+  };
+  if (depth === 0) lastDiagnostics = report;
+
   if (npcAccounts.length === 0) {
+    report.error = '路人账号池是空的（建号这一步就失败了）';
     throw new Error('路人账号池是空的，无法生成内容');
   }
 
-  const expected = quotas.reduce((sum, q) => sum + q.count, 0);
   const roster = pickRosterForTopics(npcAccounts, quotas.map(q => q.tag), expected);
+  report.rosterSize = roster.length;
   const validHandles = new Set(roster.map(a => a.handle));
   const accountByHandle = new Map(roster.map(a => [a.handle, a]));
   const prompt = buildQuotaPrompt({ quotas, roster, hotNewsItems, commentedPostCount });
 
-  const raw = await callForumAI(apiConfig, prompt, purpose);
+  let raw = '';
+  try {
+    raw = await callForumAI(apiConfig, prompt, purpose);
+  } catch (e: any) {
+    report.error = `请求模型失败：${e?.message || String(e)}`;
+    throw e;
+  }
+  report.rawChars = raw.length;
+  report.rawHead = raw.slice(0, 300);
+  if (!raw) report.rejectReasons.push('模型返回是空的');
 
   let drafts: QuotaDraft[] = [];
   try {
     const parsed = extractJson<any>(raw);
-    drafts = normalizeQuotaDrafts(parsed, validHandles, commentedPostCount);
+    report.parsedPostCount = Array.isArray(parsed?.posts) ? parsed.posts.length : 0;
+    drafts = normalizeQuotaDrafts(parsed, validHandles, commentedPostCount, report.rejectReasons);
   } catch (e: any) {
+    report.rejectReasons.push(`JSON 解析失败：${e?.message || String(e)}`);
     console.warn('[ForumBatch] JSON 解析失败:', e?.message || String(e));
   }
+  report.acceptedCount = drafts.length;
 
   // 截断降级：解析失败或产出明显少于配额，多半是输出被 max_tokens 剪断。
   // 把配额拆成两半各跑一次，单次输出减半就不会再撞上限。只降一级。
@@ -409,10 +480,15 @@ async function generate(params: GenerateParams): Promise<ForumPost[]> {
         return [] as ForumPost[];
       })
     ));
-    return results.flat();
+    const merged = results.flat();
+    report.savedCount = merged.length;
+    report.rejectReasons.push(`产出少于配额，已拆成 ${halves.length} 次重试，最终存下 ${merged.length} 条`);
+    return merged;
   }
 
-  return persistDrafts(drafts, accountByHandle, scatterWindowMs);
+  const saved = await persistDrafts(drafts, accountByHandle, scatterWindowMs);
+  report.savedCount = saved.length;
+  return saved;
 }
 
 // ==================== 对外入口 ====================
