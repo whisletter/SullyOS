@@ -3,6 +3,7 @@ import { X } from '@phosphor-icons/react';
 import * as db from '../../utils/forumDb';
 import { FORUM_DEFAULTS } from '../../utils/forumConstants';
 import { ensureSharedAccount } from '../../utils/forumBootstrap';
+import { canOpenAlt, type AltOpenability } from '../../utils/forumSuspicion';
 import type { CharacterProfile } from '../../types';
 
 interface Props {
@@ -27,12 +28,15 @@ const ForumIdentitySheet: React.FC<Props> = ({ activeAccount, characters, onSwit
   /** 共管账号建号：一个角色一个号，多角色时先让用户选给谁建。 */
   const [pickingSharedChar, setPickingSharedChar] = useState(false);
   const [creatingShared, setCreatingShared] = useState(false);
+  const [altOpenable, setAltOpenable] = useState<AltOpenability>({ allowed: true });
 
   const load = useCallback(async () => {
     const userAccounts = await db.getForumAccountsByOwnerType('user');
     setMainAccount(userAccounts.find(a => !a.isAlt) || null);
     setAltAccount(userAccounts.find(a => a.isAlt && a.status === 'active') || null);
     setAltBudget(await db.getAltBudget('user'));
+    // 掉马注销之后有冷却期，跟角色那边同一套规则
+    setAltOpenable(await canOpenAlt({ type: 'user' }, userAccounts));
 
     const shared: db.ForumAccount[] = [];
     for (const char of characters) {
@@ -118,8 +122,8 @@ const ForumIdentitySheet: React.FC<Props> = ({ activeAccount, characters, onSwit
 
         {altAccount ? (
           <Row label={`${altAccount.displayName}（小号）`} active={activeAccount.id === altAccount.id} onClick={() => onSwitch(altAccount.id)} />
-        ) : altBudget?.locked ? (
-          <Row label="小号已用尽 5 次机会，不可再开" disabled />
+        ) : !altOpenable.allowed ? (
+          <Row label={altOpenable.reason || '现在不能开新小号'} disabled />
         ) : creatingAlt ? (
           <div className="px-4 py-3 rounded-xl space-y-2" style={{ background: 'rgba(127,127,127,0.08)' }}>
             <input

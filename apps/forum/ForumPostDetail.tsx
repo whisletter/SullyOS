@@ -4,6 +4,7 @@ import * as db from '../../utils/forumDb';
 import * as feed from '../../utils/forumFeed';
 import { isUserSideAccount } from '../../utils/forumFeed';
 import * as ai from '../../utils/forumAi';
+import { buildAltContinuedLookup } from '../../utils/forumSuspicion';
 import { FORUM_TOPIC_TAGS, getTopicLabel, type ForumTopicTag } from '../../utils/forumConstants';
 import TokenImg from '../../components/os/TokenImg';
 import { useOS } from '../../context/OSContext';
@@ -128,13 +129,14 @@ const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, ap
       // taAccounts：所有角色的论坛账号（主号 + 小号）。用不用、用哪个由 TA 自己判断，
       // 只有"@了TA的楼"是必回的。
       const taAccounts = allAccounts.filter(a => a.ownerType === 'char' && a.status === 'active');
+      // 掉马机制已接上：小号只有在"被你认出来、且它选择继续用"之后，它的回复才算
+      // 角色本人互动过、才触发帖子永久保留。没掉马的小号照旧不算，帖子受三天水线约束。
+      const continuedAlts = await buildAltContinuedLookup(
+        taAccounts.filter(a => a.isAlt).map(a => a.id)
+      );
       await ai.runPostRefresh({
         apiConfig, postId: post.id, heatLevel, taAccounts,
-        // [用户确认] 小号回复暂时不算"角色互动过"，所以不触发永久保留。
-        // 原因：小号在帖子下面随手接几句就把帖子永久钉住的话，三天水线形同虚设，
-        // 本地存储只涨不降；而且按原设计，小号本来就要等掉马确认之后才算数。
-        // 等掉马机制做完，这里换成按真实的"是否已掉马且继续沿用"来判断。
-        altIsContinuedInUse: () => false,
+        altIsContinuedInUse: (accountId: string) => continuedAlts.has(accountId),
       });
       await load();
       addToast('刷新完成', 'success');

@@ -1,9 +1,10 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { Lightning, MagnifyingGlass, ArrowLeft } from '@phosphor-icons/react';
+import { Lightning, MagnifyingGlass, ArrowLeft, Eye } from '@phosphor-icons/react';
 import TokenImg from '../../components/os/TokenImg';
 import * as db from '../../utils/forumDb';
 import * as ai from '../../utils/forumAi';
 import * as social from '../../utils/forumSocial';
+import * as suspicion from '../../utils/forumSuspicion';
 import { useOS } from '../../context/OSContext';
 
 interface Props {
@@ -24,6 +25,12 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig }) => {
   const [messages, setMessages] = useState<db.ForumDmMessage[]>([]);
   const [inputText, setInputText] = useState('');
   const [triggering, setTriggering] = useState(false);
+  const [confirmingConfront, setConfirmingConfront] = useState(false);
+  const [confronting, setConfronting] = useState(false);
+  /** TA 已经当面质问过我这个号、我还没表态的那条记录。 */
+  const [pendingAccusation, setPendingAccusation] = useState<{ observerKey: string } | null>(null);
+  const [admitting, setAdmitting] = useState(false);
+  const [answering, setAnswering] = useState(false);
   const [picking, setPicking] = useState(false);
   const [pickKeyword, setPickKeyword] = useState('');
   /** 跟我有拉黑关系的账号（任一方向）。拉黑双向断，被拉黑的人也发不过来。 */
@@ -38,6 +45,10 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig }) => {
     setThreads(list);
     setAccountsById(new Map(accounts.map(a => [a.id, a])));
     setBlockedIds(blocked);
+
+    const accusation = await suspicion.getPendingConfrontationFor(activeAccount.id);
+    setPendingAccusation(accusation ? { observerKey: accusation.observerKey } : null);
+    setAdmitting(false);
   }, [activeAccount.id]);
 
   useEffect(() => { loadThreads(); }, [loadThreads]);
@@ -96,6 +107,68 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig }) => {
     }
   }, [openCounterpartId, apiConfig, activeAccount.id, addToast, loadThreads, userProfile]);
 
+  /**
+   * 当面对质："我觉得这个号是你的小号"。
+   *
+   * 认不认由对方自己决定，路人号在生成层就被锁死不可能认领。所以挨个指认所有账号
+   * 是无效策略——否认从外面看长得都一样，只有承认才是信号。
+   */
+  const handleConfront = useCallback(async () => {
+    if (!openCounterpartId) return;
+    if (!apiConfig?.baseUrl || !apiConfig?.apiKey || !apiConfig?.model) {
+      addToast('请先配置 API', 'info');
+      return;
+    }
+    setConfirmingConfront(false);
+    setConfronting(true);
+    try {
+      const result = await ai.runAltConfrontation({
+        apiConfig,
+        accuserAccountId: activeAccount.id,
+        targetAccountId: openCounterpartId,
+        userDisplayName: userProfile?.name,
+      });
+      const msgs = await db.getDmThreadMessages(activeAccount.id, openCounterpartId);
+      setMessages(msgs);
+      await loadThreads();
+
+      if (result.admitted) {
+        addToast(result.keptAccount ? '对方承认了，并且打算继续用这个号' : '对方承认了，并注销了这个号', 'success');
+      } else {
+        addToast('对方没认', 'info');
+      }
+    } catch (e: any) {
+      addToast(`对质失败: ${e?.message?.slice(0, 60) || '未知错误'}`, 'error');
+    } finally {
+      setConfronting(false);
+    }
+  }, [openCounterpartId, apiConfig, activeAccount.id, userProfile, addToast, loadThreads]);
+
+  /**
+   * 回应 TA 的质问。承认与否、承认之后留不留这个号，都由用户自己点——
+   * 跟"你指认 TA"那边由 TA 自己决定是对称的。
+   */
+  const handleAnswerAccusation = useCallback(async (admit: boolean, keep?: boolean) => {
+    if (!pendingAccusation) return;
+    setAnswering(true);
+    try {
+      if (!admit) {
+        await suspicion.markDenied(pendingAccusation.observerKey, activeAccount.id);
+        addToast('你否认了', 'info');
+      } else {
+        await suspicion.markAdmitted(
+          pendingAccusation.observerKey, activeAccount, keep ? 'kept' : 'burned',
+        );
+        addToast(keep ? '你承认了，这个号继续用' : '你承认了，并注销了这个号', 'success');
+      }
+      setPendingAccusation(null);
+      setAdmitting(false);
+      await loadThreads();
+    } finally {
+      setAnswering(false);
+    }
+  }, [pendingAccusation, activeAccount, addToast, loadThreads]);
+
   // ── 聊天窗口 ──
   if (openCounterpartId) {
     const counterpart = accountsById.get(openCounterpartId);
@@ -104,7 +177,51 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig }) => {
         <div className="flex items-center gap-2 px-3 py-2 border-b" style={{ borderColor: 'rgba(127,127,127,0.15)' }}>
           <button onClick={() => setOpenCounterpartId(null)} className="p-1"><ArrowLeft size={18} /></button>
           <span className="font-semibold text-sm">{counterpart?.displayName || '未知账号'}</span>
+          <button
+            onClick={() => setConfirmingConfront(true)}
+            disabled={confronting}
+            className="ml-auto flex items-center gap-1 text-[12px] px-2.5 py-1 rounded-full disabled:opacity-40"
+            style={{ background: 'rgba(127,127,127,0.12)' }}
+            title="指认这个号是小号"
+          >
+            <Eye size={13} />
+            {confronting ? '等回话…' : '当面对质'}
+          </button>
         </div>
+
+        {/* TA 已经把话挑明了，等你表态。只在质问你的那个角色的会话里显示。 */}
+        {pendingAccusation && counterpart?.charId === pendingAccusation.observerKey && (
+          <div className="px-3 py-2.5 text-sm space-y-2 border-b" style={{ background: 'rgba(250,204,21,0.12)', borderColor: 'rgba(127,127,127,0.15)' }}>
+            {!admitting ? (
+              <>
+                <div>对方在质问这个号是不是你的小号。</div>
+                <div className="flex gap-2">
+                  <button onClick={() => setAdmitting(true)} disabled={answering} className="px-3 py-1.5 rounded-full text-xs font-bold" style={{ background: '#3b82f6', color: '#fff' }}>承认</button>
+                  <button onClick={() => handleAnswerAccusation(false)} disabled={answering} className="px-3 py-1.5 rounded-full text-xs" style={{ background: 'rgba(127,127,127,0.15)' }}>否认</button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div>承认了。这个号还要吗？</div>
+                <div className="flex gap-2">
+                  <button onClick={() => handleAnswerAccusation(true, true)} disabled={answering} className="px-3 py-1.5 rounded-full text-xs font-bold" style={{ background: '#3b82f6', color: '#fff' }}>继续用</button>
+                  <button onClick={() => handleAnswerAccusation(true, false)} disabled={answering} className="px-3 py-1.5 rounded-full text-xs" style={{ background: 'rgba(239,68,68,0.15)', color: '#ef4444' }}>注销这个号</button>
+                  <button onClick={() => setAdmitting(false)} disabled={answering} className="px-3 py-1.5 rounded-full text-xs" style={{ background: 'rgba(127,127,127,0.15)' }}>返回</button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {confirmingConfront && (
+          <div className="px-3 py-2.5 text-sm space-y-2 border-b" style={{ background: 'rgba(59,130,246,0.08)', borderColor: 'rgba(127,127,127,0.15)' }}>
+            <div>要当面指认「{counterpart?.displayName}」是小号吗？对方认不认由他自己决定。</div>
+            <div className="flex gap-2">
+              <button onClick={handleConfront} className="px-3 py-1.5 rounded-full text-xs font-bold" style={{ background: '#3b82f6', color: '#fff' }}>指认</button>
+              <button onClick={() => setConfirmingConfront(false)} className="px-3 py-1.5 rounded-full text-xs" style={{ background: 'rgba(127,127,127,0.15)' }}>算了</button>
+            </div>
+          </div>
+        )}
         <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2">
           {messages.map(m => {
             const mine = m.fromAccountId === activeAccount.id;
