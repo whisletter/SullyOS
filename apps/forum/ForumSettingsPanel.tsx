@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import * as feed from '../../utils/forumFeed';
 import { FORUM_DEFAULTS } from '../../utils/forumConstants';
 import { useOS } from '../../context/OSContext';
+import ForumDiagnostics from './ForumDiagnostics';
 
 interface Props {
   heatLevel: number;
@@ -78,6 +79,10 @@ const ForumSettingsPanel: React.FC<Props> = ({ heatLevel, onHeatLevelChange, dar
             </div>
           </div>
         )}
+      </div>
+
+      <div className="pt-2 border-t" style={{ borderColor: 'rgba(127,127,127,0.15)' }}>
+        <ForumDiagnostics />
       </div>
     </div>
   );

@@ -4,10 +4,13 @@ import * as db from '../../utils/forumDb';
 import { isUserSideAccount } from '../../utils/forumFeed';
 import ForumPostCard from './ForumPostCard';
 import ForumEditProfile from './ForumEditProfile';
+import ForumRelationButton from './ForumRelationButton';
 import TokenImg from '../../components/os/TokenImg';
 
 interface Props {
   accountId: string;
+  /** 当前使用中的身份账号 id —— 关系（好友/拉黑）是挂在身份上的，不是挂在"人"上。 */
+  myAccountId: string;
   onOpenPost: (postId: string) => void;
 }
 
@@ -21,7 +24,7 @@ const AVATAR_BOTTOM = -22;
  *  [用户确认：改版排版] 头图区照搬朋友圈的封面样式——背景图铺满、头像+昵称压右下角
  *  探出一截，签名/簡介跟在探出区域下面；没有背景图时用深色渐变兜底，白字在哪种情况
  *  下都不会花。 */
-const ForumProfile: React.FC<Props> = ({ accountId, onOpenPost }) => {
+const ForumProfile: React.FC<Props> = ({ accountId, myAccountId, onOpenPost }) => {
   const [account, setAccount] = useState<db.ForumAccount | null>(null);
   const [posts, setPosts] = useState<db.ForumPost[]>([]);
   const [loading, setLoading] = useState(true);
@@ -97,6 +100,12 @@ const ForumProfile: React.FC<Props> = ({ accountId, onOpenPost }) => {
           </div>
         )}
       </div>
+
+      {account.id !== myAccountId && (
+        <div className="flex justify-end px-4 pb-3">
+          <ForumRelationButton myAccountId={myAccountId} targetAccountId={account.id} />
+        </div>
+      )}
 
       {posts.length === 0 && <div className="text-center py-16 text-sm opacity-50">还没有发过帖子</div>}
       {posts.map(p => (

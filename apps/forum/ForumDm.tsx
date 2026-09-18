@@ -3,6 +3,7 @@ import { Lightning, MagnifyingGlass, ArrowLeft } from '@phosphor-icons/react';
 import TokenImg from '../../components/os/TokenImg';
 import * as db from '../../utils/forumDb';
 import * as ai from '../../utils/forumAi';
+import * as social from '../../utils/forumSocial';
 import { useOS } from '../../context/OSContext';
 
 interface Props {
@@ -25,13 +26,18 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig }) => {
   const [triggering, setTriggering] = useState(false);
   const [picking, setPicking] = useState(false);
   const [pickKeyword, setPickKeyword] = useState('');
+  /** 跟我有拉黑关系的账号（任一方向）。拉黑双向断，被拉黑的人也发不过来。 */
+  const [blockedIds, setBlockedIds] = useState<Set<string>>(new Set());
 
   const loadThreads = useCallback(async () => {
-    const [list, accounts] = await Promise.all([
-      db.getDmThreadsForIdentity(activeAccount.id), db.getAllForumAccounts(),
+    const [list, accounts, blocked] = await Promise.all([
+      db.getDmThreadsForIdentity(activeAccount.id),
+      db.getAllForumAccounts(),
+      social.getBlockedCounterparts(activeAccount.id),
     ]);
     setThreads(list);
     setAccountsById(new Map(accounts.map(a => [a.id, a])));
+    setBlockedIds(blocked);
   }, [activeAccount.id]);
 
   useEffect(() => { loadThreads(); }, [loadThreads]);
@@ -45,6 +51,12 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig }) => {
   const handleSend = useCallback(async () => {
     const text = inputText.trim();
     if (!text || !openCounterpartId) return;
+    // 拉黑后不能再发。这里每次发送都重新查一次而不是只信列表加载时的快照——
+    // 用户可能在另一个页面刚拉黑完就回来发消息。
+    if (await social.isDmBlocked(activeAccount.id, openCounterpartId)) {
+      addToast('你们之间已拉黑，发不出去', 'info');
+      return;
+    }
     await db.saveForumDmMessage({
       id: db.createForumDmMessageId(), viewerIdentityAccountId: activeAccount.id,
       counterpartAccountId: openCounterpartId, fromAccountId: activeAccount.id,
@@ -53,12 +65,16 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig }) => {
     setInputText('');
     const msgs = await db.getDmThreadMessages(activeAccount.id, openCounterpartId);
     setMessages(msgs);
-  }, [inputText, openCounterpartId, activeAccount.id]);
+  }, [inputText, openCounterpartId, activeAccount.id, addToast]);
 
   const handleTrigger = useCallback(async () => {
     if (!openCounterpartId) return;
     if (!apiConfig?.baseUrl || !apiConfig?.apiKey || !apiConfig?.model) {
       addToast('请先配置 API', 'info');
+      return;
+    }
+    if (await social.isDmBlocked(activeAccount.id, openCounterpartId)) {
+      addToast('你们之间已拉黑，对方不会回复', 'info');
       return;
     }
     setTriggering(true);
@@ -95,6 +111,11 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig }) => {
             );
           })}
         </div>
+        {blockedIds.has(openCounterpartId) ? (
+          <div className="px-3 py-3 text-center text-[12px] opacity-50 border-t" style={{ borderColor: 'rgba(127,127,127,0.15)' }}>
+            你们之间已拉黑，无法继续私信
+          </div>
+        ) : (
         <div className="flex items-center gap-2 px-3 py-2 border-t" style={{ borderColor: 'rgba(127,127,127,0.15)' }}>
           <input
             value={inputText}
@@ -115,6 +136,7 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig }) => {
             <Lightning size={18} weight="fill" className={triggering ? 'animate-pulse' : ''} />
           </button>
         </div>
+        )}
       </div>
     );
   }
@@ -130,6 +152,8 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig }) => {
       {picking && (
         <NewDmPicker
           currentAccounts={accountsById}
+          selfAccountId={activeAccount.id}
+          blockedIds={blockedIds}
           keyword={pickKeyword}
           onKeywordChange={setPickKeyword}
           onPick={async id => { setPicking(false); setPickKeyword(''); await openThread(id); }}
@@ -159,13 +183,17 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig }) => {
 
 const NewDmPicker: React.FC<{
   currentAccounts: Map<string, db.ForumAccount>;
+  selfAccountId: string;
+  blockedIds: Set<string>;
   keyword: string;
   onKeywordChange: (v: string) => void;
   onPick: (accountId: string) => void;
   onClose: () => void;
-}> = ({ currentAccounts, keyword, onKeywordChange, onPick, onClose }) => {
+}> = ({ currentAccounts, selfAccountId, blockedIds, keyword, onKeywordChange, onPick, onClose }) => {
+  // 只排除"当前这个身份自己"和拉黑对象。用户的其它号（主号↔小号）照常可以互发，
+  // 跟真实社交软件一致 [用户确认]。
   const list = Array.from(currentAccounts.values()).filter(a =>
-    a.ownerType !== 'user' && a.status === 'active'
+    a.id !== selfAccountId && a.status === 'active' && !blockedIds.has(a.id)
     && (!keyword.trim() || a.displayName.includes(keyword) || a.handle.includes(keyword))
   );
   return (
