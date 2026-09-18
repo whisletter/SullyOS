@@ -8,10 +8,12 @@ import { RealtimeContextManager } from '../utils/realtimeContext';
 import * as db from '../utils/forumDb';
 import * as feed from '../utils/forumFeed';
 import * as scheduler from '../utils/forumScheduler';
-import * as ai from '../utils/forumAi';
 import { resolveActiveIdentityAccount, ensureCharMainAccount } from '../utils/forumBootstrap';
-import { FORUM_DEFAULTS } from '../utils/forumConstants';
+import { ensureNpcPool } from '../utils/forumNpcSeed';
+import { runQuotaBatch, runTopicRefresh } from '../utils/forumBatch';
+import { FORUM_DEFAULTS, type ForumTopicTag } from '../utils/forumConstants';
 import { ForumLogo, FORUM_APP_NAME } from '../utils/forumLogo';
+import type { HotNewsItem } from '../types';
 import ForumHome from './forum/ForumHome';
 import ForumTopicPage from './forum/ForumTopicPage';
 import ForumPostDetail from './forum/ForumPostDetail';
@@ -66,6 +68,9 @@ const ForumApp: React.FC = () => {
   const [darkMode, setDarkMode] = useState(false);
   const [identitySheetOpen, setIdentitySheetOpen] = useState(false);
   const [feedRefreshKey, setFeedRefreshKey] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+  /** 进 App 时正在跑首批生成——首次安装时这一步要等十几秒，不给提示会以为卡死。 */
+  const [generatingFirstBatch, setGeneratingFirstBatch] = useState(false);
 
   const navigate = useCallback((next: ForumSection) => {
     setHistory(h => [...h, section]);
@@ -82,7 +87,14 @@ const ForumApp: React.FC = () => {
     });
   }, [closeApp]);
 
-  // ── 初始化：确保每个角色有论坛主号 + 用户身份 + 一次性水线清扫/沉寂扫描/自然批量检查 ──
+  const hasApiConfig = !!(apiConfig?.baseUrl && apiConfig?.apiKey && apiConfig?.model);
+
+  const fetchHotNewsItems = useCallback(async (): Promise<HotNewsItem[]> => {
+    const snap = await RealtimeContextManager.getSlottedHotNews(realtimeConfig).catch(() => null);
+    return ((snap as any)?.items || []) as HotNewsItem[];
+  }, [realtimeConfig]);
+
+  // ── 初始化：角色论坛主号 + 路人账号池 + 用户身份 + 水线清扫 + 自然批量生成 ──
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -90,6 +102,11 @@ const ForumApp: React.FC = () => {
       for (const char of characters || []) {
         if (char.id) await ensureCharMainAccount(char.id, char.name, char.avatar);
       }
+
+      // 路人账号池：没有它，所有内容生成都会静默空转（生成层第一步就是
+      // "池子为空直接 return"）。放在最前面，且是幂等的，已有就跳过。
+      await ensureNpcPool().catch(e => console.warn('[Forum] 路人账号池引导失败:', e));
+
       const account = await resolveActiveIdentityAccount(userProfile?.name || '我', userProfile?.avatar);
       if (cancelled) return;
       setActiveAccount(account);
@@ -102,22 +119,26 @@ const ForumApp: React.FC = () => {
       // 打开App顺手做的免费维护：物理清扫过期内容（失败不影响进入）
       await feed.sweepExpiredContent().catch(e => console.warn('[Forum] 清扫失败:', e));
 
-      // 自然触发批量生成：当前 slot 缺批次就生成一批
+      // 自然触发批量生成：当前 slot 缺批次就生成一批（17 个分区各 1 条，一次调用）
       try {
         await RealtimeContextManager.getSlottedHotNews(realtimeConfig);
         const { id: slotId } = RealtimeContextManager.getHotNewsSlot();
         const needsBatch = await scheduler.needsNaturalBatch(slotId, account.id);
-        if (needsBatch && apiConfig?.baseUrl && apiConfig?.apiKey && apiConfig?.model) {
-          const snap = await RealtimeContextManager.getSlottedHotNews(realtimeConfig).catch(() => null);
-          const hotNewsItems = (snap as any)?.items || [];
-          await ai.runBatchGeneration({
-            apiConfig, hotNewsItems, userPreferenceTags: [], trigger: 'natural',
-          });
-          await scheduler.markNaturalBatchDone(slotId, account.id);
-          if (!cancelled) setFeedRefreshKey(k => k + 1);
+        if (needsBatch && hasApiConfig) {
+          if (!cancelled) setGeneratingFirstBatch(true);
+          const hotNewsItems = await fetchHotNewsItems();
+          const posts = await runQuotaBatch({ apiConfig, hotNewsItems });
+          // 只有真的生成出内容才推进水位。生成失败还把这个 slot 标记成"已生成"，
+          // 等于白白浪费掉这 4 小时的机会。
+          if (posts.length > 0) {
+            await scheduler.markNaturalBatchDone(slotId, account.id);
+            if (!cancelled) setFeedRefreshKey(k => k + 1);
+          }
         }
       } catch (e: any) {
         console.warn('[Forum] 自然触发批量生成失败:', e?.message || String(e));
+      } finally {
+        if (!cancelled) setGeneratingFirstBatch(false);
       }
 
      } catch (e: any) {
@@ -132,20 +153,51 @@ const ForumApp: React.FC = () => {
   }, []);
 
   const handleManualRefresh = useCallback(async () => {
-    if (!apiConfig?.baseUrl || !apiConfig?.apiKey || !apiConfig?.model) {
+    if (!hasApiConfig) {
       addToast('请先配置 API', 'info');
       return;
     }
+    if (refreshing) return;
+    setRefreshing(true);
     try {
-      const snap = await RealtimeContextManager.getSlottedHotNews(realtimeConfig).catch(() => null);
-      const hotNewsItems = (snap as any)?.items || [];
-      await ai.runBatchGeneration({ apiConfig, hotNewsItems, userPreferenceTags: [], trigger: 'manual' });
+      const hotNewsItems = await fetchHotNewsItems();
+      const posts = await runQuotaBatch({ apiConfig, hotNewsItems });
+      if (posts.length === 0) {
+        // 以前这里无论如何都弹"刷出新帖了"，生成 0 条时也照弹，等于骗人。
+        addToast('这次一条都没生成出来，可以再试一次', 'error');
+        return;
+      }
       setFeedRefreshKey(k => k + 1);
-      addToast('刷出新帖了', 'success');
+      addToast(`刷出 ${posts.length} 条新帖`, 'success');
     } catch (e: any) {
       addToast(`刷新失败: ${e?.message?.slice(0, 60) || '未知错误'}`, 'error');
+    } finally {
+      setRefreshing(false);
     }
-  }, [apiConfig, realtimeConfig, addToast]);
+  }, [apiConfig, hasApiConfig, refreshing, fetchHotNewsItems, addToast]);
+
+  /** 分区页🔄：只刷当前这一个分区。返回新增条数，交给分区页自己决定怎么提示/重载。 */
+  const handleTopicRefresh = useCallback(async (topicTag: string): Promise<number> => {
+    if (!hasApiConfig) {
+      addToast('请先配置 API', 'info');
+      return 0;
+    }
+    try {
+      const hotNewsItems = await fetchHotNewsItems();
+      const posts = await runTopicRefresh({
+        apiConfig, hotNewsItems, topicTag: topicTag as ForumTopicTag,
+      });
+      if (posts.length === 0) {
+        addToast('这次一条都没生成出来，可以再试一次', 'error');
+        return 0;
+      }
+      addToast(`刷出 ${posts.length} 条新帖`, 'success');
+      return posts.length;
+    } catch (e: any) {
+      addToast(`刷新失败: ${e?.message?.slice(0, 60) || '未知错误'}`, 'error');
+      return 0;
+    }
+  }, [apiConfig, hasApiConfig, fetchHotNewsItems, addToast]);
 
   const themeTokens = darkMode ? FORUM_THEME.dark : FORUM_THEME.light;
 
@@ -189,7 +241,13 @@ const ForumApp: React.FC = () => {
           />
         );
       case 'topic':
-        return <ForumTopicPage topicTag={section.topicTag} onOpenPost={postId => navigate({ kind: 'post', postId })} />;
+        return (
+          <ForumTopicPage
+            topicTag={section.topicTag}
+            onOpenPost={postId => navigate({ kind: 'post', postId })}
+            onRefresh={handleTopicRefresh}
+          />
+        );
       case 'post':
         return (
           <ForumPostDetail
@@ -225,7 +283,7 @@ const ForumApp: React.FC = () => {
         return null;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, activeAccount, section, feedRefreshKey, heatLevel, apiConfig, darkMode]);
+  }, [ready, activeAccount, section, feedRefreshKey, heatLevel, apiConfig, darkMode, handleTopicRefresh]);
 
   return (
     <div
@@ -258,10 +316,11 @@ const ForumApp: React.FC = () => {
           {section.kind === 'home' && (
             <button
               onClick={handleManualRefresh}
-              className="text-xs px-2.5 py-1.5 rounded-full active:scale-90 transition-transform"
+              disabled={refreshing}
+              className="text-xs px-2.5 py-1.5 rounded-full active:scale-90 transition-transform disabled:opacity-50"
               style={{ background: themeTokens.subtleBg }}
             >
-              刷新出新帖
+              {refreshing ? '生成中…' : '刷新出新帖'}
             </button>
           )}
           <button onClick={handleDarkModeToggle} className="p-2 rounded-full active:scale-90 transition-transform">
@@ -297,7 +356,11 @@ const ForumApp: React.FC = () => {
         </div>
 
         <div className={`flex-1 min-w-0 no-scrollbar ${section.kind === 'compose' ? 'overflow-hidden' : 'overflow-y-auto'}`}>
-          {!ready && <div className="text-center py-16 text-sm opacity-50">加载中…</div>}
+          {!ready && (
+            <div className="text-center py-16 text-sm opacity-50">
+              {generatingFirstBatch ? '正在生成这个时段的帖子，第一次会久一点…' : '加载中…'}
+            </div>
+          )}
           {ready && !activeAccount && <div className="text-center py-16 text-sm opacity-50">初始化失败，请退出重进或查看控制台报错</div>}
           {content}
         </div>
