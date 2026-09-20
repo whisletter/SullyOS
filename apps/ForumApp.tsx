@@ -8,7 +8,7 @@ import { RealtimeContextManager } from '../utils/realtimeContext';
 import * as db from '../utils/forumDb';
 import * as feed from '../utils/forumFeed';
 import * as scheduler from '../utils/forumScheduler';
-import { resolveActiveIdentityAccount, ensureCharMainAccount } from '../utils/forumBootstrap';
+import { resolveActiveIdentityAccount, ensureCharMainAccount, userMainAccountId } from '../utils/forumBootstrap';
 import { ensureNpcPool } from '../utils/forumNpcSeed';
 import { runQuotaBatch, runTopicRefresh } from '../utils/forumBatch';
 import { ensureRegulars } from '../utils/forumSocial';
@@ -16,6 +16,7 @@ import * as social from '../utils/forumSocial';
 import { ensureCharAltAccount } from '../utils/forumCharIdentity';
 import * as ai from '../utils/forumAi';
 import { runForumArchivePass } from '../utils/forumArchiveRunner';
+import * as suspicion from '../utils/forumSuspicion';
 import { FORUM_DEFAULTS, type ForumTopicTag } from '../utils/forumConstants';
 import { ForumLogo, FORUM_APP_NAME } from '../utils/forumLogo';
 import type { HotNewsItem } from '../types';
@@ -75,6 +76,10 @@ const ForumApp: React.FC = () => {
   const [heatLevel, setHeatLevel] = useState(FORUM_DEFAULTS.defaultHeatLevel);
   const [darkMode, setDarkMode] = useState(false);
   const [identitySheetOpen, setIdentitySheetOpen] = useState(false);
+  /** 你名下每个号（主号/小号/共管号，含已注销）各有几条没看的私信。只给你看，TA 不知道。 */
+  const [dmUnreadByAccount, setDmUnreadByAccount] = useState<Map<string, number>>(new Map());
+  /** 后台任务（比如 TA 挑明）发来新私信后 +1，触发红点重新统计。 */
+  const [unreadRefreshKey, setUnreadRefreshKey] = useState(0);
   const [feedRefreshKey, setFeedRefreshKey] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   /** 进 App 时正在跑首批生成——首次安装时这一步要等十几秒，不给提示会以为卡死。 */
@@ -96,52 +101,59 @@ const ForumApp: React.FC = () => {
   }, [closeApp]);
 
   const hasApiConfig = !!(apiConfig?.baseUrl && apiConfig?.apiKey && apiConfig?.model);
+  /** 当前身份是已注销的号：只能翻以前的记录，不能发帖、评论、私信、加好友。 */
+  const readOnly = activeAccount?.status === 'deactivated';
 
   const fetchHotNewsItems = useCallback(async (): Promise<HotNewsItem[]> => {
     const snap = await RealtimeContextManager.getSlottedHotNews(realtimeConfig).catch(() => null);
     return ((snap as any)?.items || []) as HotNewsItem[];
   }, [realtimeConfig]);
 
-  // ── 初始化：角色论坛主号 + 路人账号池 + 用户身份 + 水线清扫 + 自然批量生成 ──
+  // ── 初始化 ──
+  // 分两段：先做纯本地的必要准备（建号、身份、设置、清扫），做完立刻显示页面；
+  // 所有要调模型的事（生成帖子、建 TA 小号、共管动态、TA 挑明、好友申请）挪到页面显示之后
+  // 在后台跑。以前这些全排在"加载中"后面，每次进论坛都要干等好几次模型调用。
   useEffect(() => {
     let cancelled = false;
     (async () => {
-     try {
-      for (const char of characters || []) {
-        if (char.id) await ensureCharMainAccount(char.id, char.name, char.avatar);
-      }
+      let account: db.ForumAccount | null = null;
 
-      // 路人账号池：没有它，所有内容生成都会静默空转（生成层第一步就是
-      // "池子为空直接 return"）。放在最前面，且是幂等的，已有就跳过。
-      await ensureNpcPool().catch(e => console.warn('[Forum] 路人账号池引导失败:', e));
-
-      const account = await resolveActiveIdentityAccount(userProfile?.name || '我', userProfile?.avatar);
-      if (cancelled) return;
-      setActiveAccount(account);
-
-      // 常客名单：从路人池里固定挑 10 个，让他们在用户帖子下面反复出现。
-      // 必须在账号池建好之后调，否则抽不到人。
-      await ensureRegulars(account.id).catch(e => console.warn('[Forum] 常客名单初始化失败:', e));
-
-      // TA 的小号：只在第一次建，名字和风格由 TA 自己定（一次调用）。
-      // 失败就跳过，下次进 App 再试，不拿随机名字把这个号定死。
-      if (hasApiConfig) {
+      // ── 第一段：本地准备，完成后立刻显示页面 ──
+      try {
         for (const char of characters || []) {
-          if (!char.id) continue;
-          await ensureCharAltAccount(apiConfig, {
-            id: char.id, name: char.name,
-            systemPrompt: (char as any).systemPrompt, worldview: (char as any).worldview,
-          }).catch(e => console.warn('[Forum] 角色小号建号失败:', e));
+          if (char.id) await ensureCharMainAccount(char.id, char.name, char.avatar);
         }
+
+        // 路人账号池：没有它，所有内容生成都会静默空转（生成层第一步就是
+        // "池子为空直接 return"）。放在最前面，且是幂等的，已有就跳过。
+        await ensureNpcPool().catch(e => console.warn('[Forum] 路人账号池引导失败:', e));
+
+        account = await resolveActiveIdentityAccount(userProfile?.name || '我', userProfile?.avatar);
+        if (cancelled) return;
+        setActiveAccount(account);
+
+        // 常客名单：从路人池里固定挑 10 个，让他们在用户帖子下面反复出现。
+        // 必须在账号池建好之后调，否则抽不到人。
+        await ensureRegulars(account.id).catch(e => console.warn('[Forum] 常客名单初始化失败:', e));
+
+        const settings = await db.getForumSettings(account.id);
+        if (cancelled) return;
+        setHeatLevel(settings.heatLevel || FORUM_DEFAULTS.defaultHeatLevel);
+        setDarkMode(!!settings.darkMode);
+
+        // 打开App顺手做的免费维护：物理清扫过期内容（失败不影响进入）
+        await feed.sweepExpiredContent().catch(e => console.warn('[Forum] 清扫失败:', e));
+      } catch (e: any) {
+        console.error('[Forum] 初始化失败:', e);
+        addToast(`${FORUM_APP_NAME}初始化失败: ${e?.message?.slice(0, 60) || '未知错误'}`, 'error');
+      } finally {
+        if (!cancelled) setReady(true);
       }
 
-      const settings = await db.getForumSettings(account.id);
-      if (cancelled) return;
-      setHeatLevel(settings.heatLevel || FORUM_DEFAULTS.defaultHeatLevel);
-      setDarkMode(!!settings.darkMode);
+      if (!account || cancelled) return;
+      const me = account;
 
-      // 打开App顺手做的免费维护：物理清扫过期内容（失败不影响进入）
-      await feed.sweepExpiredContent().catch(e => console.warn('[Forum] 清扫失败:', e));
+      // ── 第二段：后台任务，不挡页面 ──
 
       // 长期归档（轨道A）：扫沉寂帖子入队，顺带处理最多两条。扫描本身零 API 成本，
       // 只有真扫出东西才会调轻量模型。角色没开记忆宫殿/自动归档就整趟跳过。
@@ -151,81 +163,137 @@ const ForumApp: React.FC = () => {
         userName: userProfile?.name || '用户',
       }).catch(e => console.warn('[Forum] 归档失败:', e));
 
-      // 自然触发批量生成：当前 slot 缺批次就生成一批（17 个分区各 1 条，一次调用）
+      if (!hasApiConfig) return;
+
+      // 当前 4 小时时段。挑明、好友申请都按时段限次：同一时段只问 TA 一次。
+      let slotId = '';
       try {
         await RealtimeContextManager.getSlottedHotNews(realtimeConfig);
-        const { id: slotId } = RealtimeContextManager.getHotNewsSlot();
-        const needsBatch = await scheduler.needsNaturalBatch(slotId, account.id);
-        if (needsBatch && hasApiConfig) {
-          if (!cancelled) setGeneratingFirstBatch(true);
-          const hotNewsItems = await fetchHotNewsItems();
-          const posts = await runQuotaBatch({ apiConfig, hotNewsItems });
-          // 只有真的生成出内容才推进水位。生成失败还把这个 slot 标记成"已生成"，
-          // 等于白白浪费掉这 4 小时的机会。
-          if (posts.length > 0) {
-            await scheduler.markNaturalBatchDone(slotId, account.id);
-            if (!cancelled) setFeedRefreshKey(k => k + 1);
-          }
-        }
+        slotId = RealtimeContextManager.getHotNewsSlot().id;
       } catch (e: any) {
-        console.warn('[Forum] 自然触发批量生成失败:', e?.message || String(e));
-      } finally {
-        if (!cancelled) setGeneratingFirstBatch(false);
+        console.warn('[Forum] 取当前时段失败:', e?.message || String(e));
+      }
+
+      /** 这个时段还没做过就标记并返回 true；做过了返回 false。先标记再做——失败也不在同一时段反复重试。 */
+      const claimSlot = async (field: 'lastConfrontationSlotId' | 'lastFriendDecisionSlotId'): Promise<boolean> => {
+        if (!slotId) return false;
+        const fresh = await db.getForumSettings(me.id);
+        if (fresh[field] === slotId) return false;
+        await db.saveForumSettings({ ...fresh, [field]: slotId });
+        return true;
+      };
+
+      // 自然触发批量生成：当前 slot 缺批次就生成一批（17 个分区各 1 条，一次调用）
+      if (slotId) {
+        try {
+          const needsBatch = await scheduler.needsNaturalBatch(slotId, me.id);
+          if (needsBatch) {
+            if (!cancelled) setGeneratingFirstBatch(true);
+            const hotNewsItems = await fetchHotNewsItems();
+            const posts = await runQuotaBatch({ apiConfig, hotNewsItems });
+            // 只有真的生成出内容才推进水位。生成失败还把这个 slot 标记成"已生成"，
+            // 等于白白浪费掉这 4 小时的机会。
+            if (posts.length > 0) {
+              await scheduler.markNaturalBatchDone(slotId, me.id);
+              if (!cancelled) setFeedRefreshKey(k => k + 1);
+            }
+          }
+        } catch (e: any) {
+          console.warn('[Forum] 自然触发批量生成失败:', e?.message || String(e));
+        } finally {
+          if (!cancelled) setGeneratingFirstBatch(false);
+        }
+      }
+
+      // TA 的小号：只在第一次建（或冷却结束后重开），名字和风格由 TA 自己定（一次调用）。
+      // 失败就跳过，下次进 App 再试，不拿随机名字把这个号定死。
+      for (const char of characters || []) {
+        if (!char.id || cancelled) continue;
+        await ensureCharAltAccount(apiConfig, {
+          id: char.id, name: char.name,
+          systemPrompt: (char as any).systemPrompt, worldview: (char as any).worldview,
+        }).catch(e => console.warn('[Forum] 角色小号建号失败:', e));
       }
 
       // 共管账号：一天 6 档，每档在窗口内用哈希算出一个当天固定的触发分钟。
       // 一次最多补发一档——长时间没打开也不会一口气刷出好几条。
-      if (hasApiConfig) {
-        try {
-          const now = new Date();
-          const dateKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-          const minutesOfDay = now.getHours() * 60 + now.getMinutes();
-          const sharedAccounts = (await db.getAllForumAccounts())
-            .filter(a => a.ownerType === 'shared' && a.status === 'active');
-          for (const acc of sharedAccounts) {
-            const due = scheduler.findDueSharedAccountBand(acc.id, dateKey, minutesOfDay);
-            if (!due) continue;
-            const post = await ai.runSharedAccountExclusivePost({
-              apiConfig, sharedAccountId: acc.id, bandLabel: due.band.label,
-            });
-            scheduler.markSharedAccountBandFired(acc.id, dateKey, due.bandIndex);
-            if (post && !cancelled) setFeedRefreshKey(k => k + 1);
-            break; // 一次进 App 只处理一个共管账号的一档，别连着烧调用
-          }
-        } catch (e: any) {
-          console.warn('[Forum] 共管账号定时动态失败:', e?.message || String(e));
+      try {
+        const now = new Date();
+        const dateKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+        const minutesOfDay = now.getHours() * 60 + now.getMinutes();
+        const sharedAccounts = (await db.getAllForumAccounts())
+          .filter(a => a.ownerType === 'shared' && a.status === 'active');
+        for (const acc of sharedAccounts) {
+          const due = scheduler.findDueSharedAccountBand(acc.id, dateKey, minutesOfDay);
+          if (!due) continue;
+          const post = await ai.runSharedAccountExclusivePost({
+            apiConfig, sharedAccountId: acc.id, bandLabel: due.band.label,
+          });
+          scheduler.markSharedAccountBandFired(acc.id, dateKey, due.bandIndex);
+          if (post && !cancelled) setFeedRefreshKey(k => k + 1);
+          break; // 一次进 App 只处理一个共管账号的一档，别连着烧调用
         }
+      } catch (e: any) {
+        console.warn('[Forum] 共管账号定时动态失败:', e?.message || String(e));
       }
 
-      // 好友申请：让 TA 自己决定通不通过。一次进 App 只处理一条，控制调用次数。
-      if (hasApiConfig) {
-        try {
-          const charSideAccounts = (await db.getAllForumAccounts())
-            .filter(a => (a.ownerType === 'char' || a.ownerType === 'shared') && a.status === 'active');
-          for (const target of charSideAccounts) {
-            const pending = await db.getForumRelationsTo(target.id, 'pending');
-            if (pending.length === 0) continue;
-            const req = pending[0];
-            const accepted = await ai.runFriendRequestDecision({
-              apiConfig,
-              requesterAccountId: req.fromAccountId,
-              targetAccountId: target.id,
-              userDisplayName: userProfile?.name,
-            });
-            if (accepted) await social.acceptFriendRequest(req.fromAccountId, target.id);
-            break;
+      // 掉马：TA 如果对某个号起了疑还没挑明，给它一次开口的机会。挑不挑明由它自己判断。
+      // 它说"先不说"时，同一个 4 小时时段内不再问——以前是每次进 App 都重问一遍、每次都花一次调用。
+      try {
+        const allAccounts = await db.getAllForumAccounts();
+        const userSideIds = new Set(
+          allAccounts.filter(a => a.ownerType === 'user' && a.status === 'active').map(a => a.id)
+        );
+        let candidate: { charId: string; targetAccountId: string } | null = null;
+        outer: for (const char of characters || []) {
+          if (!char.id) continue;
+          const rows = await suspicion.listUnconfronted(char.id);
+          for (const row of rows) {
+            // 只对用户的号挑明——对着一个路人号质问是死路，没人能回应
+            if (!userSideIds.has(row.targetAccountId)) continue;
+            candidate = { charId: char.id, targetAccountId: row.targetAccountId };
+            break outer;
           }
-        } catch (e: any) {
-          console.warn('[Forum] 好友申请判断失败:', e?.message || String(e));
         }
+        // 用主号还是小号去问，由 TA 在这次调用里自己选
+        if (candidate && !cancelled && await claimSlot('lastConfrontationSlotId')) {
+          const result = await ai.runCharConfrontation({
+            apiConfig,
+            charId: candidate.charId,
+            targetAccountId: candidate.targetAccountId,
+            userDisplayName: userProfile?.name,
+          });
+          // 质问是悄悄发进私信的，不亮红点你根本不知道有人来问你了
+          if (result.confronted && !cancelled) setUnreadRefreshKey(k => k + 1);
+        }
+      } catch (e: any) {
+        console.warn('[Forum] 挑明流程失败:', e?.message || String(e));
       }
 
-     } catch (e: any) {
-      console.error('[Forum] 初始化失败:', e);
-      addToast(`${FORUM_APP_NAME}初始化失败: ${e?.message?.slice(0, 60) || '未知错误'}`, 'error');
-     } finally {
-      if (!cancelled) setReady(true);
-     }
+      // 好友申请：让 TA 自己决定通不通过。一个时段只问一次、只处理一条——
+      // 它不通过的话申请继续挂着，下个时段再问，不会每次进 App 都花一次调用。
+      try {
+        const charSideAccounts = (await db.getAllForumAccounts())
+          .filter(a => (a.ownerType === 'char' || a.ownerType === 'shared') && a.status === 'active');
+        let request: { from: string; to: string } | null = null;
+        for (const target of charSideAccounts) {
+          const pending = await db.getForumRelationsTo(target.id, 'pending');
+          if (pending.length === 0) continue;
+          request = { from: pending[0].fromAccountId, to: target.id };
+          break;
+        }
+        if (request && !cancelled && await claimSlot('lastFriendDecisionSlotId')) {
+          const accepted = await ai.runFriendRequestDecision({
+            apiConfig,
+            requesterAccountId: request.from,
+            targetAccountId: request.to,
+            userDisplayName: userProfile?.name,
+          });
+          if (accepted) await social.acceptFriendRequest(request.from, request.to);
+        }
+      } catch (e: any) {
+        console.warn('[Forum] 好友申请判断失败:', e?.message || String(e));
+      }
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -297,6 +365,25 @@ const ForumApp: React.FC = () => {
     }
   }, [activeAccount]);
 
+  // 未读统计：你名下所有号都算，切换面板和 ⋮ 上的红点要用
+  const refreshUnread = useCallback(async () => {
+    try {
+      const mine = (await db.getAllForumAccounts())
+        .filter(a => a.ownerType === 'user' || a.ownerType === 'shared');
+      setDmUnreadByAccount(await db.getDmUnreadTotals(mine.map(a => a.id)));
+    } catch (e: any) {
+      console.warn('[Forum] 未读统计失败:', e?.message || String(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (ready) refreshUnread();
+  }, [ready, activeAccount?.id, section.kind, unreadRefreshKey, refreshUnread]);
+
+  const activeDmUnread = activeAccount ? (dmUnreadByAccount.get(activeAccount.id) || 0) : 0;
+  let otherAccountsDmUnread = 0;
+  dmUnreadByAccount.forEach((n, id) => { if (id !== activeAccount?.id) otherAccountsDmUnread += n; });
+
   const handleSwitchIdentity = useCallback(async (accountId: string) => {
     if (!activeAccount) return;
     const { setActiveIdentityAccount } = await import('../utils/forumBootstrap');
@@ -334,6 +421,7 @@ const ForumApp: React.FC = () => {
             activeAccount={activeAccount}
             heatLevel={heatLevel}
             apiConfig={apiConfig}
+            readOnly={readOnly}
             onDeleted={() => { setSection({ kind: 'home' }); setHistory([]); setFeedRefreshKey(k => k + 1); }}
           />
         );
@@ -355,7 +443,15 @@ const ForumApp: React.FC = () => {
       case 'notifications':
         return <ForumNotifications activeAccount={activeAccount} onOpenPost={postId => navigate({ kind: 'post', postId })} />;
       case 'dm':
-        return <ForumDm activeAccount={activeAccount} apiConfig={apiConfig} />;
+        return (
+          <ForumDm
+            activeAccount={activeAccount}
+            apiConfig={apiConfig}
+            readOnly={readOnly}
+            onActiveAccountDeactivated={() => { handleSwitchIdentity(userMainAccountId()); }}
+            onUnreadChanged={refreshUnread}
+          />
+        );
       case 'collected':
         return <ForumCollected onOpenPost={postId => navigate({ kind: 'post', postId })} />;
       case 'profile':
@@ -364,6 +460,7 @@ const ForumApp: React.FC = () => {
             accountId={section.accountId || activeAccount.id}
             myAccountId={activeAccount.id}
             onOpenPost={postId => navigate({ kind: 'post', postId })}
+            readOnly={readOnly}
           />
         );
       case 'settings':
@@ -381,7 +478,7 @@ const ForumApp: React.FC = () => {
         return null;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, activeAccount, section, feedRefreshKey, heatLevel, apiConfig, darkMode, handleTopicRefresh]);
+  }, [ready, activeAccount, section, feedRefreshKey, heatLevel, apiConfig, darkMode, handleTopicRefresh, readOnly, handleSwitchIdentity, refreshUnread]);
 
   return (
     <div
@@ -412,7 +509,7 @@ const ForumApp: React.FC = () => {
           {section.kind === 'compose' && '发布'}
         </div>
         <div className="ml-auto flex items-center gap-1">
-          {section.kind === 'home' && (
+          {section.kind === 'home' && !readOnly && (
             <button
               onClick={handleManualRefresh}
               disabled={refreshing}
@@ -425,8 +522,12 @@ const ForumApp: React.FC = () => {
           <button onClick={handleDarkModeToggle} className="p-2 rounded-full active:scale-90 transition-transform">
             {darkMode ? <Sun size={18} /> : <Moon size={18} />}
           </button>
-          <button onClick={() => setIdentitySheetOpen(true)} className="p-2 rounded-full active:scale-90 transition-transform">
+          <button onClick={() => setIdentitySheetOpen(true)} className="relative p-2 rounded-full active:scale-90 transition-transform">
             <DotsThreeVertical size={20} weight="bold" />
+            {/* 你别的号收到了新私信（比如 TA 跑去质问你的小号）：在这里提醒你切过去看 */}
+            {otherAccountsDmUnread > 0 && (
+              <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full" style={{ background: '#ef4444' }} />
+            )}
           </button>
         </div>
       </div>
@@ -448,16 +549,30 @@ const ForumApp: React.FC = () => {
                 style={{ background: isActive ? themeTokens.subtleBg : 'transparent' }}
                 title={item.label}
               >
-                <Icon size={20} weight={isActive ? 'fill' : 'regular'} />
+                <span className="relative block">
+                  <Icon size={20} weight={isActive ? 'fill' : 'regular'} />
+                  {item.id === 'dm' && activeDmUnread > 0 && (
+                    <span className="absolute -top-1.5 -right-2 min-w-[16px] h-[16px] px-1 rounded-full text-[9px] font-bold flex items-center justify-center"
+                          style={{ background: '#ef4444', color: '#fff' }}>
+                      {activeDmUnread > 99 ? '99+' : activeDmUnread}
+                    </span>
+                  )}
+                </span>
               </button>
             );
           })}
         </div>
 
         <div className={`flex-1 min-w-0 no-scrollbar ${section.kind === 'compose' ? 'overflow-hidden' : 'overflow-y-auto'}`}>
-          {!ready && (
-            <div className="text-center py-16 text-sm opacity-50">
-              {generatingFirstBatch ? '正在生成这个时段的帖子，第一次会久一点…' : '加载中…'}
+          {!ready && <div className="text-center py-16 text-sm opacity-50">加载中…</div>}
+          {ready && readOnly && (
+            <div className="px-3 py-2 text-[12px] text-center" style={{ background: themeTokens.subtleBg }}>
+              「{activeAccount?.displayName}」已注销，现在只能看以前的记录。点右上角 ⋮ 切回别的号
+            </div>
+          )}
+          {ready && generatingFirstBatch && section.kind === 'home' && (
+            <div className="px-3 py-2 text-[12px] text-center opacity-70" style={{ background: themeTokens.subtleBg }}>
+              正在生成这个时段的帖子，生成完会自动刷新…
             </div>
           )}
           {ready && !activeAccount && <div className="text-center py-16 text-sm opacity-50">初始化失败，请退出重进或查看控制台报错</div>}
@@ -466,7 +581,7 @@ const ForumApp: React.FC = () => {
       </div>
 
       {/* 右下角悬浮「发帖」：底下垫一层同色光晕做悬浮感，正在发布页时隐藏，免得挡住工具条 */}
-      {ready && activeAccount && section.kind !== 'compose' && (
+      {ready && activeAccount && !readOnly && section.kind !== 'compose' && (
         <div className="absolute right-5 z-30 pointer-events-none" style={{ bottom: 'calc(var(--safe-bottom, 0px) + 22px)' }}>
           <div
             className="absolute -inset-3 rounded-full"
@@ -495,6 +610,7 @@ const ForumApp: React.FC = () => {
           characters={characters}
           onSwitch={handleSwitchIdentity}
           onClose={() => setIdentitySheetOpen(false)}
+          dmUnreadByAccount={dmUnreadByAccount}
         />
       )}
     </div>
