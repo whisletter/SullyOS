@@ -3,7 +3,7 @@ import { X } from '@phosphor-icons/react';
 import * as db from '../../utils/forumDb';
 import { FORUM_DEFAULTS } from '../../utils/forumConstants';
 import { ensureSharedAccount } from '../../utils/forumBootstrap';
-import { canOpenAlt, type AltOpenability } from '../../utils/forumSuspicion';
+import { canOpenAlt, ALT_REOPEN_COOLDOWN_MS, type AltOpenability } from '../../utils/forumSuspicion';
 import type { CharacterProfile } from '../../types';
 
 interface Props {
@@ -11,15 +11,20 @@ interface Props {
   characters: CharacterProfile[];
   onSwitch: (accountId: string) => void;
   onClose: () => void;
+  /** 每个号没看的私信条数，有的话在那一行标出来，提醒你切过去看。 */
+  dmUnreadByAccount?: Map<string, number>;
 }
 
 /**
  * [交接5 4.8] "..." 账号切换弹层：主号常驻 + 小号(三态) + 共管账号(存在才显示，
  * 是跳转不是切换) + 注销小号按钮（常驻显示，二次确认，不需要"已被发现"前置条件）。
  */
-const ForumIdentitySheet: React.FC<Props> = ({ activeAccount, characters, onSwitch, onClose }) => {
+const ForumIdentitySheet: React.FC<Props> = ({ activeAccount, characters, onSwitch, onClose, dmUnreadByAccount }) => {
+  const unreadOf = (id: string) => dmUnreadByAccount?.get(id) || 0;
   const [mainAccount, setMainAccount] = useState<db.ForumAccount | null>(null);
   const [altAccount, setAltAccount] = useState<db.ForumAccount | null>(null);
+  /** 注销掉的小号：还能进去看以前的私信/主页/好友，但只能看不能发。 */
+  const [burnedAlts, setBurnedAlts] = useState<db.ForumAccount[]>([]);
   const [altBudget, setAltBudget] = useState<db.ForumAltBudget | null>(null);
   const [sharedAccounts, setSharedAccounts] = useState<db.ForumAccount[]>([]);
   const [creatingAlt, setCreatingAlt] = useState(false);
@@ -34,6 +39,9 @@ const ForumIdentitySheet: React.FC<Props> = ({ activeAccount, characters, onSwit
     const userAccounts = await db.getForumAccountsByOwnerType('user');
     setMainAccount(userAccounts.find(a => !a.isAlt) || null);
     setAltAccount(userAccounts.find(a => a.isAlt && a.status === 'active') || null);
+    setBurnedAlts(
+      userAccounts.filter(a => a.isAlt && a.status === 'deactivated').sort((a, b) => b.updatedAt - a.updatedAt)
+    );
     setAltBudget(await db.getAltBudget('user'));
     // 掉马注销之后有冷却期，跟角色那边同一套规则
     setAltOpenable(await canOpenAlt({ type: 'user' }, userAccounts));
@@ -82,13 +90,19 @@ const ForumIdentitySheet: React.FC<Props> = ({ activeAccount, characters, onSwit
     const nextCount = altBudget.burnCount + 1;
     await db.saveAltBudget({ ...altBudget, burnCount: nextCount, locked: nextCount >= FORUM_DEFAULTS.altBurnCap });
     setConfirmingBurn(false);
+    // 注销的正是当前在用的号：自动切回主号，不然你还"登录"在一个已注销的号上。
+    // （想回看它以前的记录，从下面"已注销的号"里点进去，只读。）
+    if (activeAccount.id === altAccount.id && mainAccount) {
+      onSwitch(mainAccount.id);
+      return;
+    }
     await load();
   };
 
   const sharedCharIds = new Set(sharedAccounts.map(a => a.charId).filter(Boolean));
   const charactersWithoutShared = (characters || []).filter(c => c.id && !sharedCharIds.has(c.id));
 
-  const Row: React.FC<{ label: string; sub?: string; active?: boolean; onClick?: () => void; disabled?: boolean }> = ({ label, sub, active, onClick, disabled }) => (
+  const Row: React.FC<{ label: string; sub?: string; active?: boolean; onClick?: () => void; disabled?: boolean; unread?: number }> = ({ label, sub, active, onClick, disabled, unread }) => (
     <button
       onClick={onClick}
       disabled={disabled}
@@ -99,7 +113,14 @@ const ForumIdentitySheet: React.FC<Props> = ({ activeAccount, characters, onSwit
         <div className="font-semibold text-sm">{label}</div>
         {sub && <div className="text-[11px] opacity-50 mt-0.5">{sub}</div>}
       </div>
-      {active && <span className="text-[11px] opacity-60">当前使用中</span>}
+      <div className="flex items-center gap-2 shrink-0">
+        {!!unread && unread > 0 && (
+          <span className="text-[11px] px-2 py-0.5 rounded-full" style={{ background: '#ef4444', color: '#fff' }}>
+            {unread > 99 ? '99+' : unread} 条新私信
+          </span>
+        )}
+        {active && <span className="text-[11px] opacity-60">当前使用中</span>}
+      </div>
     </button>
   );
 
@@ -117,11 +138,11 @@ const ForumIdentitySheet: React.FC<Props> = ({ activeAccount, characters, onSwit
         </div>
 
         {mainAccount && (
-          <Row label={`${mainAccount.displayName}（主号）`} active={activeAccount.id === mainAccount.id} onClick={() => onSwitch(mainAccount.id)} />
+          <Row label={`${mainAccount.displayName}（主号）`} active={activeAccount.id === mainAccount.id} onClick={() => onSwitch(mainAccount.id)} unread={unreadOf(mainAccount.id)} />
         )}
 
         {altAccount ? (
-          <Row label={`${altAccount.displayName}（小号）`} active={activeAccount.id === altAccount.id} onClick={() => onSwitch(altAccount.id)} />
+          <Row label={`${altAccount.displayName}（小号）`} active={activeAccount.id === altAccount.id} onClick={() => onSwitch(altAccount.id)} unread={unreadOf(altAccount.id)} />
         ) : !altOpenable.allowed ? (
           <Row label={altOpenable.reason || '现在不能开新小号'} disabled />
         ) : creatingAlt ? (
@@ -142,6 +163,22 @@ const ForumIdentitySheet: React.FC<Props> = ({ activeAccount, characters, onSwit
           <Row label="+ 创建新小号" onClick={() => setCreatingAlt(true)} />
         )}
 
+        {burnedAlts.length > 0 && (
+          <div className="space-y-2">
+            <div className="text-[12px] opacity-50 px-1 pt-1">已注销的号（进去只能看以前的记录，不能发东西）</div>
+            {burnedAlts.map(acc => (
+              <Row
+                key={acc.id}
+                label={`${acc.displayName}（已注销）`}
+                sub="只读"
+                active={activeAccount.id === acc.id}
+                onClick={() => onSwitch(acc.id)}
+                unread={unreadOf(acc.id)}
+              />
+            ))}
+          </div>
+        )}
+
         {/* 共管账号现在是可以"登录"的身份，不再只是跳转看主页——切过去之后发的帖
             就以这个号的名义出现在论坛上。底层身份解析本来就允许共管号，这里补上入口。 */}
         {sharedAccounts.map(acc => (
@@ -151,6 +188,7 @@ const ForumIdentitySheet: React.FC<Props> = ({ activeAccount, characters, onSwit
             sub="切换后以这个号发帖"
             active={activeAccount.id === acc.id}
             onClick={() => onSwitch(acc.id)}
+            unread={unreadOf(acc.id)}
           />
         ))}
 
@@ -193,7 +231,9 @@ const ForumIdentitySheet: React.FC<Props> = ({ activeAccount, characters, onSwit
             ) : (
               <div className="text-sm space-y-2">
                 <div className="opacity-70">
-                  注销后旧帖保留、显示"已注销用户"，销号次数将变成 {(altBudget?.burnCount || 0) + 1}/{FORUM_DEFAULTS.altBurnCap}。
+                  注销后旧帖保留、显示"已注销用户"，以后还能进去看以前的记录（只读）。
+                  销号次数将变成 {(altBudget?.burnCount || 0) + 1}/{FORUM_DEFAULTS.altBurnCap}，
+                  而且注销后 {Math.round(ALT_REOPEN_COOLDOWN_MS / 86_400_000)} 天内不能开新小号。
                 </div>
                 <div className="flex gap-2">
                   <button onClick={handleBurnAlt} className="px-4 py-2 rounded-full" style={{ background: '#ef4444', color: '#fff' }}>确定注销</button>

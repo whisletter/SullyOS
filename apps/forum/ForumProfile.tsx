@@ -12,6 +12,8 @@ interface Props {
   /** 当前使用中的身份账号 id —— 关系（好友/拉黑）是挂在身份上的，不是挂在"人"上。 */
   myAccountId: string;
   onOpenPost: (postId: string) => void;
+  /** 当前身份是已注销的号：只能看，不能改资料、不能加好友/拉黑。 */
+  readOnly?: boolean;
 }
 
 // 跟朋友圈封面区（apps/MomentsApp.tsx renderCover）同一套尺寸口径，观感对齐：
@@ -24,29 +26,55 @@ const AVATAR_BOTTOM = -22;
  *  [用户确认：改版排版] 头图区照搬朋友圈的封面样式——背景图铺满、头像+昵称压右下角
  *  探出一截，签名/簡介跟在探出区域下面；没有背景图时用深色渐变兜底，白字在哪种情况
  *  下都不会花。 */
-const ForumProfile: React.FC<Props> = ({ accountId, myAccountId, onOpenPost }) => {
+const ForumProfile: React.FC<Props> = ({ accountId, myAccountId, onOpenPost, readOnly }) => {
   const [account, setAccount] = useState<db.ForumAccount | null>(null);
   const [posts, setPosts] = useState<db.ForumPost[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
+  const [commentCounts, setCommentCounts] = useState<Map<string, number>>(new Map());
+  /** 你自己的号才有"评论"这一栏：你用这个号在各处留过的评论。 */
+  const [tab, setTab] = useState<'posts' | 'comments'>('posts');
+  const [myComments, setMyComments] = useState<db.ForumComment[]>([]);
+  const [commentPosts, setCommentPosts] = useState<Map<string, db.ForumPost>>(new Map());
+  const [commentsLoaded, setCommentsLoaded] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       setLoading(true);
+      setTab('posts');
+      setCommentsLoaded(false);
       const [acc, myPosts] = await Promise.all([db.getForumAccount(accountId), db.getForumPostsByAuthor(accountId)]);
       if (cancelled) return;
       setAccount(acc);
       setPosts(myPosts);
       setLoading(false);
+      // 评论数：一次事务批量数，不再写死 0
+      const counts = await db.getCommentCountsByPosts(myPosts.map(p => p.id));
+      if (!cancelled) setCommentCounts(counts);
     })();
     return () => { cancelled = true; };
   }, [accountId]);
 
+  // 切到"评论"栏才去读，不看就不查
+  useEffect(() => {
+    if (tab !== 'comments' || commentsLoaded) return;
+    let cancelled = false;
+    (async () => {
+      const comments = await db.getCommentsByAuthor(accountId);
+      const postMap = await db.getForumPostsByIds(comments.map(c => c.postId));
+      if (cancelled) return;
+      setMyComments(comments);
+      setCommentPosts(postMap);
+      setCommentsLoaded(true);
+    })();
+    return () => { cancelled = true; };
+  }, [tab, commentsLoaded, accountId]);
+
   if (loading) return <div className="text-center py-16 text-sm opacity-50">加载中…</div>;
   if (!account) return <div className="text-center py-16 text-sm opacity-50">账号不存在</div>;
 
-  const canEdit = isUserSideAccount(account);
+  const canEdit = isUserSideAccount(account) && !readOnly && account.status === 'active';
   // 有签名/简介时给探出区多留一点底部空隙，没有就少留——跟朋友圈 renderCover 的
   // marginBottom 逻辑一致，避免博客区顶太紧或空太多。
   const bio = account.bio?.trim();
@@ -101,16 +129,68 @@ const ForumProfile: React.FC<Props> = ({ accountId, myAccountId, onOpenPost }) =
         )}
       </div>
 
-      {account.id !== myAccountId && (
+      {account.id !== myAccountId && !readOnly && (
         <div className="flex justify-end px-4 pb-3">
           <ForumRelationButton myAccountId={myAccountId} targetAccountId={account.id} />
         </div>
       )}
 
-      {posts.length === 0 && <div className="text-center py-16 text-sm opacity-50">还没有发过帖子</div>}
-      {posts.map(p => (
-        <ForumPostCard key={p.id} post={p} author={account} commentCount={0} onClick={() => onOpenPost(p.id)} />
-      ))}
+      {isUserSideAccount(account) && (
+        <div className="flex gap-1 px-4 pb-2">
+          {([['posts', '帖子'], ['comments', '评论']] as const).map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => setTab(key)}
+              className="text-[13px] px-3 py-1 rounded-full"
+              style={{
+                background: tab === key ? 'rgba(59,130,246,0.15)' : 'transparent',
+                color: tab === key ? '#3b82f6' : undefined,
+                fontWeight: tab === key ? 700 : 400,
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {tab === 'posts' && (
+        <>
+          {posts.length === 0 && <div className="text-center py-16 text-sm opacity-50">还没有发过帖子</div>}
+          {posts.map(p => (
+            <ForumPostCard key={p.id} post={p} author={account} commentCount={commentCounts.get(p.id) || 0} onClick={() => onOpenPost(p.id)} />
+          ))}
+        </>
+      )}
+
+      {tab === 'comments' && (
+        <>
+          {!commentsLoaded && <div className="text-center py-16 text-sm opacity-50">加载中…</div>}
+          {commentsLoaded && myComments.length === 0 && (
+            <div className="text-center py-16 text-sm opacity-50">这个号还没评论过</div>
+          )}
+          {commentsLoaded && myComments.map(c => {
+            const parent = commentPosts.get(c.postId);
+            return (
+              <button
+                key={c.id}
+                onClick={() => { if (parent) onOpenPost(parent.id); }}
+                disabled={!parent}
+                className="w-full text-left px-4 py-3 border-b"
+                style={{ borderColor: 'rgba(127,127,127,0.1)' }}
+              >
+                <div className="text-[14px] whitespace-pre-wrap leading-relaxed">{c.content}</div>
+                <div className="text-[12px] opacity-50 mt-1 truncate">
+                  {parent
+                    ? <>评论于《{parent.title || parent.content.slice(0, 20)}》</>
+                    : '原帖已经被清理了'}
+                  <span className="ml-2">{new Date(c.createdAt).toLocaleDateString()}</span>
+                </div>
+              </button>
+            );
+          })}
+        </>
+      )}
 
       {editing && (
         <ForumEditProfile

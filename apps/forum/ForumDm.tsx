@@ -10,6 +10,12 @@ import { useOS } from '../../context/OSContext';
 interface Props {
   activeAccount: db.ForumAccount;
   apiConfig: { baseUrl: string; apiKey: string; model: string };
+  /** 当前身份是已注销的号：能翻以前的私信，但不能发、不能触发回复、不能对质。 */
+  readOnly?: boolean;
+  /** 当前身份被注销了（比如被 TA 质问后选了"承认 + 注销"），让外层切回主号。 */
+  onActiveAccountDeactivated?: () => void;
+  /** 已读状态变了（点开了某个会话），让外层刷新左侧私信图标和切换面板上的红点。 */
+  onUnreadChanged?: () => void;
 }
 
 /**
@@ -17,7 +23,7 @@ interface Props {
  * 触发方式跟主聊天窗口一样：手动点⚡才会真的调一次模型生成回复，发送消息本身
  * 不自动触发（对应 InstantPushConfig.autoTriggerOnSend 关闭时的手动⚡体验）。
  */
-const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig }) => {
+const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig, readOnly, onActiveAccountDeactivated, onUnreadChanged }) => {
   const { addToast, userProfile } = useOS();
   const [threads, setThreads] = useState<{ counterpartAccountId: string; lastMessage: db.ForumDmMessage }[]>([]);
   const [accountsById, setAccountsById] = useState<Map<string, db.ForumAccount>>(new Map());
@@ -35,14 +41,18 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig }) => {
   const [pickKeyword, setPickKeyword] = useState('');
   /** 跟我有拉黑关系的账号（任一方向）。拉黑双向断，被拉黑的人也发不过来。 */
   const [blockedIds, setBlockedIds] = useState<Set<string>>(new Set());
+  /** 每个会话里对方发来、你还没看的条数。只给你自己看，TA 不知道你读没读。 */
+  const [unreadByCounterpart, setUnreadByCounterpart] = useState<Map<string, number>>(new Map());
 
   const loadThreads = useCallback(async () => {
-    const [list, accounts, blocked] = await Promise.all([
+    const [list, accounts, blocked, unread] = await Promise.all([
       db.getDmThreadsForIdentity(activeAccount.id),
       db.getAllForumAccounts(),
       social.getBlockedCounterparts(activeAccount.id),
+      db.getDmUnreadByCounterpart(activeAccount.id),
     ]);
     setThreads(list);
+    setUnreadByCounterpart(unread);
     setAccountsById(new Map(accounts.map(a => [a.id, a])));
     setBlockedIds(blocked);
 
@@ -53,11 +63,24 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig }) => {
 
   useEffect(() => { loadThreads(); }, [loadThreads]);
 
+  /** 把一个会话标成已读：读到"现在"为止。 */
+  const markThreadRead = useCallback(async (counterpartId: string) => {
+    await db.setReadMark(db.dmReadKey(activeAccount.id, counterpartId));
+    setUnreadByCounterpart(prev => {
+      if (!prev.has(counterpartId)) return prev;
+      const next = new Map(prev);
+      next.delete(counterpartId);
+      return next;
+    });
+    onUnreadChanged?.();
+  }, [activeAccount.id, onUnreadChanged]);
+
   const openThread = useCallback(async (counterpartId: string) => {
     setOpenCounterpartId(counterpartId);
     const msgs = await db.getDmThreadMessages(activeAccount.id, counterpartId);
     setMessages(msgs);
-  }, [activeAccount.id]);
+    await markThreadRead(counterpartId);
+  }, [activeAccount.id, markThreadRead]);
 
   const handleSend = useCallback(async () => {
     const text = inputText.trim();
@@ -99,13 +122,15 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig }) => {
       });
       const msgs = await db.getDmThreadMessages(activeAccount.id, openCounterpartId);
       setMessages(msgs);
+      // 回复是在你开着这个会话的时候到的，当场就算看过了
+      await markThreadRead(openCounterpartId);
       await loadThreads();
     } catch (e: any) {
       addToast(`触发失败: ${e?.message?.slice(0, 60) || '未知错误'}`, 'error');
     } finally {
       setTriggering(false);
     }
-  }, [openCounterpartId, apiConfig, activeAccount.id, addToast, loadThreads, userProfile]);
+  }, [openCounterpartId, apiConfig, activeAccount.id, addToast, loadThreads, userProfile, markThreadRead]);
 
   /**
    * 当面对质："我觉得这个号是你的小号"。
@@ -160,6 +185,13 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig }) => {
           pendingAccusation.observerKey, activeAccount, keep ? 'kept' : 'burned',
         );
         addToast(keep ? '你承认了，这个号继续用' : '你承认了，并注销了这个号', 'success');
+        if (!keep) {
+          // 注销的正是当前在用的号：切回主号。想回看记录，从切换面板"已注销的号"进去。
+          setPendingAccusation(null);
+          setAdmitting(false);
+          onActiveAccountDeactivated?.();
+          return;
+        }
       }
       setPendingAccusation(null);
       setAdmitting(false);
@@ -167,7 +199,7 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig }) => {
     } finally {
       setAnswering(false);
     }
-  }, [pendingAccusation, activeAccount, addToast, loadThreads]);
+  }, [pendingAccusation, activeAccount, addToast, loadThreads, onActiveAccountDeactivated]);
 
   // ── 聊天窗口 ──
   if (openCounterpartId) {
@@ -177,7 +209,7 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig }) => {
         <div className="flex items-center gap-2 px-3 py-2 border-b" style={{ borderColor: 'rgba(127,127,127,0.15)' }}>
           <button onClick={() => setOpenCounterpartId(null)} className="p-1"><ArrowLeft size={18} /></button>
           <span className="font-semibold text-sm">{counterpart?.displayName || '未知账号'}</span>
-          <button
+          {!readOnly && <button
             onClick={() => setConfirmingConfront(true)}
             disabled={confronting}
             className="ml-auto flex items-center gap-1 text-[12px] px-2.5 py-1 rounded-full disabled:opacity-40"
@@ -186,11 +218,11 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig }) => {
           >
             <Eye size={13} />
             {confronting ? '等回话…' : '当面对质'}
-          </button>
+          </button>}
         </div>
 
         {/* TA 已经把话挑明了，等你表态。只在质问你的那个角色的会话里显示。 */}
-        {pendingAccusation && counterpart?.charId === pendingAccusation.observerKey && (
+        {!readOnly && pendingAccusation && counterpart?.charId === pendingAccusation.observerKey && (
           <div className="px-3 py-2.5 text-sm space-y-2 border-b" style={{ background: 'rgba(250,204,21,0.12)', borderColor: 'rgba(127,127,127,0.15)' }}>
             {!admitting ? (
               <>
@@ -234,7 +266,11 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig }) => {
             );
           })}
         </div>
-        {blockedIds.has(openCounterpartId) ? (
+        {readOnly ? (
+          <div className="px-3 py-3 text-center text-[12px] opacity-50 border-t" style={{ borderColor: 'rgba(127,127,127,0.15)' }}>
+            这个号已注销，只能查看以前的记录
+          </div>
+        ) : blockedIds.has(openCounterpartId) ? (
           <div className="px-3 py-3 text-center text-[12px] opacity-50 border-t" style={{ borderColor: 'rgba(127,127,127,0.15)' }}>
             你们之间已拉黑，无法继续私信
           </div>
@@ -269,7 +305,7 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig }) => {
     <div className="pb-8">
       <div className="flex items-center justify-between px-3 py-2 border-b" style={{ borderColor: 'rgba(127,127,127,0.15)' }}>
         <span className="font-bold text-sm">私信</span>
-        <button onClick={() => setPicking(true)} className="text-sm px-3 py-1 rounded-full" style={{ background: 'rgba(127,127,127,0.12)' }}>+ 新对话</button>
+        {!readOnly && <button onClick={() => setPicking(true)} className="text-sm px-3 py-1 rounded-full" style={{ background: 'rgba(127,127,127,0.12)' }}>+ 新对话</button>}
       </div>
 
       {picking && (
@@ -287,6 +323,7 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig }) => {
       {threads.length === 0 && <div className="text-center py-16 text-sm opacity-50">还没有私信</div>}
       {threads.map(t => {
         const counterpart = accountsById.get(t.counterpartAccountId);
+        const unread = unreadByCounterpart.get(t.counterpartAccountId) || 0;
         return (
           <button key={t.counterpartAccountId} onClick={() => openThread(t.counterpartAccountId)} className="w-full flex items-center gap-3 px-3 py-3 border-b text-left" style={{ borderColor: 'rgba(127,127,127,0.1)' }}>
             {counterpart?.avatar
@@ -294,9 +331,17 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig }) => {
               : <div className="w-11 h-11 rounded-full flex items-center justify-center font-bold" style={{ background: 'rgba(127,127,127,0.2)' }}>{counterpart?.displayName?.[0]}</div>}
             <div className="flex-1 min-w-0">
               <div className="font-semibold text-sm">{counterpart?.displayName || '未知账号'}</div>
-              <div className="text-[12px] opacity-60 truncate">{t.lastMessage.content}</div>
+              <div className={`text-[12px] truncate ${unread > 0 ? 'opacity-90 font-medium' : 'opacity-60'}`}>{t.lastMessage.content}</div>
             </div>
-            <div className="text-[11px] opacity-40 shrink-0">{new Date(t.lastMessage.createdAt).toLocaleDateString()}</div>
+            <div className="flex flex-col items-end gap-1 shrink-0">
+              <div className="text-[11px] opacity-40">{new Date(t.lastMessage.createdAt).toLocaleDateString()}</div>
+              {unread > 0 && (
+                <span className="min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold flex items-center justify-center"
+                      style={{ background: '#ef4444', color: '#fff' }}>
+                  {unread > 99 ? '99+' : unread}
+                </span>
+              )}
+            </div>
           </button>
         );
       })}
