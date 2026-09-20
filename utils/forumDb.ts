@@ -202,6 +202,10 @@ export interface ForumSettings {
   /** 常客名单：固定几个路人账号，让他们在用户的帖子下面反复出现，形成"熟面孔"。
    *  没有熟面孔的话每次都是全新陌生 ID，用户根本无从分辨谁是 TA 的小号。 */
   regularsAccountIds?: string[];
+  /** TA 挑明怀疑：同一个 4 小时时段只问它一次。它说"先不说"时，不再每次进 App 都重问、都花一次调用。 */
+  lastConfrontationSlotId?: string;
+  /** TA 处理好友申请：同上，一个时段只问一次。 */
+  lastFriendDecisionSlotId?: string;
   updatedAt: number;
 }
 
@@ -727,6 +731,12 @@ export interface ForumSuspicion {
   reason?: string;
   /** 只有 stage='admitted' 时有值。 */
   outcome?: ForumSuspicionOutcome;
+  /**
+   * 当面对质时，发起指认的是哪个账号（用户那边用哪个身份问的）。
+   * TA 的聊天上下文要靠它决定怎么描述"谁问过你"——必须走身份遮罩，
+   * 用户小号问的就只能写成一个网名，不能写成"用户本人问过你"。
+   */
+  accuserAccountId?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -938,4 +948,134 @@ export async function wipeForumAllData(): Promise<void> {
     tx.objectStore(s).clear();
     await txDone(tx);
   }
+}
+
+// ==================== 已读标记（私信未读 / 通知已读共用） ====================
+//
+// 存在 settings 表里，一个会话/一个入口一行（id 带 readmark__ 前缀），不动数据库版本号。
+// 备份导出/导入本来就是整张 settings 表原样搬，已读状态会跟着一起走。
+// 不塞进 'global' 那一行设置里：那一行会被切换深浅色、调热度、后台时段标记各自整行覆盖写，
+// 已读标记混进去容易被别的写入冲掉，红点莫名其妙又冒出来。
+//
+// 这些标记只给你自己看（红点），TA 那边完全不知道你读没读。
+
+const READ_MARK_PREFIX = 'readmark__';
+const UNREAD_EPOCH_KEY = 'epoch';
+
+interface ForumReadMarkRow {
+  id: string;
+  at: number;
+  updatedAt: number;
+}
+
+export function dmReadKey(viewerIdentityAccountId: string, counterpartAccountId: string): string {
+  return `dm__${viewerIdentityAccountId}__${counterpartAccountId}`;
+}
+
+export async function setReadMark(key: string, at = Date.now()): Promise<void> {
+  const db = await openDb();
+  const tx = db.transaction(STORE_SETTINGS, 'readwrite');
+  const row: ForumReadMarkRow = { id: `${READ_MARK_PREFIX}${key}`, at, updatedAt: Date.now() };
+  tx.objectStore(STORE_SETTINGS).put(row);
+  return txDone(tx);
+}
+
+export async function getReadMark(key: string): Promise<number | undefined> {
+  const db = await openDb();
+  const tx = db.transaction(STORE_SETTINGS, 'readonly');
+  const row = await reqResult<ForumReadMarkRow | undefined>(tx.objectStore(STORE_SETTINGS).get(`${READ_MARK_PREFIX}${key}`));
+  return row?.at;
+}
+
+/**
+ * 开始记"已读"的时间点。第一次调用时写入"现在"。
+ * 没有已读标记的会话一律按这个时间点算——不然更新之后第一次打开，
+ * 以前所有的旧私信全都会亮红点。
+ */
+export async function getUnreadTrackingEpoch(): Promise<number> {
+  const existing = await getReadMark(UNREAD_EPOCH_KEY);
+  if (existing !== undefined) return existing;
+  const now = Date.now();
+  await setReadMark(UNREAD_EPOCH_KEY, now);
+  return now;
+}
+
+/** 某个身份下，每个私信会话有几条对方发来、你还没点开看的消息。 */
+export async function getDmUnreadByCounterpart(viewerIdentityAccountId: string): Promise<Map<string, number>> {
+  const epoch = await getUnreadTrackingEpoch();
+  const db = await openDb();
+  const msgTx = db.transaction(STORE_DM_MESSAGES, 'readonly');
+  const messages = (await reqResult<ForumDmMessage[]>(
+    msgTx.objectStore(STORE_DM_MESSAGES).index('viewerIdentityAccountId').getAll(viewerIdentityAccountId),
+  )) || [];
+  const counterparts = Array.from(new Set(messages.map(m => m.counterpartAccountId)));
+  // 已读标记另开一个事务，所有 get 同步发出——不跨 await 复用上一个事务
+  const settingsStore = db.transaction(STORE_SETTINGS, 'readonly').objectStore(STORE_SETTINGS);
+  const marks = await Promise.all(counterparts.map(c =>
+    reqResult<ForumReadMarkRow | undefined>(settingsStore.get(`${READ_MARK_PREFIX}${dmReadKey(viewerIdentityAccountId, c)}`)),
+  ));
+  const readAt = new Map(counterparts.map((c, i) => [c, marks[i]?.at ?? epoch]));
+
+  const result = new Map<string, number>();
+  for (const m of messages) {
+    if (m.fromAccountId !== m.counterpartAccountId) continue; // 自己发的不算
+    if (m.createdAt <= (readAt.get(m.counterpartAccountId) ?? epoch)) continue;
+    result.set(m.counterpartAccountId, (result.get(m.counterpartAccountId) || 0) + 1);
+  }
+  return result;
+}
+
+/** 多个身份各自的未读私信总数（切换面板、左侧私信图标的红点用）。 */
+export async function getDmUnreadTotals(viewerIdentityAccountIds: string[]): Promise<Map<string, number>> {
+  const result = new Map<string, number>();
+  for (const id of viewerIdentityAccountIds) {
+    const byCounterpart = await getDmUnreadByCounterpart(id);
+    let total = 0;
+    byCounterpart.forEach(n => { total += n; });
+    result.set(id, total);
+  }
+  return result;
+}
+
+// ==================== 评论：按作者查 / 批量计数 ====================
+
+/** 某个账号发过的所有评论，最新的在前。"我发过的评论"用。 */
+export async function getCommentsByAuthor(authorAccountId: string): Promise<ForumComment[]> {
+  const db = await openDb();
+  const tx = db.transaction(STORE_COMMENTS, 'readonly');
+  const idx = tx.objectStore(STORE_COMMENTS).index('authorAccountId');
+  const comments = (await reqResult<ForumComment[]>(idx.getAll(authorAccountId))) || [];
+  comments.sort((a, b) => b.createdAt - a.createdAt);
+  return comments;
+}
+
+/**
+ * 一次事务里数出多条帖子各自的评论数。
+ *
+ * 列表页原来是每条帖子单独把全部评论读出来再数长度，一页 15 条就是 15 次串行查询；
+ * 这里只走索引计数（不把评论内容读出来），而且所有请求在同一个事务里并发发出。
+ */
+export async function getCommentCountsByPosts(postIds: string[]): Promise<Map<string, number>> {
+  const result = new Map<string, number>();
+  const ids = Array.from(new Set(postIds.filter(Boolean)));
+  if (ids.length === 0) return result;
+  const db = await openDb();
+  const tx = db.transaction(STORE_COMMENTS, 'readonly');
+  const idx = tx.objectStore(STORE_COMMENTS).index('postId');
+  const counts = await Promise.all(ids.map(id => reqResult<number>(idx.count(id))));
+  ids.forEach((id, i) => result.set(id, counts[i] || 0));
+  return result;
+}
+
+/** 按 id 批量取帖子（"我发过的评论"要显示每条评论挂在哪个帖子下）。 */
+export async function getForumPostsByIds(postIds: string[]): Promise<Map<string, ForumPost>> {
+  const result = new Map<string, ForumPost>();
+  const ids = Array.from(new Set(postIds.filter(Boolean)));
+  if (ids.length === 0) return result;
+  const db = await openDb();
+  const tx = db.transaction(STORE_POSTS, 'readonly');
+  const store = tx.objectStore(STORE_POSTS);
+  const posts = await Promise.all(ids.map(id => reqResult<ForumPost | undefined>(store.get(id))));
+  posts.forEach(p => { if (p) result.set(p.id, p); });
+  return result;
 }
