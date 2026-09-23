@@ -11,6 +11,11 @@
  *   二、帖子级"刷新"合并（新装饰评论 + 垫底楼回复）[交接4 二]
  *   三、DM ⚡ 手动触发回复 [交接4 三 / 交接5 4.6]
  *   四、共管账号4档专属动态 [交接5 4.9]
+ *
+ * 一条纪律（本轮新增）：**凡是由 TA 出面说话的地方，人设一律从 forumCharContext 取**，
+ * 不在这个文件里现拼。那个模块复用的是聊天用的同一个函数，所以论坛里的 TA 和聊天里的
+ * 是同一个人——世界书怎么触发、对用户的印象是什么、长期记忆记得哪些事，两边完全一致。
+ * 路人 NPC（批量生成、装饰性评论）那一侧不碰这个模块，它们就是路人。
  */
 
 import { safeFetchJson, extractJson } from './safeApi';
@@ -26,9 +31,10 @@ import {
   FORUM_DEFAULTS,
 } from './forumConstants';
 import { pickRosterWithRegulars, getRelationState } from './forumSocial';
-import { maskAccountForChar, describeMaskedAccount } from './forumIdentityMask';
+import { maskAccountForChar, describeMaskedAccount, getCharForumIdentity } from './forumIdentityMask';
 import * as suspicion from './forumSuspicion';
 import { userMainAccountId } from './forumBootstrap';
+import { getForumCharContext, loadForumUserProfile, type ForumCharContext } from './forumCharContext';
 import type { HotNewsItem } from '../types';
 
 // ==================== 调用约定 ====================
@@ -133,6 +139,62 @@ function describeAccountForPrompt(account: ForumAccount): string {
     persona ? `说话风格:${persona.label}——${persona.promptDescription}` : undefined,
   ].filter(Boolean).join('；');
   return `- handle=${account.handle}（${account.displayName}）${badges ? `：${badges}` : ''}`;
+}
+
+// ==================== TA 那一侧的人设（统一从 forumCharContext 取） ====================
+
+/**
+ * 按 charId 取人设块，带一层本次调用内的缓存——一次帖子刷新里同一个角色可能要用好几处，
+ * 每处都重读一遍聊天记录太浪费。缓存只活在这一次调用里，不跨调用。
+ */
+function createCharContextLoader(userDisplayName?: string) {
+  const cache = new Map<string, Promise<ForumCharContext | null>>();
+  return (charId: string): Promise<ForumCharContext | null> => {
+    let hit = cache.get(charId);
+    if (!hit) {
+      hit = getForumCharContext(charId, { userDisplayName }).catch(e => {
+        console.warn('[ForumAi] 读取角色人设失败:', e?.message || String(e));
+        return null;
+      });
+      cache.set(charId, hit);
+    }
+    return hit;
+  };
+}
+
+/** 单个角色出场时的提示词开头。没取到人设就返回空串，调用方退回原来的通用写法。 */
+async function buildSingleCharHeader(
+  charId: string | undefined,
+  userDisplayName: string | undefined,
+): Promise<string> {
+  if (!charId) return '';
+  const ctx = await getForumCharContext(charId, { userDisplayName }).catch(e => {
+    console.warn('[ForumAi] 读取角色人设失败:', e?.message || String(e));
+    return null;
+  });
+  return ctx?.text || '';
+}
+
+/**
+ * 评论区渲染：每条都标上网名，不再出现"用户最新发言"这种标签。
+ *
+ * 原来那个标签是个泄漏点——TA 一旦有了人设，"用户"两个字等于直接告诉它"这条是你认识的
+ * 那个人说的"，猜小号当场作废。现在它看到的和一个真网友看到的一样：一堆网名和话。
+ */
+function renderCommentSection(
+  comments: ForumComment[],
+  accountsById: Map<string, ForumAccount>,
+  opts: { floorLabels?: Map<string, string> } = {},
+): string {
+  if (comments.length === 0) return '（这条帖子下面还没有人说话）';
+  const sorted = [...comments].sort((a, b) => a.createdAt - b.createdAt);
+  return sorted.map(c => {
+    const acc = accountsById.get(c.authorAccountId);
+    const who = acc ? `@${acc.handle}（${acc.displayName}）` : '@已注销用户';
+    const floorTag = opts.floorLabels?.get(c.threadRootId);
+    const reply = c.parentCommentId ? '（回复楼里上一条）' : '';
+    return `${floorTag ? `[${floorTag}] ` : ''}${who}${reply}：${c.content}`;
+  }).join('\n');
 }
 
 // ==================== 一、批量生成（自然触发 / 手动刷新） ====================
@@ -331,6 +393,8 @@ export interface RunPostRefreshParams {
   /** TA 相关账号（主号 + 目前继续沿用的小号），用于判定 @TA、以及标记 involvesCharInteraction。 */
   taAccounts: ForumAccount[];
   altIsContinuedInUse: (accountId: string) => boolean;
+  /** 用户在聊天里的名字。不传就从档案里读，这里只是给调用方一个省一次读库的机会。 */
+  userDisplayName?: string;
 }
 
 export async function runPostRefresh(params: RunPostRefreshParams): Promise<void> {
@@ -350,37 +414,91 @@ export async function runPostRefresh(params: RunPostRefreshParams): Promise<void
   // 走常客名单：约六成候选是"熟面孔"，让用户的帖子下面反复出现同一批人。
   // 纯随机的话每次都是陌生 ID，用户无从分辨谁是谁，猜小号这件事根本立不起来。
   const roster = await pickRosterWithRegulars(npcAccounts, rosterSize, userMainAccountId());
+
+  // ── 这次让哪几个角色在场 ──
+  // 每个角色都要带完整人设 + 最近的聊天，全塞进来又慢又容易串味（生成器会把 A 知道的事
+  // 安到 B 头上）。所以：被 @ 的角色一定在场，另外再随机拉一个角色进来——它可能正好在
+  // 逛这条帖子，也可能看了不说话。代价是没被 @ 的角色不是每次刷新都出现。
+  const charIdsByHandle = new Map<string, string>();
+  for (const acc of taAccounts) if (acc.charId) charIdsByHandle.set(acc.handle, acc.charId);
+
+  const mentionedCharIds = new Set<string>();
+  for (const floor of mustReply) {
+    for (const [handle, charId] of charIdsByHandle) {
+      if (handle && floor.latestComment.content.includes(`@${handle}`)) mentionedCharIds.add(charId);
+    }
+  }
+  const allCharIds = Array.from(new Set(taAccounts.map(a => a.charId).filter((x): x is string => !!x)));
+  const bystanderPool = allCharIds.filter(id => !mentionedCharIds.has(id));
+  const presentCharIds = new Set(mentionedCharIds);
+  if (bystanderPool.length > 0) {
+    presentCharIds.add(bystanderPool[Math.floor(Math.random() * bystanderPool.length)]);
+  }
+
+  const presentTaAccounts = taAccounts.filter(a => a.charId && presentCharIds.has(a.charId));
+
   // [用户确认·覆盖原设计] 原本禁止 TA 的号出现在非@TA的楼里，意图是"TA 只在被点名时
   // 才发声"。现在改成把大号小号都摆在它面前，用不用、用哪个由它按人设判断——这样
   // TA 的小号才会自然混在路人里出没，用户也才有得猜。
-  const validHandles = new Set([...roster.map(a => a.handle), ...taAccounts.map(a => a.handle)]);
+  const validHandles = new Set([...roster.map(a => a.handle), ...presentTaAccounts.map(a => a.handle)]);
   const accountByHandle = new Map<string, ForumAccount>([
     ...roster.map(a => [a.handle, a] as const),
-    ...taAccounts.map(a => [a.handle, a] as const),
+    ...presentTaAccounts.map(a => [a.handle, a] as const),
   ]);
+
+  // 在场角色的人设：完整读取，跟聊天里的同一份。
+  const loadCharContext = createCharContextLoader(params.userDisplayName);
+  const charBlocks: string[] = [];
+  for (const charId of presentCharIds) {
+    const ctx = await loadCharContext(charId);
+    if (!ctx) continue;
+    const myAccounts = presentTaAccounts.filter(a => a.charId === charId);
+    charBlocks.push([
+      `——————【在场的人：${ctx.char.name}】——————`,
+      ctx.text,
+      '',
+      `${ctx.char.name}在论坛上的号（这次只能用这些 handle 替它发言）：`,
+      myAccounts.map(describeTaAccountForPrompt).join('\n') || '（没有可用的号）',
+    ].join('\n'));
+  }
 
   const newCommentCount = pickInRange(FORUM_DEFAULTS.postRefreshNewCommentRange);
 
-  const floorBlock = (floors: PendingFloor[]) => floors.map(f =>
-    `- 楼 ${f.threadRootId}：用户最新发言"${f.latestComment.content}"`
-  ).join('\n') || '（无）';
+  // 评论区全貌：TA 看到的就是一个普通网友看到的样子——一堆网名和话，没有"用户"这种标签。
+  const allComments = await db.getCommentsByPost(postId);
+  const floorLabels = new Map<string, string>();
+  mustReply.forEach(f => floorLabels.set(f.threadRootId, `楼 ${f.threadRootId}·等人接`));
+  randomlyPicked.forEach(f => floorLabels.set(f.threadRootId, `楼 ${f.threadRootId}·等人接`));
+  const postAuthor = accountsById.get(post.authorAccountId);
+
+  const floorBlock = (floors: PendingFloor[]) => floors.map(f => {
+    const speaker = accountsById.get(f.latestComment.authorAccountId);
+    const who = speaker ? `@${speaker.handle}（${speaker.displayName}）` : '@已注销用户';
+    return `- threadRootId=${f.threadRootId}，这楼最新一条是 ${who} 说的："${f.latestComment.content}"`;
+  }).join('\n') || '（无）';
 
   const prompt = `
 你是这个论坛帖子的"评论区生成器"。这次刷新要做两件事，一次性完成：
 1) 给这条帖子补一批新的路人装饰性评论/立场发言（不针对下面的垫底楼，是普通的新增热闹）；
 2) 针对下面列出的垫底楼各生成一条回复。
 
+${charBlocks.join('\n\n') || '（这次没有具体角色在场，只有路人）'}
+
 === 帖子 ===
+作者：${postAuthor ? `@${postAuthor.handle}（${postAuthor.displayName}）` : '@已注销用户'}
 标题：${post.title}
 正文：${post.content}
+
+=== 目前的评论区（按时间从旧到新，每条前面是发言的网名）===
+${renderCommentSection(allComments, accountsById, { floorLabels })}
 
 === 路人账号池（新增装饰评论 + "随便哪个路人接"的垫底楼，只能用这些handle）===
 ${roster.map(describeAccountForPrompt).join('\n')}
 
-=== TA 的账号（用不用、用哪个，按这个角色的性格自己判断）===
-${taAccounts.map(describeTaAccountForPrompt).join('\n') || '（这次没有可用的TA账号）'}
+=== 这次在场的角色的号（用不用、用哪个，按上面那份人设自己判断）===
+${presentTaAccounts.map(describeTaAccountForPrompt).join('\n') || '（这次没有可用的角色账号）'}
 
-=== 必须由TA回复的垫底楼（这条被@了TA）===
+=== 必须由角色本人回复的垫底楼（这条 @ 了它）===
 ${floorBlock(mustReply)}
 
 === 随便哪个路人接的垫底楼 ===
@@ -388,10 +506,12 @@ ${floorBlock(randomlyPicked)}
 
 ${buildSharedForumHardRules()}
 
-=== TA 账号的使用规则 ===
-- "必须由TA回复"区块里的楼：一定要由 TA 的某个账号来回，用主号还是小号由你按性格判断。
-- 其它楼和新增评论：TA 的账号**可以**用也**可以**不用。它有可能正好在逛这条帖子，也可能根本没看见。
-  不要每次都让 TA 出现，那样太刻意；也不要完全不出现。
+=== 角色账号的使用规则 ===
+- "必须由角色本人回复"区块里的楼：一定要由那个角色的某个账号来回，用主号还是小号由它按性格判断。
+- 其它楼和新增评论：角色的账号**可以**用也**可以**不用。它有可能正好在逛这条帖子，也可能根本没看见。
+  不要每次都让它出现，那样太刻意；也不要完全不出现。
+- 替角色发言时，用的是上面那份人设：它的语气、在意什么、对谁什么态度，都照那份写，
+  不要写成一个泛泛的网友。
 - 用小号发言时，语气和关注点要贴着小号自己的定位走，不要写得跟主号一模一样，
   更不要在正文里暗示"其实我是某某"——论坛上没人知道那个号是谁。
 
@@ -399,16 +519,18 @@ ${buildSharedForumHardRules()}
 - 新增装饰性评论：${newCommentCount} 条。
 - 垫底楼回复：上面列出几条就产出几条，threadRootId 必须精确对应。
 
-=== 可选：TA 起疑 ===
-如果 TA 在读这条帖子的过程中，觉得某个账号的说话方式/关注点让它联想到某个它认识的人
-（比如怀疑那是谁的小号），可以顺手记一笔。**这完全是可选的**——没有这种感觉就不要填，
-不要为了填而填。判断依据只能来自帖子里实际出现的内容。
+=== 可选：角色起疑 ===
+论坛上没有任何标签告诉你哪个号是谁。如果在场的角色读完这个评论区，觉得某个网名的说话
+方式、用词习惯、在意的点，让它联想到自己认识的某个人（比如怀疑那是谁开的小号），
+可以顺手记一笔。**这完全是可选的**——没有这种感觉就不要填，不要为了填而填；
+判断依据只能来自评论区里实际出现的内容，不能凭空指认。记下来不等于要说出口，
+说不说是另一回事。
 
 请只返回 JSON：
 {
   "newComments": [{ "authorHandle": "handle", "content": "评论内容" }],
   "floorReplies": [{ "threadRootId": "对应上面给的楼id", "authorHandle": "handle", "content": "回复内容" }],
-  "suspicion": { "byHandle": "起疑的是TA的哪个号", "targetHandle": "它怀疑的那个账号", "reason": "一句话说明凭什么这么觉得" }
+  "suspicion": { "byHandle": "起疑的是角色的哪个号", "targetHandle": "它怀疑的那个账号", "reason": "一句话说明凭什么这么觉得" }
 }
 `.trim();
 
@@ -428,7 +550,7 @@ ${buildSharedForumHardRules()}
 
   const floorReplies = Array.isArray(parsed?.floorReplies) ? parsed.floorReplies : [];
   const mustReplyIds = new Set(mustReply.map(f => f.threadRootId));
-  const taHandleSet = new Set(taAccounts.map(a => a.handle));
+  const taHandleSet = new Set(presentTaAccounts.map(a => a.handle));
   const allFloors = [...mustReply, ...randomlyPicked];
   for (const r of floorReplies) {
     const floor = allFloors.find(f => f.threadRootId === r?.threadRootId);
@@ -448,7 +570,7 @@ ${buildSharedForumHardRules()}
     await feed.markCharInteractionIfApplicable(postId, account, altIsContinuedInUse(account.id));
   }
 
-  await recordSuspicionFromOutput(parsed?.suspicion, accountsById, taAccounts);
+  await recordSuspicionFromOutput(parsed?.suspicion, accountsById, presentTaAccounts);
 }
 
 /**
@@ -483,46 +605,95 @@ async function recordSuspicionFromOutput(
 
 export interface RunCharConfrontationParams {
   apiConfig: ForumApiConfig;
-  /** TA 用来质问的号 */
-  charAccountId: string;
+  /** 起疑的那个角色。用哪个号去问，由它自己在这次调用里选。 */
+  charId?: string;
+  /** 旧签名：直接指定用哪个号。留着是为了兼容老调用点，新代码传 charId。 */
+  charAccountId?: string;
   /** 被质问的账号（用户的某个身份） */
   targetAccountId: string;
   userDisplayName?: string;
 }
 
 /**
- * 让 TA 决定要不要把怀疑挑明，以及怎么开口。
+ * 让 TA 决定要不要把怀疑挑明、用哪个号开口、以及怎么说。
  *
- * 挑明的时机和措辞都由它自己定：可能直球问，可能拐着弯试探，也可能觉得还没到时候
- * 而暂时按住不说。返回 confronted=false 时什么都不会发生，下次进 App 会再问一遍它。
+ * 用哪个号这件事原来是代码写死的（优先小号），但一个陌生小号跑来问"你是不是某某"，
+ * 基本等于自曝——只有认识那个人的号才会问这种话。所以改成把两个号和各自的后果摆给它，
+ * 让它自己挑：
+ *   - 主号：摆明了是本人在问，对方一看就知道是谁在关心这件事；
+ *   - 小号：藏住自己，但对方可能反过来意识到"这个小号怎么会问这个"，从而猜到是它。
+ *
+ * 挑明的时机和措辞同样由它自己定。返回 confronted=false 时什么都不会发生，
+ * 下一个 4 小时时段会再给它一次开口的机会。
  */
-export async function runCharConfrontation(params: RunCharConfrontationParams): Promise<{ confronted: boolean; message: string }> {
-  const { apiConfig, charAccountId, targetAccountId, userDisplayName } = params;
-  const [charAccount, target] = await Promise.all([
-    db.getForumAccount(charAccountId), db.getForumAccount(targetAccountId),
-  ]);
-  if (!charAccount?.charId || !target) return { confronted: false, message: '' };
+export async function runCharConfrontation(params: RunCharConfrontationParams): Promise<{ confronted: boolean; message: string; usedAccountId?: string }> {
+  const { apiConfig, targetAccountId, userDisplayName } = params;
 
-  const row = await suspicion.getSuspicion(charAccount.charId, targetAccountId);
-  const history = await db.getDmThreadMessages(targetAccountId, charAccountId);
-  const historyBlock = history.slice(-10).map(m =>
-    `${m.fromAccountId === charAccountId ? charAccount.displayName : target.displayName}：${m.content}`
-  ).join('\n') || '（你们还没在私信里说过话）';
+  // charId 优先；只传了旧的 charAccountId 时，从那个号反查它的主人。
+  let charId = params.charId;
+  if (!charId && params.charAccountId) {
+    charId = (await db.getForumAccount(params.charAccountId))?.charId;
+  }
+  if (!charId) return { confronted: false, message: '' };
+
+  const target = await db.getForumAccount(targetAccountId);
+  if (!target) return { confronted: false, message: '' };
+
+  const identity = await getCharForumIdentity(charId);
+  // 共管号不参与挑明：那是你们俩共用的号，用它去质问你自己很荒唐。
+  const usableAccounts = [identity.main, identity.alt].filter((a): a is ForumAccount => !!a);
+  if (usableAccounts.length === 0) return { confronted: false, message: '' };
+
+  const ctx = await getForumCharContext(charId, { userDisplayName });
+  const userName = ctx?.user.name || userDisplayName || '你认识的那个人';
+
+  const row = await suspicion.getSuspicion(charId, targetAccountId);
+
+  // 私信是按"用哪个号"分会话的，所以两个号的历史都要给它看——它选号时得知道
+  // 自己用哪个号跟对方说过话。
+  const historyBlocks: string[] = [];
+  for (const acc of usableAccounts) {
+    const history = await db.getDmThreadMessages(targetAccountId, acc.id);
+    if (history.length === 0) continue;
+    const lines = history.slice(-10).map(m =>
+      `${m.fromAccountId === acc.id ? acc.displayName : target.displayName}：${m.content}`
+    ).join('\n');
+    historyBlocks.push(`【用 @${acc.handle} 跟 @${target.handle} 说过的话】\n${lines}`);
+  }
+
+  const optionLines = usableAccounts.map(acc => acc.isAlt
+    ? `- 用小号 @${acc.handle}（${acc.displayName}）问：对方不知道这个号是你。`
+      + `好处是你没暴露自己；风险是——一个素不相识的小号突然跑来问"你是不是某某"，`
+      + `对方很可能反过来想"谁会问这种话"，于是猜到这个号就是你。`
+      + `${acc.altPersonaNote ? `这个号的定位：${acc.altPersonaNote}` : ''}`
+    : `- 用主号 @${acc.handle}（${acc.displayName}）问：等于摆明了是你本人在问。`
+      + `对方会知道你在意这件事、也知道是你在查；但反过来，这个号本来就是你，没什么可暴露的。`
+  ).join('\n');
 
   const prompt = `
-你在论坛上用账号"${charAccount.displayName}"（handle=${charAccount.handle}）。
-${charAccount.isAlt && charAccount.altPersonaNote ? `这是你的小号，定位：${charAccount.altPersonaNote}` : ''}
+${ctx?.text || ''}
 
-你怀疑论坛账号"${target.displayName}"（@${target.handle}）其实是${userDisplayName || '你认识的那个人'}的小号。
+=== 现在要决定的事 ===
+你怀疑论坛账号"${target.displayName}"（@${target.handle}）其实是${userName}开的小号。
 ${row?.reason ? `你当初起疑的理由：${row.reason}` : ''}
 
-现在要不要私信过去把这件事挑明？
+要不要私信过去把这件事挑明？如果要，用你的哪个号去问？
 
-按你的性格决定。你可以直接问，可以拐着弯试探，也可以觉得时候还没到、这次先不说
-（那就把 confront 填 false）。没有标准答案。
+${optionLines}
+
+${historyBlocks.length > 0 ? `=== 你和这个号之间已有的私信 ===\n${historyBlocks.join('\n\n')}` : '（你还没跟这个号在私信里说过话）'}
+
+${buildSharedForumHardRules()}
+
+按你的性格决定。你可以直接问，可以拐着弯试探、先聊点别的再绕过去，也可以觉得时候
+还没到、这次先不说（那就把 confront 填 false，什么都不会发生）。没有标准答案。
 
 请只返回 JSON：
-{ "confront": true 或 false, "message": "如果要说，你发过去的那条私信" }
+{
+  "confront": true 或 false,
+  "useHandle": "你决定用哪个号的 handle，必须是上面列出的其中一个",
+  "message": "如果要说，你发过去的那条私信（用你选的那个号的口吻写）"
+}
 `.trim();
 
   try {
@@ -531,17 +702,21 @@ ${row?.reason ? `你当初起疑的理由：${row.reason}` : ''}
     const message = String(parsed?.message || '').trim();
     if (parsed?.confront !== true || !message) return { confronted: false, message: '' };
 
+    const chosen = usableAccounts.find(a => a.handle === String(parsed?.useHandle || ''))
+      // 没选或选了个不存在的号：退回主号。宁可用主号，也不要替它拿小号去冒险。
+      || identity.main || usableAccounts[0];
+
     await db.saveForumDmMessage({
       id: db.createForumDmMessageId(),
       // 收件人视角是用户的这个身份，所以用户切到这个号才看得到这条质问
       viewerIdentityAccountId: targetAccountId,
-      counterpartAccountId: charAccountId,
-      fromAccountId: charAccountId,
+      counterpartAccountId: chosen.id,
+      fromAccountId: chosen.id,
       content: message,
       createdAt: Date.now(),
     });
-    await suspicion.markConfronted(charAccount.charId, targetAccountId);
-    return { confronted: true, message };
+    await suspicion.markConfronted(charId, targetAccountId);
+    return { confronted: true, message, usedAccountId: chosen.id };
   } catch (e: any) {
     console.warn('[ForumAi] 挑明失败:', e?.message || String(e));
     return { confronted: false, message: '' };
@@ -570,9 +745,16 @@ export async function runDmReply(params: RunDmReplyParams): Promise<void> {
     `${m.fromAccountId === viewerIdentityAccountId ? (viewer?.displayName || '我') : counterpart.displayName}：${m.content}`
   ).join('\n');
 
+  // 回话的是不是 TA 本人的号（主号/小号/共管号）。是的话就带上完整人设——
+  // 以前这里只给了一个名字，回你的其实是个顶着 TA 名字的通用网友。
+  const charId = counterpart.charId;
+  const ctx = charId ? await getForumCharContext(charId, { userDisplayName: params.userDisplayName }) : null;
+  const userName = ctx?.user.name || params.userDisplayName;
+
   // 对方是谁 —— 必须走身份遮罩。直接把 viewer 账号拼进提示词的话，ownerType/isAlt
   // 会把"这是用户的小号"直接送到 TA 眼前，猜小号的玩法当场作废。
   let viewerDescription = '一个论坛网友';
+  let viewerKnownAsUser = false;
   if (viewer) {
     const charAccountIds = counterpart.charId
       ? (await db.getAllForumAccounts())
@@ -580,12 +762,33 @@ export async function runDmReply(params: RunDmReplyParams): Promise<void> {
           .map(a => a.id)
       : [counterpart.id];
     const masked = await maskAccountForChar(viewer, charAccountIds);
-    viewerDescription = describeMaskedAccount(masked, params.userDisplayName);
+    viewerKnownAsUser = masked.knownAsUser;
+    viewerDescription = describeMaskedAccount(masked, userName);
   }
 
+  // "TA 猜你"的第二个入口。私信本来就是最该起疑的地方——你用小号直接跟它说话，
+  // 说话习惯藏不住。已经确认是本人的号不用再猜，那边就不给这个出口。
+  const canSuspect = !!ctx
+    && counterpart.ownerType === 'char'      // 共管号不算：那个号你们俩共用，没什么好猜的
+    && !!viewer && viewer.ownerType === 'user'
+    && !viewerKnownAsUser;                   // 已经确认是本人的号，不用再猜
+  const suspicionSlot = canSuspect ? `
+=== 可选：你心里的判断 ===
+论坛上没有任何标签告诉你对面是谁。如果跟这个号来回几句之后，你觉得对方的用词、语气、
+在意的点很像${userName || '你认识的某个人'}，可以在 suspicion 里记一笔。
+**这完全是可选的**：没有这种感觉就不要填，也不要因为对方随便说了句话就往这上面靠。
+记下来只是你心里存了个疑，**不等于要在这条回复里说出来**——要不要挑明、什么时候挑明，
+是以后你自己决定的事。这一轮你完全可以若无其事地把话接下去。
+` : '';
+
   const prompt = `
-你现在扮演论坛账号"${counterpart.displayName}"（handle=${counterpart.handle}），正在私信里回复对方。
-${counterpart.isAlt && counterpart.altPersonaNote ? `这是你的小号，论坛上没人知道它是你。这个号的定位：${counterpart.altPersonaNote}` : describeAccountForPrompt(counterpart)}
+${ctx?.text || ''}
+
+=== 现在这件事 ===
+你在论坛上用账号"${counterpart.displayName}"（handle=${counterpart.handle}），正在私信里回复对方。
+${counterpart.isAlt && counterpart.altPersonaNote
+    ? `这是你的小号，论坛上没人知道它是你。这个号的定位：${counterpart.altPersonaNote}`
+    : ctx ? '这是你自己的号。' : describeAccountForPrompt(counterpart)}
 
 === 跟你私信的这个人 ===
 ${viewerDescription}
@@ -595,14 +798,15 @@ ${buildSharedForumHardRules()}
 
 === 私信记录（含对方刚发的、还没被回复的消息）===
 ${historyBlock}
-
+${suspicionSlot}
 请以这个账号的口吻写一条回复（可以是针对最近几条消息的综合回应，不用逐条回，像真人私信一样自然）。
 请只返回 JSON：
-{ "reply": "回复正文" }
+{ "reply": "回复正文"${suspicionSlot ? `,
+  "suspicion": { "isThem": true 或 false, "reason": "为什么这么觉得，一句话" }` : ''} }
 `.trim();
 
   const raw = await callForumAI(apiConfig, prompt, '论坛DM回复');
-  const parsed = extractJson<{ reply?: string }>(raw);
+  const parsed = extractJson<any>(raw);
   const reply = String(parsed?.reply || '').trim();
   if (!reply) return;
 
@@ -614,6 +818,13 @@ ${historyBlock}
     content: reply,
     createdAt: Date.now(),
   });
+
+  // 起疑落库：跟帖子那边共用同一张表，所以聊天上下文、进论坛时的挑明流程都能看到这一笔。
+  if (suspicionSlot && charId && parsed?.suspicion?.isThem === true) {
+    const reason = String(parsed.suspicion.reason || '').slice(0, 300);
+    await suspicion.markSuspected(charId, viewerIdentityAccountId, reason)
+      .catch(e => console.warn('[ForumAi] 私信起疑落库失败:', e?.message || String(e)));
+  }
 }
 
 // ==================== 三之二、好友申请由 TA 自己判断 ====================
@@ -648,8 +859,12 @@ export async function runFriendRequestDecision(params: RunFriendRequestDecisionP
     ? allAccounts.filter(a => a.charId === target.charId && a.status === 'active').map(a => a.id)
     : [target.id];
   const masked = await maskAccountForChar(requester, charAccountIds);
+  const charHeader = await buildSingleCharHeader(target.charId, userDisplayName);
 
   const prompt = `
+${charHeader}
+
+=== 现在这件事 ===
 你在论坛上用账号"${target.displayName}"（handle=${target.handle}）。
 ${target.isAlt && target.altPersonaNote ? `这是你的小号，这个号的定位：${target.altPersonaNote}` : ''}
 
@@ -717,7 +932,14 @@ export async function runAltConfrontation(params: RunAltConfrontationParams): Pr
     `${m.fromAccountId === accuserAccountId ? (accuser?.displayName || '对方') : target.displayName}：${m.content}`
   ).join('\n') || '（这是你们第一次说话）';
 
+  // 被指认的是 TA 本人的小号时，认不认这件事必须由它按自己的性格和你们的关系来定，
+  // 所以这里要带上完整人设；路人号就不用了，它本来就是路人。
+  const realAltHeader = isRealAlt ? await buildSingleCharHeader(target.charId, userDisplayName) : '';
+
   const realAltPrompt = `
+${realAltHeader}
+
+=== 现在这件事 ===
 你在论坛上用一个小号"${target.displayName}"（handle=${target.handle}）。没有人知道这个号是你。
 ${target.altPersonaNote ? `这个号的定位：${target.altPersonaNote}` : ''}
 
@@ -808,14 +1030,25 @@ export async function runSharedAccountExclusivePost(params: RunSharedAccountExcl
 
   const npcAccounts = await db.getActiveNpcAccounts();
   const roster = pickNpcPoolForBatch(npcAccounts, [], Math.min(npcAccounts.length, 5));
-  const validHandles = new Set(roster.map(a => a.handle));
   const accountByHandle = new Map(roster.map(a => [a.handle, a]));
 
-  const prompt = `
-现在是 ${bandLabel} 这个时段，给共管账号"${account.displayName}"（handle=${account.handle}）生成一条只属于这个
-账号的动态（会发在公共论坛里，所有人都看得到），可以是用户和TA共同视角的日常分享。
+  // 这条动态是 TA 本人发的，不是系统代笔。以前这里是一个既不认识你、也不认识 TA 的
+  // 模型在写，写完还会进 TA 的长期记忆——等于往它脑子里塞别人的日记。
+  const ctx = account.charId ? await getForumCharContext(account.charId) : null;
+  const user = ctx?.user || await loadForumUserProfile();
 
-=== 可用的装饰性评论/点赞账号池 ===
+  const prompt = `
+${ctx?.text || ''}
+
+=== 现在这件事 ===
+现在是 ${bandLabel} 这个时段。你要用共管账号"${account.displayName}"（handle=${account.handle}）发一条动态。
+这个号是你和${user.name}共同使用的，论坛上所有人都看得到你们用它发的东西。
+
+写什么由你定：可以是你们俩之间的日常、你此刻在做的事、你想说给${user.name}听又不介意别人看到的话。
+按你们现在的关系和你自己的性格写——不要写成一段谁都能发的通用动态。
+也不要在里面写论坛上没人该知道的事（你们私下聊过的细节、你另外那个小号之类）。
+
+=== 可用的装饰性评论/点赞账号池（路人，随便谁来留两句）===
 ${roster.map(describeAccountForPrompt).join('\n')}
 
 ${buildSharedForumHardRules()}
