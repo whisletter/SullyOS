@@ -1079,3 +1079,46 @@ export async function getForumPostsByIds(postIds: string[]): Promise<Map<string,
   posts.forEach(p => { if (p) result.set(p.id, p); });
   return result;
 }
+
+/** 通知页的已读标记键。通知列表本身不分账号（你名下任何号被回复都算），所以标记也只有一份。 */
+export function notificationReadKey(): string {
+  return 'notif__all';
+}
+
+/**
+ * 按时间倒序取最近若干条评论，走 createdAt 索引的反向游标。
+ *
+ * 通知页原来是把所有帖子拉出来、再逐条 getCommentsByPost 数过去——帖子有 200 条就是
+ * 200 次串行查询，而且把每条评论的正文全读进内存了。这里只往回走 limit 条就停，
+ * 跟库里总共有多少帖子无关。
+ */
+export async function getRecentForumComments(limit = 400): Promise<ForumComment[]> {
+  if (limit <= 0) return [];
+  const db = await openDb();
+  const tx = db.transaction(STORE_COMMENTS, 'readonly');
+  const idx = tx.objectStore(STORE_COMMENTS).index('createdAt');
+  return new Promise<ForumComment[]>((resolve, reject) => {
+    const out: ForumComment[] = [];
+    const req = idx.openCursor(null, 'prev');
+    req.onsuccess = () => {
+      const cursor = req.result;
+      if (!cursor || out.length >= limit) { resolve(out); return; }
+      out.push(cursor.value as ForumComment);
+      cursor.continue();
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+/** 按 id 批量取评论（通知要知道"这条回的是我哪一条评论"）。 */
+export async function getForumCommentsByIds(ids: string[]): Promise<Map<string, ForumComment>> {
+  const result = new Map<string, ForumComment>();
+  const unique = Array.from(new Set(ids.filter(Boolean)));
+  if (unique.length === 0) return result;
+  const db = await openDb();
+  const tx = db.transaction(STORE_COMMENTS, 'readonly');
+  const store = tx.objectStore(STORE_COMMENTS);
+  const rows = await Promise.all(unique.map(id => reqResult<ForumComment | undefined>(store.get(id))));
+  rows.forEach(c => { if (c) result.set(c.id, c); });
+  return result;
+}
