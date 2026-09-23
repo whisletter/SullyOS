@@ -1751,6 +1751,166 @@ export async function ingestMomentThreadToPalace(
 }
 
 
+// ─── 论坛「杂波频段」归档入口 ────────────────────────
+
+export type ForumIngestResult = MomentIngestResult;
+
+/** 帖子作者是谁。决定正文的 role 和来源说明的措辞。 */
+export type ForumPostAuthorKind =
+    /** 用户本人的大号 */
+    | 'user'
+    /** 用户和这个角色共管的账号 */
+    | 'shared'
+    /** 角色自己的主号 */
+    | 'char';
+
+export interface ForumThreadIngestInput {
+    postId: string;
+    authorKind: ForumPostAuthorKind;
+    /** 已经压缩好的 3-5 句事件摘要（正文 + 本轮新增评论合并后的结果）。 */
+    summaryText: string;
+    /** 这批内容真实发生的时间（用帖子的 lastActivityAt），不是归档任务跑起来的时间。 */
+    eventTimestamp: number;
+    /** 分区中文名，比如「日常碎碎念」。给不出就省略。 */
+    topicLabel?: string;
+}
+
+/**
+ * 把一条论坛帖子（正文 + 评论的压缩摘要）塞进记忆宫殿。
+ *
+ * 为什么不继续复用 ingestMomentThreadToPalace：那个函数里 `【朋友圈动态】`、
+ * `【朋友圈评论】`、`来自【朋友圈】` 全是写死的字符串，论坛内容走它会被记成
+ * "用户发了一条朋友圈"，以后 TA 提起来就会说错地方。所以论坛单开一个入口。
+ *
+ * 跟朋友圈那版的三处差别：
+ *  1. 来源说明写的是论坛「杂波频段」，并且讲清楚"这是 TA 在公开论坛上刷到的"；
+ *  2. 作者分三种（用户大号 / 共管号 / 角色主号），措辞和 role 各不相同；
+ *  3. 多一条网名守则 —— 摘要里会有一堆陌生网名，不许把它们推断成用户本人。
+ *     没有这条，用户小号在别人帖子下面的评论会被当成"用户说的话"记进宫殿，
+ *     互相猜小号的玩法当场作废。
+ *
+ * 评论已经在压缩阶段并进 summaryText 了，所以这里只有一条 fake Message。
+ * 不负责判断"该不该归档"和"归档给谁" —— 那些在 utils/forumArchive.ts。
+ * 失败直接抛，让上层决定要不要推进水位，绝不自己吞掉异常。
+ */
+export async function ingestForumThreadToPalace(
+    char: { id: string; name: string; memoryPalaceEnabled?: boolean; embeddingConfig?: any; systemPrompt?: string; worldview?: string },
+    input: ForumThreadIngestInput,
+    lightLLMConfig: LightLLMConfig | null | undefined,
+    userName: string,
+): Promise<ForumIngestResult> {
+    if (!char.memoryPalaceEnabled) return { status: 'palace_disabled' };
+    if (!lightLLMConfig?.baseUrl || !lightLLMConfig?.apiKey) {
+        console.warn(`🏰 [ForumIngest] 跳过：lightLLM 未配置`);
+        return { status: 'lightllm_missing' };
+    }
+    const embeddingConfig = getEmbeddingConfig(char.embeddingConfig);
+    if (!embeddingConfig) {
+        console.warn(`🏰 [ForumIngest] 跳过：embedding 配置未就绪`);
+        return { status: 'embedding_missing' };
+    }
+
+    const summary = (input.summaryText || '').trim();
+    if (!summary) return { status: 'empty_input' };
+
+    const name = userName || '用户';
+    const topicPart = input.topicLabel ? `（${input.topicLabel}分区）` : '';
+
+    const headline =
+        input.authorKind === 'char'
+            ? `【论坛·杂波频段】${topicPart}我（${char.name}）自己发的帖子，以及底下的讨论：`
+            : input.authorKind === 'shared'
+                ? `【论坛·杂波频段】${topicPart}我（${char.name}）和${name}共用的那个号发的帖子，以及底下的讨论：`
+                : `【论坛·杂波频段】${topicPart}${name}发的帖子，以及底下的讨论：`;
+
+    const fakeMessages: Message[] = [{
+        id: -Math.floor(Math.random() * 1e9),
+        charId: char.id,
+        // 用户大号发的 → 用户侧内容；共管号和角色主号里都有"我"这一份 → 角色侧
+        role: input.authorKind === 'user' ? 'user' : 'assistant',
+        type: 'text',
+        content: `${headline}\n${summary}`,
+        timestamp: input.eventTimestamp,
+    } as Message];
+
+    const createdAt = input.eventTimestamp || Date.now();
+
+    let charContext = `[角色档案]\n名字: ${char.name}\n核心设定:\n${char.systemPrompt || '无'}\n`;
+    if (char.worldview?.trim()) charContext += `世界观: ${char.worldview}\n`;
+    charContext += `\n[用户档案]\n名字: ${name}\n`;
+    charContext += `\n[来源说明]\n这是来自【论坛「杂波频段」】的一次归档，不是面对面聊天。\n`;
+    charContext += `下面这段是一条论坛帖子连同它底下讨论的摘要，已经压缩过。\n`;
+    charContext += input.authorKind === 'char'
+        ? `帖子是我（${char.name}）自己在论坛上发的。\n`
+        : input.authorKind === 'shared'
+            ? `帖子是我（${char.name}）和${name}共用的那个论坛账号发的，我们俩都能用它发东西。\n`
+            : `帖子是${name}发在论坛上的，我（${char.name}）是在论坛上刷到的，不是${name}专门跑来告诉我的 —— 叙述时不要写成「${name}对我说」。\n`;
+    charContext += `\n[网名守则]\n`;
+    charContext += `论坛是公开场合，摘要里会出现各种陌生网名。除了上面已经点明是${name}或是我自己的那一个，`;
+    charContext += `其余网名一律照网名原样记，不要推断某个网名背后是谁，更不要把不认识的网名说的话写成是${name}说的。\n`;
+
+    // 相关记忆检索：跟朋友圈那条同一个理由——不做这一步 crossTimeLinks 恒为空，
+    // 同一条帖子过几天被重新翻起来评论时，新旧两批内容会散成互不相干的孤立记忆。
+    // 成本只有一次批量 embedding，不额外调 LLM。
+    let relatedMemoryRefs: RelatedMemoryRef[] = [];
+    try {
+        let snippets = splitMessagesToSpikes(fakeMessages);
+        if (snippets.length === 0) snippets = sampleSnippetsFromMessages(fakeMessages, 3, 300);
+        relatedMemoryRefs = await fetchRelatedMemoriesForExtraction(snippets, char.id, embeddingConfig);
+    } catch (e: any) {
+        console.warn(`🏰 [ForumIngest] 相关记忆检索失败（降级为无上下文提取）: ${e.message}`);
+    }
+
+    const extracted = await extractMemoriesFromBuffer(
+        fakeMessages,
+        char.id,
+        char.name,
+        lightLLMConfig,
+        charContext,
+        name,
+        relatedMemoryRefs,
+        [],
+    );
+
+    if (extracted.memories.length === 0) {
+        console.log(`🏰 [ForumIngest] 帖子 ${input.postId} 未提取出记忆节点`);
+        return { status: 'extracted_none', stored: 0, skipped: 0 };
+    }
+
+    for (const node of extracted.memories) {
+        node.createdAt = createdAt;
+        node.lastAccessedAt = createdAt;
+        node.origin = 'system';
+        // 论坛帖子 id 自带 fpost_ 前缀，跟朋友圈的动态 id 不会撞，可以直接当来源指针用
+        (node as any).sourceId = input.postId;
+    }
+
+    const remoteConfig = getRemoteVectorConfig();
+    const result = await vectorizeAndStore(extracted.memories, embeddingConfig, remoteConfig);
+    console.log(`🏰 [ForumIngest] 帖子 ${input.postId} 入宫（${char.name}）：提取 ${extracted.memories.length} 条，存储 ${result.stored}，去重跳过 ${result.skipped}`);
+
+    await applyMemorySideEffects(
+        char.id,
+        char.name,
+        extracted.memories,
+        extracted.crossTimeLinks,
+        extracted.eventBoxHints,
+        extracted.corrections,
+        embeddingConfig,
+        lightLLMConfig,
+        name,
+    );
+
+    return {
+        status: 'done',
+        stored: result.stored,
+        skipped: result.skipped,
+        nodes: extracted.memories.map(n => ({ content: n.content, room: n.room })),
+    };
+}
+
+
+
 // ─── 输入管线（AI 回复后，后台） ──────────────────────
 
 // ─── 高水位标记：记录每个角色处理到的最后消息 ID ────────
