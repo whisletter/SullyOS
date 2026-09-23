@@ -26,8 +26,8 @@ const ForumTopicPage: React.FC<Props> = ({ topicTag, onOpenPost, onRefresh }) =>
   const loadAccountsAndCounts = useCallback(async (pagePosts: db.ForumPost[]) => {
     const accounts = await db.getAllForumAccounts();
     setAccountsById(prev => { const next = new Map(prev); for (const a of accounts) next.set(a.id, a); return next; });
-    const counts = new Map<string, number>();
-    for (const p of pagePosts) counts.set(p.id, (await db.getCommentsByPost(p.id)).length);
+    // 跟主页同一套：一次事务批量数，不再逐条把评论全读出来再取 length
+    const counts = await db.getCommentCountsByPosts(pagePosts.map(p => p.id));
     setCommentCounts(prev => new Map([...prev, ...counts]));
   }, []);
 

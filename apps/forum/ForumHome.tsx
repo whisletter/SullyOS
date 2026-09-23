@@ -36,11 +36,8 @@ const ForumHome: React.FC<Props> = ({ onOpenTopic, onOpenPost }) => {
       for (const a of accounts) next.set(a.id, a);
       return next;
     });
-    const counts = new Map<string, number>();
-    for (const p of pagePosts) {
-      const comments = await db.getCommentsByPost(p.id);
-      counts.set(p.id, comments.length);
-    }
+    // 一次事务里走索引 count 数完整页，不再一条帖子一次查询（一页 15 条 = 15 次串行往返）
+    const counts = await db.getCommentCountsByPosts(pagePosts.map(p => p.id));
     setCommentCounts(prev => new Map([...prev, ...counts]));
   }, []);
 

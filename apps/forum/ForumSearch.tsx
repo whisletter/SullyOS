@@ -26,6 +26,7 @@ const ForumSearch: React.FC<Props> = ({ activeAccount, onOpenPost, onOpenProfile
   const [results, setResults] = useState<db.ForumPost[]>([]);
   const [users, setUsers] = useState<db.ForumAccount[]>([]);
   const [accountsById, setAccountsById] = useState<Map<string, db.ForumAccount>>(new Map());
+  const [commentCounts, setCommentCounts] = useState<Map<string, number>>(new Map());
   const [searched, setSearched] = useState(false);
 
   const runSearch = useCallback(async (which: Tab = tab) => {
@@ -37,6 +38,8 @@ const ForumSearch: React.FC<Props> = ({ activeAccount, onOpenPost, onOpenProfile
       setResults(posts);
       const accounts = await db.getAllForumAccounts();
       setAccountsById(new Map(accounts.map(a => [a.id, a])));
+      // 搜索结果的评论数原来写死是 0。一次事务批量数，跟主页用同一个函数。
+      setCommentCounts(await db.getCommentCountsByPosts(posts.map(p => p.id)));
     } else {
       const lower = kw.toLowerCase();
       const accounts = await db.getAllForumAccounts();
@@ -95,7 +98,7 @@ const ForumSearch: React.FC<Props> = ({ activeAccount, onOpenPost, onOpenProfile
       {tab === 'posts' && <>
         {searched && results.length === 0 && <div className="text-center py-16 text-sm opacity-50">没有找到相关帖子</div>}
         {results.map(p => (
-          <ForumPostCard key={p.id} post={p} author={accountsById.get(p.authorAccountId)} commentCount={0} onClick={() => onOpenPost(p.id)} />
+          <ForumPostCard key={p.id} post={p} author={accountsById.get(p.authorAccountId)} commentCount={commentCounts.get(p.id) || 0} onClick={() => onOpenPost(p.id)} />
         ))}
       </>}
 
