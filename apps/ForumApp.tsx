@@ -15,6 +15,7 @@ import { ensureRegulars } from '../utils/forumSocial';
 import * as social from '../utils/forumSocial';
 import { ensureCharAltAccount } from '../utils/forumCharIdentity';
 import * as ai from '../utils/forumAi';
+import { setForumUserProfile } from '../utils/forumCharContext';
 import { runForumArchivePass } from '../utils/forumArchiveRunner';
 import * as suspicion from '../utils/forumSuspicion';
 import { FORUM_DEFAULTS, type ForumTopicTag } from '../utils/forumConstants';
@@ -78,6 +79,8 @@ const ForumApp: React.FC = () => {
   const [identitySheetOpen, setIdentitySheetOpen] = useState(false);
   /** 你名下每个号（主号/小号/共管号，含已注销）各有几条没看的私信。只给你看，TA 不知道。 */
   const [dmUnreadByAccount, setDmUnreadByAccount] = useState<Map<string, number>>(new Map());
+  /** 通知未读条数。通知列表不分账号，所以这里只有一个数，不像私信要按号分开。 */
+  const [notifUnread, setNotifUnread] = useState(0);
   /** 后台任务（比如 TA 挑明）发来新私信后 +1，触发红点重新统计。 */
   const [unreadRefreshKey, setUnreadRefreshKey] = useState(0);
   const [feedRefreshKey, setFeedRefreshKey] = useState(0);
@@ -108,6 +111,18 @@ const ForumApp: React.FC = () => {
     const snap = await RealtimeContextManager.getSlottedHotNews(realtimeConfig).catch(() => null);
     return ((snap as any)?.items || []) as HotNewsItem[];
   }, [realtimeConfig]);
+
+  // ── 用户档案登记 ──
+  // 必须排在下面那个初始化 effect 前面（React 按声明顺序执行），否则后台那几次调用
+  // 起跑时档案还没登记，TA 那边会退回"只有名字"的最小档案。
+  //
+  // 登记的是 OSContext 里那份完整档案（名字 + 简介），TA 在聊天里看到的就是这一份，
+  // 论坛里六处"由 TA 出面"的调用从此拿到同一份，不用再一路传 userDisplayName。
+  // 路人 NPC 那一侧不读这个模块，拿不到你的任何档案。
+  useEffect(() => {
+    setForumUserProfile(userProfile);
+    return () => setForumUserProfile(null);
+  }, [userProfile]);
 
   // ── 初始化 ──
   // 分两段：先做纯本地的必要准备（建号、身份、设置、清扫），做完立刻显示页面；
@@ -374,6 +389,13 @@ const ForumApp: React.FC = () => {
     } catch (e: any) {
       console.warn('[Forum] 未读统计失败:', e?.message || String(e));
     }
+    // 通知未读跟私信分开算：通知不分账号（你名下任何号被回复都算），所以只有一个数。
+    try {
+      const { getForumNotificationUnreadCount } = await import('../utils/forumNotifications');
+      setNotifUnread(await getForumNotificationUnreadCount());
+    } catch (e: any) {
+      console.warn('[Forum] 通知未读统计失败:', e?.message || String(e));
+    }
   }, []);
 
   useEffect(() => {
@@ -441,7 +463,13 @@ const ForumApp: React.FC = () => {
           />
         );
       case 'notifications':
-        return <ForumNotifications activeAccount={activeAccount} onOpenPost={postId => navigate({ kind: 'post', postId })} />;
+        return (
+          <ForumNotifications
+            activeAccount={activeAccount}
+            onOpenPost={postId => navigate({ kind: 'post', postId })}
+            onReadChanged={refreshUnread}
+          />
+        );
       case 'dm':
         return (
           <ForumDm
@@ -555,6 +583,12 @@ const ForumApp: React.FC = () => {
                     <span className="absolute -top-1.5 -right-2 min-w-[16px] h-[16px] px-1 rounded-full text-[9px] font-bold flex items-center justify-center"
                           style={{ background: '#ef4444', color: '#fff' }}>
                       {activeDmUnread > 99 ? '99+' : activeDmUnread}
+                    </span>
+                  )}
+                  {item.id === 'notifications' && notifUnread > 0 && (
+                    <span className="absolute -top-1.5 -right-2 min-w-[16px] h-[16px] px-1 rounded-full text-[9px] font-bold flex items-center justify-center"
+                          style={{ background: '#ef4444', color: '#fff' }}>
+                      {notifUnread > 99 ? '99+' : notifUnread}
                     </span>
                   )}
                 </span>
