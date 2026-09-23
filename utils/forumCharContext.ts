@@ -23,21 +23,51 @@ import { buildForumContextForChar } from './forumIdentityMask';
 /** 带进论坛的主线聊天条数。只影响"认出说话习惯"，不影响人设完整性。 */
 export const FORUM_RECENT_CHAT_COUNT = 20;
 
+// ==================== 用户档案 ====================
+
+/**
+ * 当前用户档案（name + bio + avatar），由 ForumApp 在挂载时用 OSContext 里那份真档案灌进来。
+ *
+ * 为什么用模块级而不是一路传参：用户档案是"整个论坛会话期间不变的一件事"，
+ * 而需要它的调用点散在六处（私信回复、帖子评论、挑明、被对质、好友申请、共管号发帖），
+ * 其中帖子刷新和共管号发帖那两条链路上根本没有地方接得住这个参数
+ * （ForumPostDetail 只拿得到 postId，共管号发帖只拿得到 accountId）。
+ * 一路加参数要动五个 params 接口 + 三个组件，而且以后新增调用点还会再漏一次。
+ *
+ * 只写一次、只读不改，所以不存在竞态；App 卸载时置空，不把上一次的档案留给下一次。
+ */
+let currentForumUserProfile: UserProfile | null = null;
+
+/**
+ * 登记当前用户档案。ForumApp 挂载时调一次即可，其余地方不要调。
+ * 传 null/undefined 表示清空（App 卸载时用）。
+ */
+export function setForumUserProfile(profile: UserProfile | null | undefined): void {
+  currentForumUserProfile = profile && typeof profile.name === 'string' && profile.name.trim()
+    ? { ...profile }
+    : null;
+}
+
+/** 当前登记的档案，没登记过返回 null。调试/自查用，正常链路走 loadForumUserProfile。 */
+export function getRegisteredForumUserProfile(): UserProfile | null {
+  return currentForumUserProfile;
+}
+
 /**
  * 用户档案。buildCoreContext 只会用到 name 和 bio 两项（见 context.ts 的「互动对象」块）。
  *
- * 这里对 DB 的取法做了软处理：如果 utils/db.ts 里有 getUserProfile 就用真档案，
- * 没有就退回"只有名字"的最小档案，绝不因此让整条链路报错。
- * （把 db.ts 里真正的函数名告诉我，可以把这段换成直连。）
+ * 三级取法，从准到糙：
+ *   1. ForumApp 登记过的真档案（name + bio 都全，和聊天里 TA 看到的是同一份）；
+ *   2. DB.getUserProfile()（App 之外的入口，比如后台归档任务）；
+ *   3. 只有名字的最小档案，保证整条链路不因为取不到档案而报错。
  */
 export async function loadForumUserProfile(fallbackName?: string): Promise<UserProfile> {
+  if (currentForumUserProfile) return currentForumUserProfile;
+
   const fallback = { name: fallbackName || '用户', avatar: '', bio: '' } as UserProfile;
   try {
-    const anyDb = DB as any;
-    const loaded = typeof anyDb.getUserProfile === 'function' ? await anyDb.getUserProfile() : null;
-    if (loaded && typeof loaded.name === 'string' && loaded.name) {
-      return { ...loaded, name: loaded.name || fallback.name } as UserProfile;
-    }
+    const loaded = await DB.getUserProfile();
+    if (loaded && typeof loaded.name === 'string' && loaded.name) return loaded;
   } catch {
     /* 取不到就用最小档案，不影响出场 */
   }
@@ -109,7 +139,8 @@ export async function getForumCharContext(
     undefined,
     undefined,
     {
-      worldbookMessages: recentMessages as any,
+      // Message 满足 WorldbookScanMessage（role?: string / content: unknown），直接传，不用 as any。
+      worldbookMessages: recentMessages,
       conversational: true,
       lastInteractionTs,
     },

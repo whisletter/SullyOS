@@ -9,9 +9,19 @@
  * 沉寂窗口复用朋友圈同一个 DORMANCY_WINDOW_MS 常量，触发粒度跟归档保持一致
  * [交接5 二.2.2 "触发粒度跟归档一致"]，不在这里重新定义一份。
  *
- * pipeline.ts 本身不用改：ingestForumThreadToPalace 只是新起的一个薄封装，
- * 内部直接调用现成的 ingestMomentThreadToPalace（它的入参字段本来就是通用命名，
- * 不含"朋友圈专属"语义，可以直接喂论坛数据）。
+ * 归档范围 [用户确认]：只记"用户方和 TA 本人发的帖"，具体三种作者：
+ *   - 用户大号   → 记给所有开了记忆宫殿的角色（每个角色各跑一次提取，共用同一份摘要）
+ *   - 共管账号   → 只记给共管的那个角色 [用户选 A]
+ *   - 角色主号   → 只记给它自己
+ * 其余一律不记：
+ *   - 路人帖 —— 哪怕 TA 在底下评论过也不记（原来会因为 involvesCharInteraction
+ *     变成保留贴而被归档，这是本轮修掉的一处偏差）；
+ *   - 任何小号发的帖（双方的都算）—— 小号内容一旦变成长期记忆，TA 等于被直接告知
+ *     "这条是谁发的"，互相猜小号的玩法就没了。
+ *
+ * 注意：入库走的是 pipeline 里论坛专用的 ingestForumThreadToPalace，不是朋友圈那个。
+ * 之前这里是个调 ingestMomentThreadToPalace 的薄封装，结果论坛内容被记成
+ * "用户发了一条朋友圈"（那个函数里【朋友圈动态】之类是写死的字符串）。
  */
 
 import type { ForumAccount, ForumComment, ForumPost } from './forumDb';
@@ -19,7 +29,11 @@ import * as db from './forumDb';
 import { isPostRetained } from './forumFeed';
 import { getTopicLabel, type ForumTopicTag } from './forumConstants';
 import { DORMANCY_WINDOW_MS } from './momentsArchive';
-import { ingestMomentThreadToPalace, type MomentThreadIngestInput, type MomentIngestResult } from './memoryPalace/pipeline';
+import {
+  ingestForumThreadToPalace,
+  type ForumIngestResult,
+  type ForumPostAuthorKind,
+} from './memoryPalace/pipeline';
 import type { LightLLMConfig } from './memoryPalace';
 import type { CharacterProfile } from '../types';
 import { safeFetchJson } from './safeApi';
@@ -113,59 +127,68 @@ export async function compressForumThreadForArchive(
   return raw.length > SUMMARY_MAX_CHARS ? `${raw.slice(0, SUMMARY_MAX_CHARS)}…` : raw;
 }
 
-// ==================== 三、新起的薄封装：ingestForumThreadToPalace ====================
+// ==================== 三、归档范围：谁发的帖子记给谁 ====================
 
 /**
- * [交接5 二.2.2] "结构照抄 ingestMomentThreadToPalace"——直接调用现成函数，
- * 每一轮都把这一轮的压缩摘要当作一条独立 fake message 喂进去（includeBodyAsMessage
- * 恒为 true，因为每轮摘要内容本来就只覆盖这一轮的新增部分，不是要反复重喂同一段原文）。
+ * 这个账号发的帖子该不该归档，以及算哪一类作者。
+ *
+ * 判定只看**发帖的那个账号**，不看评论区里有谁。这是跟旧版最大的差别：旧版会顺着
+ * 评论去找第一个角色账号，于是 TA 随手在路人帖下面留一句，那条路人帖就被记进它的
+ * 长期记忆了。
  */
-export async function ingestForumThreadToPalace(
-  char: { id: string; name: string; memoryPalaceEnabled?: boolean; embeddingConfig?: any; systemPrompt?: string; worldview?: string },
-  postId: string,
-  summaryText: string,
-  postAuthorIsUser: boolean,
-  eventTimestamp: number,
-  lightLLMConfig: LightLLMConfig | null | undefined,
-  userName: string,
-): Promise<MomentIngestResult> {
-  const input: MomentThreadIngestInput = {
-    postId,
-    postAuthorIsUser,
-    postBodyText: summaryText,
-    postCreatedAt: eventTimestamp,
-    includeBodyAsMessage: true,
-    comments: [], // 已经在压缩阶段把评论并进 summaryText 里了，这里不重复传
-  };
-  return ingestMomentThreadToPalace(char, input, lightLLMConfig, userName);
+export function classifyArchivableAuthor(
+  account: ForumAccount | undefined,
+): ForumPostAuthorKind | null {
+  if (!account) return null;
+  if (account.isAlt) return null;           // 小号发的帖，双方的都不记
+  if (account.ownerType === 'user') return 'user';
+  if (account.ownerType === 'shared') return account.charId ? 'shared' : null;
+  if (account.ownerType === 'char') return account.charId ? 'char' : null;
+  return null;                              // npc：路人帖，不记
 }
 
 // ==================== 四、归档执行 ====================
 
 export interface ForumArchiveContext {
   getCharacterProfile: (charId: string) => (CharacterProfile & { memoryPalaceEnabled?: boolean; embeddingConfig?: any }) | undefined;
+  /**
+   * 当前所有"开了记忆宫殿 + 自动归档"的角色。用户大号发的帖子要记给他们每一个。
+   * 由 forumArchiveRunner 传进来，这里不自己查角色库。
+   */
+  listArchiveTargetChars: () => (CharacterProfile & { memoryPalaceEnabled?: boolean; embeddingConfig?: any })[];
   lightLLM?: LightLLMConfig | null;
   userName: string;
 }
 
 export type ForumArchiveOutcome = 'archived' | 'skipped' | 'not_ready' | 'no_target_char';
 
-/** 找这条帖子归档时该记进哪个角色的记忆宫殿：author 优先，否则找评论里第一个 char/shared 账号。 */
-function resolveTargetCharId(
-  post: ForumPost,
-  comments: ForumComment[],
-  accountsById: Map<string, ForumAccount>,
-): string | null {
-  const author = accountsById.get(post.authorAccountId);
-  if (author && (author.ownerType === 'char' || author.ownerType === 'shared') && author.charId) {
-    return author.charId;
+type TargetChar = CharacterProfile & { memoryPalaceEnabled?: boolean; embeddingConfig?: any };
+
+/**
+ * 这条帖子要记进哪几个角色的宫殿。
+ *
+ * - 用户大号发的 → 所有开了记忆的角色 [用户确认]。你在论坛上说的话，每个记得你的
+ *   角色都该知道，不该只有碰巧路过评论的那一个记得。
+ * - 共管账号发的 → 只记给共管的那个角色 [用户选 A]。那个号本来就是你和它两个人的，
+ *   跟第三个角色没关系。
+ * - 角色主号发的 → 只记给它自己。
+ */
+function resolveTargetChars(
+  authorKind: ForumPostAuthorKind,
+  authorAccount: ForumAccount,
+  ctx: ForumArchiveContext,
+): TargetChar[] {
+  if (authorKind === 'user') {
+    return ctx.listArchiveTargetChars().filter(c => !!c.id);
   }
-  for (const c of comments) {
-    const acc = accountsById.get(c.authorAccountId);
-    if (acc && (acc.ownerType === 'char' || acc.ownerType === 'shared') && acc.charId) return acc.charId;
-  }
-  return null; // 纯路人帖子，没有任何 char/shared 账号参与，没有对应的记忆宫殿可记
+  const charId = authorAccount.charId;
+  if (!charId) return [];
+  const char = ctx.getCharacterProfile(charId);
+  return char ? [char] : [];
 }
+
+const isNotReady = (status: ForumIngestResult['status']): boolean =>
+  status === 'palace_disabled' || status === 'lightllm_missing' || status === 'embedding_missing';
 
 export async function archiveForumPost(postId: string, ctx: ForumArchiveContext): Promise<ForumArchiveOutcome> {
   const post = await db.getForumPost(postId);
@@ -179,29 +202,46 @@ export async function archiveForumPost(postId: string, ctx: ForumArchiveContext)
   const accounts = await db.getAllForumAccounts();
   const accountsById = new Map(accounts.map(a => [a.id, a]));
 
-  const targetCharId = resolveTargetCharId(post, allComments, accountsById);
-  if (!targetCharId) {
-    // 没有可记的对象：水位照样推进，避免这条纯路人帖子被反复扫描判定为"待归档"。
+  const authorAccount = accountsById.get(post.authorAccountId);
+  const authorKind = classifyArchivableAuthor(authorAccount);
+
+  // 先定归档对象再压缩。顺序反过来的话，一条没人可记的帖子会白烧一次 LightLLM。
+  const targets = authorKind && authorAccount ? resolveTargetChars(authorKind, authorAccount, ctx) : [];
+  if (!authorKind || targets.length === 0) {
+    // 没有可记的对象：水位照样推进，避免它被反复扫描判定为"待归档"、反复占掉处理名额。
     const latest = await db.getForumPost(postId);
     if (latest) await db.saveForumPost({ ...latest, memoryArchivedUntil: post.lastActivityAt });
     return 'no_target_char';
   }
 
-  const char = ctx.getCharacterProfile(targetCharId);
-  if (!char) return 'no_target_char';
-
+  // 压缩只跑一次，所有目标角色共用同一份摘要。真正按角色各跑一次的是后面的记忆提取。
   const summary = await compressForumThreadForArchive(post, pending, accountsById, ctx.lightLLM);
+  const topicLabel = getTopicLabel(post.topicTag as ForumTopicTag);
 
-  const authorAccount = accountsById.get(post.authorAccountId);
-  const postAuthorIsUser = authorAccount?.ownerType === 'user' || authorAccount?.ownerType === 'shared';
-
-  const result = await ingestForumThreadToPalace(
-    char, post.id, summary, postAuthorIsUser, post.lastActivityAt, ctx.lightLLM, ctx.userName,
-  );
-
-  if (result.status === 'palace_disabled' || result.status === 'lightllm_missing' || result.status === 'embedding_missing') {
-    return 'not_ready'; // 配置没就绪：不推进水位，等配好了下次扫描重新扫到
+  let ingestedAny = false;
+  for (const char of targets) {
+    try {
+      const result = await ingestForumThreadToPalace(
+        char,
+        {
+          postId: post.id,
+          authorKind,
+          summaryText: summary,
+          eventTimestamp: post.lastActivityAt,
+          topicLabel,
+        },
+        ctx.lightLLM,
+        ctx.userName,
+      );
+      if (!isNotReady(result.status)) ingestedAny = true;
+    } catch (e: any) {
+      // 单个角色失败不该拖垮其他角色。整条任务的失败与否由 ingestedAny 决定。
+      console.warn(`[ForumArchive] 帖子 ${post.id} 记入 ${char.name} 失败:`, e?.message || String(e));
+    }
   }
+
+  // 一个角色都没记进去（全是配置没就绪或全失败）：不推进水位，等配好了下次扫描重新扫到。
+  if (!ingestedAny) return 'not_ready';
 
   const waterline = Math.max(post.memoryArchivedUntil || 0, post.lastActivityAt);
   const latest = await db.getForumPost(postId);
@@ -225,16 +265,20 @@ export async function sweepDormantForumPosts(
 
   const all = await db.getForumPostsRaw();
 
-  // [用户确认] 双方小号发的帖子不进记忆宫殿。小号内容一旦变成长期记忆，TA 等于被
-  // 直接告知"这条是谁发的"，互相猜小号的玩法就没了；TA 自己小号发的同理，那是它
-  // 私下的行为，不该沉淀成主线记忆。
-  // 注意只看"作者"：小号在别人帖子下面的评论照常参与归档，那只是一个网名在说话，
-  // 不暴露身份。
+  // [用户确认] 只有用户大号、共管账号、角色主号发的帖子会进记忆宫殿。
+  //
+  // 路人帖不进：哪怕 TA 在底下评论过（那会让帖子因 involvesCharInteraction 变成保留贴），
+  // 那也只是它随手刷到的东西，不该沉淀成长期记忆。
+  // 小号发的帖不进（双方的都是）：小号内容一旦变成长期记忆，TA 等于被直接告知
+  // "这条是谁发的"，互相猜小号的玩法就没了。
+  //
+  // 注意只看"作者"：小号在别人帖子下面的**评论**照常参与归档，那只是一个网名在说话，
+  // 不暴露身份——pipeline 那边的网名守则会确保它不被推断成用户本人。
   const accounts = await db.getAllForumAccounts();
-  const altAccountIds = new Set(accounts.filter(a => a.isAlt).map(a => a.id));
+  const accountsById = new Map(accounts.map(a => [a.id, a]));
 
   const due = all
-    .filter(p => !altAccountIds.has(p.authorAccountId))
+    .filter(p => classifyArchivableAuthor(accountsById.get(p.authorAccountId)) !== null)
     .filter(p => shouldArchiveForumPost(p, now))
     .slice(0, MAX_ENQUEUE_PER_SWEEP);
 

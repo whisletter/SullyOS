@@ -515,6 +515,16 @@ ${buildSharedForumHardRules()}
 - 用小号发言时，语气和关注点要贴着小号自己的定位走，不要写得跟主号一模一样，
   更不要在正文里暗示"其实我是某某"——论坛上没人知道那个号是谁。
 
+=== 路人与角色的信息隔离（硬性约束） ===
+上面那份角色人设**只在替这个角色本人发言时**才能用。写路人账号的评论时，你要当作
+自己从来没读过那一块：
+- 路人不知道这个角色是谁、叫什么、认识谁、跟谁私下聊过什么，也不知道任何人的真名或简介。
+- 路人评论里不允许出现角色人设块里的任何信息——人名、称呼、简介内容、你们私下聊过的事、
+  角色对某个人的看法，一律不行。哪怕是"听说你跟某某很熟"这种暗示也不行。
+- 路人能看到的只有：这条帖子的标题正文、上面那份评论区里实际出现过的话、以及路人账号池里
+  给出的账号信息。除此之外一无所知。
+- 角色本人发言时同样不要在论坛上复述私下聊过的内容——论坛是公开场合，别人看得见。
+
 === 产出数量 ===
 - 新增装饰性评论：${newCommentCount} 条。
 - 垫底楼回复：上面列出几条就产出几条，threadRootId 必须精确对应。
@@ -1037,15 +1047,37 @@ export async function runSharedAccountExclusivePost(params: RunSharedAccountExcl
   const ctx = account.charId ? await getForumCharContext(account.charId) : null;
   const user = ctx?.user || await loadForumUserProfile();
 
+  // 这个号的档案每次生成时现读（上面那句 getForumAccount 就是从库里现取的），所以
+  // 你在共管号主页改完签名，下一条自动动态立刻按新的来，不用重启也不用改代码。
+  // 内容一个字都不写死：签名写什么、要不要写，全由你在界面上定。
+  const sharedProfileLines: string[] = [
+    `- 账号名：${account.displayName}（@${account.handle}）`,
+  ];
+  if (account.bio && account.bio.trim()) {
+    sharedProfileLines.push(`- 这个号的签名：${account.bio.trim()}`);
+    sharedProfileLines.push(
+      `  （签名是你和${user.name}给这个号定下的调性，论坛上谁都看得到。`
+      + `如果它写明了这个号该发什么、不该发什么、用什么口气，就照着走；`
+      + `如果它只是一句普通的签名，那就当成这个号的底色，别跟它拧着来。）`,
+    );
+  } else {
+    sharedProfileLines.push(`- 这个号还没写签名，调性由你自己拿捏。`);
+  }
+  if (account.avatar) sharedProfileLines.push(`- 这个号有自己的头像。`);
+  if (account.banner) sharedProfileLines.push(`- 这个号有自己的封面图。`);
+
   const prompt = `
 ${ctx?.text || ''}
+
+=== 这个共管账号 ===
+${sharedProfileLines.join('\n')}
 
 === 现在这件事 ===
 现在是 ${bandLabel} 这个时段。你要用共管账号"${account.displayName}"（handle=${account.handle}）发一条动态。
 这个号是你和${user.name}共同使用的，论坛上所有人都看得到你们用它发的东西。
 
 写什么由你定：可以是你们俩之间的日常、你此刻在做的事、你想说给${user.name}听又不介意别人看到的话。
-按你们现在的关系和你自己的性格写——不要写成一段谁都能发的通用动态。
+按你们现在的关系、你自己的性格，以及上面那个号定下的调性来写——不要写成一段谁都能发的通用动态。
 也不要在里面写论坛上没人该知道的事（你们私下聊过的细节、你另外那个小号之类）。
 
 === 可用的装饰性评论/点赞账号池（路人，随便谁来留两句）===

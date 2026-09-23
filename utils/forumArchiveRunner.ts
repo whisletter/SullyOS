@@ -64,9 +64,14 @@ export async function runForumArchivePass(params: RunForumArchiveParams): Promis
 
   const byId = new Map(enabled.map(c => [c.id, c]));
   const ctx: ForumArchiveContext = {
-    // 只认开了宫殿+自动归档的角色。没开的角色即使参与了讨论也拿不到 profile，
+    // 只认开了宫殿+自动归档的角色。没开的角色即使发过帖也拿不到 profile，
     // 归档会判成 no_target_char 并推进水位跳过，不会反复重扫。
     getCharacterProfile: (charId: string) => byId.get(charId) as any,
+    // 你大号发的帖记给所有开了记忆的角色 [用户确认]。这里的"所有"是**开关口径**，
+    // 不是"聊过天的口径"：只跟角色身上 memoryPalaceEnabled + autoArchiveEnabled
+    // 两个开关有关，跟你有没有跟它说过话无关。只开了一个角色的话这里就是一个人，
+    // 调用次数跟以前一模一样。
+    listArchiveTargetChars: () => enabled as any,
     lightLLM,
     userName,
   };
