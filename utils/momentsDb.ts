@@ -475,3 +475,75 @@ export async function importMomentsAll(backup: MomentsBackupData): Promise<void>
     await putOne(STORE_SETTINGS, s);
   }
 }
+
+// ==================== Blob 引用面（给 blobGc / blobDedupe 用） ====================
+
+/**
+ * 朋友圈库里「可能存着 blobref 令牌」的表。
+ *
+ * 朋友圈用的是自己的 IndexedDB（SullyOS_Moments），**不在主库里**，所以
+ * utils/blobGc.ts 的 REF_SOURCE_STORES 那份清单扫不到这里。
+ * post.images（相册选的图）、post.article.image（抓来的封面）、settings 里的
+ * 封面图，存的都可能是令牌。这几张表要是不单独吐给 GC，它们引用的图会在下一轮
+ * 「孤儿图片清理」里被判成没人引用直接删掉，**而且不可逆**。
+ *
+ * 同样的清单 blobDedupe 也要用（读+写）：合并重复令牌时漏改这里，
+ * 朋友圈里那份被合并掉的令牌就会指向一个随后被回收的 Blob，变成裂图。
+ *
+ * 往朋友圈加新表、或者把令牌写进新字段时，先回来过一眼这份清单。
+ * 枚举是整行 JSON.stringify / 整行改写，字段增删自动覆盖，不用按字段维护。
+ */
+export const MOMENTS_BLOB_REF_STORES = [
+  STORE_POSTS,
+  STORE_SETTINGS,
+] as const;
+
+export type MomentsBlobRefStore = typeof MOMENTS_BLOB_REF_STORES[number];
+
+/**
+ * 按主键分页读一页原始行，口径对齐 forumDb.getForumRowsPage 和主库的
+ * DB.getStoreRowsPage：afterKey 为 null 从头开始，返回 lastKey 供下一页续读，
+ * 读完返回 lastKey: null。分页而不是 getAll，是因为动态表可能很大。
+ */
+export async function getMomentsRowsPage(
+  storeName: MomentsBlobRefStore,
+  afterKey: IDBValidKey | null,
+  limit: number,
+): Promise<{ rows: unknown[]; lastKey: IDBValidKey | null }> {
+  const db = await openDb();
+  if (!db.objectStoreNames.contains(storeName)) return { rows: [], lastKey: null };
+  const tx = db.transaction(storeName, 'readonly');
+  const store = tx.objectStore(storeName);
+  const range = afterKey === null ? undefined : IDBKeyRange.lowerBound(afterKey, true);
+  const rows: unknown[] = [];
+  let lastKey: IDBValidKey | null = null;
+
+  await new Promise<void>((resolve, reject) => {
+    const req = store.openCursor(range);
+    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      const cursor = req.result;
+      if (!cursor || rows.length >= limit) { resolve(); return; }
+      rows.push(cursor.value);
+      lastKey = cursor.key;
+      cursor.continue();
+    };
+  });
+
+  return { rows, lastKey: rows.length < limit ? null : lastKey };
+}
+
+/** 整行写回（令牌合并用）。这两张表都是 inline keyPath: 'id'，可以直接 put。 */
+export async function putMomentsRows(storeName: MomentsBlobRefStore, rows: unknown[]): Promise<void> {
+  if (rows.length === 0) return;
+  const db = await openDb();
+  if (!db.objectStoreNames.contains(storeName)) return;
+  const tx = db.transaction(storeName, 'readwrite');
+  const store = tx.objectStore(storeName);
+  for (const row of rows) store.put(row);
+  await new Promise<void>((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('putMomentsRows aborted'));
+  });
+}

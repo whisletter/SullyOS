@@ -10,7 +10,7 @@
 //
 // ─── 引用面与 GC 同源 ───
 // 面的清单直接复用 blobGc 的 REF_SOURCE_STORES + 论坛库 FORUM_BLOB_REF_STORES +
-// localStorage 全量，两边永远一致：
+// 朋友圈库 MOMENTS_BLOB_REF_STORES + localStorage 全量，两边永远一致：
 // GC 能 mark 到的地方，这里就能改写到（blobDedupe.test.ts 有守卫钉这条）。
 // 万一漏了某个面，那个面会继续指着旧令牌 —— 旧 Blob 因此仍被引用、GC 也不会删它，
 // 方向是安全的（少省一点空间，不会破图）。
@@ -31,6 +31,7 @@ import { DB } from './db';
 import { BLOBREF_PREFIX, getBlobForRef } from './blobRef';
 import { REF_SOURCE_STORES } from './blobGc';
 import { FORUM_BLOB_REF_STORES, getForumRowsPage, putForumRows } from './forumDb';
+import { MOMENTS_BLOB_REF_STORES, getMomentsRowsPage, putMomentsRows } from './momentsDb';
 
 // 与 blobGc 的分页大小同值：批间事务各自独立，内存峰值只有一批。
 const PAGE_SIZE = 200;
@@ -181,6 +182,28 @@ export async function rewriteBlobRefs(
             }
             if (dirty.length > 0) {
                 await putForumRows(storeName, dirty);
+                result.rewrittenRows += dirty.length;
+            }
+            opts.onProgress?.(result.scannedRows);
+            if (lastKey === null || rows.length < PAGE_SIZE) break;
+            afterKey = lastKey;
+        }
+    }
+
+    // ── 朋友圈面：也是独立的 IndexedDB（SullyOS_Moments），跟论坛同样的理由 ──
+    // 合并时漏改这里，朋友圈里那份被合并掉的令牌就会指向一个随后被 GC 回收的 Blob，变成裂图。
+    for (const storeName of MOMENTS_BLOB_REF_STORES) {
+        let afterKey: IDBValidKey | null = null;
+        for (;;) {
+            const { rows, lastKey } = await getMomentsRowsPage(storeName, afterKey, PAGE_SIZE);
+            const dirty: unknown[] = [];
+            for (const row of rows) {
+                result.scannedRows++;
+                if (!row || typeof row !== 'object') continue;
+                if (rewriteRefsDeep(row as object, mapping, new WeakSet(), result.mergedRefs)) dirty.push(row);
+            }
+            if (dirty.length > 0) {
+                await putMomentsRows(storeName, dirty);
                 result.rewrittenRows += dirty.length;
             }
             opts.onProgress?.(result.scannedRows);

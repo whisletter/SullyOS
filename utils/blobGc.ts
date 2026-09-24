@@ -45,6 +45,8 @@
 // 这些面，就会把还被老帖子引用着的图判成孤儿删掉——所以它们必须在清单里，哪怕平时为空。
 // | 论坛库 SullyOS_Forum | accounts(avatar/banner) / posts(images) / comments / dm_messages |
 // |                     | 论坛自己的 IndexedDB，不在主库里，单独分页逐行吐 |
+// | 朋友圈库 SullyOS_Moments | posts(images / article.image) / settings(封面图) |
+// |                        | 同上，也是独立库，单独分页逐行吐 |
 // | localStorage 全量值 | tama_board_img_<charId> 与旧单键 / acnh_wallpaper_backup /
 // |                     | sully-call-fake-camera-image-v1 / os_theme（JSON，令牌不剥）等 | 先同步快照再逐条吐 value |
 //
@@ -58,6 +60,7 @@
 import { DB } from './db';
 import { blobStore } from './blobStore';
 import { FORUM_BLOB_REF_STORES, getForumRowsPage } from './forumDb';
+import { MOMENTS_BLOB_REF_STORES, getMomentsRowsPage } from './momentsDb';
 import { tryAcquireMaintenanceLock, releaseMaintenanceLock, currentMaintenanceHolder } from './maintenanceLock';
 
 // 引用面里的 17 张表。名字与 db.ts 的 STORE_* 常量值一一对应
@@ -119,6 +122,24 @@ async function* iterateRefSources(): AsyncGenerator<string> {
         let afterKey: IDBValidKey | null = null;
         for (;;) {
             const { rows, lastKey } = await getForumRowsPage(storeName, afterKey, PAGE_SIZE);
+            for (const row of rows) {
+                const text = JSON.stringify(row);
+                if (typeof text === 'string') yield text;
+            }
+            if (lastKey === null || rows.length < PAGE_SIZE) break;
+            afterKey = lastKey;
+        }
+    }
+
+    // 朋友圈面：朋友圈也在自己的 IndexedDB（SullyOS_Moments）里，跟论坛同一个问题——
+    // 上面那圈 REF_SOURCE_STORES 扫的是主库，扫不到它。post.images（相册选的图）、
+    // post.article.image（抓来的封面）、settings 里的封面图存的都可能是令牌，
+    // 漏掉这里 = 用户还在用的朋友圈图会被当孤儿删掉，不可逆。
+    // 表清单在 momentsDb 的 MOMENTS_BLOB_REF_STORES。
+    for (const storeName of MOMENTS_BLOB_REF_STORES) {
+        let afterKey: IDBValidKey | null = null;
+        for (;;) {
+            const { rows, lastKey } = await getMomentsRowsPage(storeName, afterKey, PAGE_SIZE);
             for (const row of rows) {
                 const text = JSON.stringify(row);
                 if (typeof text === 'string') yield text;
