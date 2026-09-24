@@ -47,7 +47,41 @@ export interface ForumApiConfig {
 
 const AI_MAX_RETRIES = 2;
 
-async function callForumAI(apiConfig: ForumApiConfig, systemPrompt: string, purpose: string): Promise<string> {
+/**
+ * 发给模型的一张图。url 是 data URL（本地相册图解析出来的）或 http(s) 外链。
+ */
+export interface ForumPromptImage {
+  url: string;
+}
+
+/**
+ * 带图请求会被某些不支持视觉的模型直接 400 拒掉。这个错误跟网络错误不一样，
+ * 重试多少次都是同样的结果，所以单独认出来，退回纯文本再跑一次——宁可这次的评论
+ * 没看见图，也不能让"刷新"这个按钮在换了个模型之后整个不能用。
+ */
+function looksLikeVisionUnsupported(e: any): boolean {
+  const msg = String(e?.message || e || '').toLowerCase();
+  return msg.includes('image')
+    || msg.includes('vision')
+    || msg.includes('multimodal')
+    || msg.includes('content must be a string')
+    || msg.includes('invalid_request');
+}
+
+async function callForumAI(
+  apiConfig: ForumApiConfig,
+  systemPrompt: string,
+  purpose: string,
+  images?: ForumPromptImage[],
+): Promise<string> {
+  // 没图就是原来那条路，一个字节都不变。
+  const content: any = (images && images.length > 0)
+    ? [
+        { type: 'text', text: systemPrompt },
+        ...images.map(img => ({ type: 'image_url', image_url: { url: img.url } })),
+      ]
+    : systemPrompt;
+
   let lastError: Error | null = null;
   for (let attempt = 0; attempt <= AI_MAX_RETRIES; attempt++) {
     try {
@@ -58,7 +92,7 @@ async function callForumAI(apiConfig: ForumApiConfig, systemPrompt: string, purp
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
           body: JSON.stringify({
             model: apiConfig.model,
-            messages: [{ role: 'user', content: systemPrompt }],
+            messages: [{ role: 'user', content }],
             temperature: 0.9, max_tokens: 8192, stream: false,
             response_format: { type: 'json_object' },
           }),
@@ -68,6 +102,11 @@ async function callForumAI(apiConfig: ForumApiConfig, systemPrompt: string, purp
       return data?.choices?.[0]?.message?.content?.trim() || '';
     } catch (e: any) {
       lastError = e;
+      // 带图被拒：立刻退回纯文本重跑一次，不占用重试次数
+      if (images && images.length > 0 && looksLikeVisionUnsupported(e)) {
+        console.warn('[ForumAi] 模型似乎不支持带图请求，退回纯文本重试:', e?.message || String(e));
+        return callForumAI(apiConfig, systemPrompt, purpose);
+      }
       const isNetwork = e?.name === 'AbortError' || e?.message?.includes('fetch') || e?.message?.includes('network');
       if (isNetwork && attempt < AI_MAX_RETRIES) {
         await new Promise(r => setTimeout(r, (attempt + 1) * 2000));
@@ -77,6 +116,43 @@ async function callForumAI(apiConfig: ForumApiConfig, systemPrompt: string, purp
     }
   }
   throw lastError || new Error('论坛AI请求失败');
+}
+
+/**
+ * 把帖子的配图解析成能塞进请求的 data URL。
+ *
+ * 只处理本地相册图（blobref 令牌）和已经内嵌的 data URL。http(s) 外链不送——让模型
+ * 自己去拉一张外网图，慢、可能超时，而且用户说了不会传网图。真有外链时在提示词里
+ * 注一句有这么张图就够了。
+ *
+ * 解析不出来的（图已经被清理掉了）静默跳过，不让一张死图把整次刷新搞挂。
+ */
+async function resolvePostImagesForPrompt(
+  images: string[] | undefined,
+  limit: number,
+): Promise<{ sent: ForumPromptImage[]; skippedRemote: number; skippedBroken: number }> {
+  const sent: ForumPromptImage[] = [];
+  let skippedRemote = 0;
+  let skippedBroken = 0;
+  if (!images || images.length === 0 || limit <= 0) return { sent, skippedRemote, skippedBroken };
+
+  const { isBlobRef, resolveRefToDataUrl } = await import('./blobRef');
+
+  for (const value of images) {
+    if (sent.length >= limit) break;
+    if (typeof value !== 'string' || !value) continue;
+    if (value.startsWith('data:')) { sent.push({ url: value }); continue; }
+    if (/^https?:\/\//i.test(value)) { skippedRemote += 1; continue; }
+    if (!isBlobRef(value)) { skippedBroken += 1; continue; }
+    try {
+      const dataUrl = await resolveRefToDataUrl(value);
+      if (dataUrl) sent.push({ url: dataUrl });
+      else skippedBroken += 1;
+    } catch {
+      skippedBroken += 1;
+    }
+  }
+  return { sent, skippedRemote, skippedBroken };
 }
 
 function pickInRange([min, max]: [number, number]): number {
@@ -484,6 +560,31 @@ export async function runPostRefresh(params: RunPostRefreshParams): Promise<void
     return `- threadRootId=${f.threadRootId}，这楼最新一条是 ${who} 说的："${f.latestComment.content}"`;
   }).join('\n') || '（无）';
 
+  // 配图：全给它看（帖子最多 9 张）。[用户确认] 宁可慢一点也要让评论对得上图。
+  // 本地相册图解析成 data URL 直接进请求；外链不送（用户不传网图，真有也只在文里提一句）。
+  const { sent: promptImages, skippedRemote, skippedBroken } =
+    await resolvePostImagesForPrompt(post.images, FORUM_DEFAULTS.postRefreshMaxImages);
+
+  const imageNote = (() => {
+    const lines: string[] = [];
+    if (promptImages.length > 0) {
+      lines.push(`这条帖子配了 ${promptImages.length} 张图，已经附在这条消息后面，你能直接看到。`);
+      lines.push('评论时可以针对图里的内容说话——夸、吐槽、问细节、玩梗都行。');
+      lines.push('但不要每条评论都提图，那样很假；就像真人刷到一张照片那样，有人说图、有人只说文字。');
+      lines.push('也不要描述图里明显没有的东西。看不清的就别硬写。');
+    }
+    if (skippedRemote > 0) {
+      lines.push(`另外还有 ${skippedRemote} 张是网图，没给你看，只知道有这么几张。`);
+    }
+    if (skippedBroken > 0) {
+      lines.push(`还有 ${skippedBroken} 张图已经打不开了，当它们不存在。`);
+    }
+    if (lines.length === 0 && post.images && post.images.length > 0) {
+      lines.push(`这条帖子配了 ${post.images.length} 张图，但这次没能给你看到，所以别去评论图的内容。`);
+    }
+    return lines.length > 0 ? `\n=== 这条帖子的配图 ===\n${lines.join('\n')}\n` : '';
+  })();
+
   const prompt = `
 你是这个论坛帖子的"评论区生成器"。这次刷新要做两件事，一次性完成：
 1) 给这条帖子补一批新的路人装饰性评论/立场发言（不针对下面的垫底楼，是普通的新增热闹）；
@@ -495,7 +596,7 @@ ${charBlocks.join('\n\n') || '（这次没有具体角色在场，只有路人�
 作者：${postAuthor ? `@${postAuthor.handle}（${postAuthor.displayName}）` : '@已注销用户'}
 标题：${post.title}
 正文：${post.content}
-
+${imageNote}
 === 目前的评论区（按时间从旧到新，每条前面是发言的网名）===
 ${renderCommentSection(allComments, accountsById, { floorLabels })}
 
@@ -556,7 +657,7 @@ ${buildSharedForumHardRules()}
 }
 `.trim();
 
-  const raw = await callForumAI(apiConfig, prompt, '论坛帖子刷新合并生成');
+  const raw = await callForumAI(apiConfig, prompt, '论坛帖子刷新合并生成', promptImages);
   const parsed = extractJson<any>(raw);
 
   const now = Date.now();

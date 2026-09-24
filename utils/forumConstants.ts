@@ -182,9 +182,16 @@ export const FORUM_DEFAULTS = {
   manualRefreshPostRange: [4, 6] as [number, number],
   /** 单条帖子生成时，配的装饰性评论数区间（无论自然触发还是手动刷新）[交接4 一]。 */
   postCommentRange: [0, 4] as [number, number],
-  /** 帖子右上角"刷新"按钮：这次顺手生成的新装饰性评论数区间（不含垫底回复）。
-   *  五份交接报告没有给出明确数值，这里给一个与首次生成一致的保守默认，可调。 */
-  postRefreshNewCommentRange: [2, 5] as [number, number],
+  /** 帖子右上角"刷新"按钮：这次顺手生成的新**主楼**评论数（不含垫底回复、不含楼中楼）。
+   *  [用户确认] 从原来的 2-5 条提到固定 5 条——一次刷新只出三两句太冷清。 */
+  postRefreshNewCommentRange: [5, 5] as [number, number],
+  /** 这 5 条主楼里，有几条底下会有人接话（随机挑，不是每条都有，那样太整齐）。 */
+  postRefreshRepliedFloorRange: [2, 3] as [number, number],
+  /** 有人接话的那几条主楼，各自带几条楼中楼回复。 */
+  postRefreshSubCommentRange: [1, 3] as [number, number],
+  /** 刷新评论区时，最多把帖子的几张配图一起送给模型看。
+   *  [用户确认] 全给——帖子本来就最多 9 张。嫌慢或嫌贵就把这个数字调小。 */
+  postRefreshMaxImages: 9,
   /** 论坛热度滑动条范围 [交接4 三.3 / 交接5 4.12]：1-10，用户自定，此为初始默认值。 */
   defaultHeatLevel: 5,
   heatLevelMin: 1,
