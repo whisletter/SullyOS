@@ -1,14 +1,18 @@
-import React, { useEffect, useState } from 'react';
-import { PencilSimple, SealCheck } from '@phosphor-icons/react';
+import React, { useCallback, useEffect, useState } from 'react';
+import { PencilSimple, SealCheck, ArrowsClockwise } from '@phosphor-icons/react';
 import * as db from '../../utils/forumDb';
 import { isUserSideAccount } from '../../utils/forumFeed';
 import ForumPostCard from './ForumPostCard';
 import ForumEditProfile from './ForumEditProfile';
 import ForumRelationButton from './ForumRelationButton';
+import * as ai from '../../utils/forumAi';
+import { useOS } from '../../context/OSContext';
 import TokenImg from '../../components/os/TokenImg';
 
 interface Props {
   accountId: string;
+  /** 论坛实际使用的 API（可能是论坛专用那套）。批量配评论要用。 */
+  apiConfig?: { baseUrl: string; apiKey: string; model: string };
   /** 当前使用中的身份账号 id —— 关系（好友/拉黑）是挂在身份上的，不是挂在"人"上。 */
   myAccountId: string;
   onOpenPost: (postId: string) => void;
@@ -26,7 +30,8 @@ const AVATAR_BOTTOM = -22;
  *  [用户确认：改版排版] 头图区照搬朋友圈的封面样式——背景图铺满、头像+昵称压右下角
  *  探出一截，签名/簡介跟在探出区域下面；没有背景图时用深色渐变兜底，白字在哪种情况
  *  下都不会花。 */
-const ForumProfile: React.FC<Props> = ({ accountId, myAccountId, onOpenPost, readOnly }) => {
+const ForumProfile: React.FC<Props> = ({ accountId, myAccountId, onOpenPost, readOnly, apiConfig }) => {
+  const { addToast } = useOS();
   const [account, setAccount] = useState<db.ForumAccount | null>(null);
   const [posts, setPosts] = useState<db.ForumPost[]>([]);
   const [loading, setLoading] = useState(true);
@@ -37,6 +42,7 @@ const ForumProfile: React.FC<Props> = ({ accountId, myAccountId, onOpenPost, rea
   const [myComments, setMyComments] = useState<db.ForumComment[]>([]);
   const [commentPosts, setCommentPosts] = useState<Map<string, db.ForumPost>>(new Map());
   const [commentsLoaded, setCommentsLoaded] = useState(false);
+  const [batchCommenting, setBatchCommenting] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -74,7 +80,40 @@ const ForumProfile: React.FC<Props> = ({ accountId, myAccountId, onOpenPost, rea
   if (loading) return <div className="text-center py-16 text-sm opacity-50">加载中…</div>;
   if (!account) return <div className="text-center py-16 text-sm opacity-50">账号不存在</div>;
 
+  /**
+   * 一次性给这个号名下「还没有评论」的帖子配上评论（最多 3 条，每条 3-5 句）。
+   * 跟帖子详情页那个刷新是两件事：那个是"我在看这条，让它热闹起来"，
+   * 这个是"我一口气发了好几条，先都有点动静"。只有路人来评论，不拉 TA 参与——
+   * TA 一开口帖子就永久保留了，不该由一个批量按钮顺手决定。
+   */
+  const handleBatchComments = useCallback(async () => {
+    if (batchCommenting) return;
+    if (!apiConfig?.baseUrl || !apiConfig?.apiKey || !apiConfig?.model) {
+      addToast('请先配置 API', 'info');
+      return;
+    }
+    setBatchCommenting(true);
+    try {
+      const result = await ai.runProfileBatchComments({ apiConfig, accountId });
+      if (result.nothingToDo) {
+        addToast('没有等着配评论的帖子了', 'info');
+        return;
+      }
+      addToast(`${result.posts} 条帖子下面新增了 ${result.comments} 条评论`, 'success');
+      // 评论数是单独查的，重新拉一遍才会更新
+      const myPosts = await db.getForumPostsByAuthor(accountId);
+      setPosts(myPosts);
+      setCommentCounts(await db.getCommentCountsByPosts(myPosts.map(p => p.id)));
+    } catch (e: any) {
+      addToast(`生成失败: ${e?.message?.slice(0, 60) || '未知错误'}`, 'error');
+    } finally {
+      setBatchCommenting(false);
+    }
+  }, [batchCommenting, apiConfig, accountId, addToast]);
+
   const canEdit = isUserSideAccount(account) && !readOnly && account.status === 'active';
+  /** 只有你自己的号才给这个按钮——给路人的帖子批量配评论没有意义。 */
+  const canBatchComment = isUserSideAccount(account) && !readOnly && account.status === 'active';
   // 有签名/简介时给探出区多留一点底部空隙，没有就少留——跟朋友圈 renderCover 的
   // marginBottom 逻辑一致，避免博客区顶太紧或空太多。
   const bio = account.bio?.trim();
@@ -89,16 +128,30 @@ const ForumProfile: React.FC<Props> = ({ accountId, myAccountId, onOpenPost, rea
           </div>
           <div className="absolute inset-0 bg-gradient-to-t from-black/55 via-transparent to-black/10 pointer-events-none" />
 
-          {canEdit && (
-            <button
-              onClick={() => setEditing(true)}
-              className="absolute top-3 right-3 p-2 rounded-full active:scale-90 transition-transform"
-              style={{ background: 'rgba(0,0,0,0.35)', color: '#fff' }}
-              aria-label="编辑资料"
-            >
-              <PencilSimple size={16} />
-            </button>
-          )}
+          <div className="absolute top-3 right-3 flex items-center gap-2">
+            {/* 批量配评论：一次给还没人回的几条帖子都配上评论 */}
+            {canBatchComment && (
+              <button
+                onClick={handleBatchComments}
+                disabled={batchCommenting}
+                className="p-2 rounded-full active:scale-90 transition-transform disabled:opacity-50"
+                style={{ background: 'rgba(0,0,0,0.35)', color: '#fff' }}
+                aria-label="给还没人回的帖子批量配评论"
+              >
+                <ArrowsClockwise size={16} className={batchCommenting ? 'animate-spin' : ''} />
+              </button>
+            )}
+            {canEdit && (
+              <button
+                onClick={() => setEditing(true)}
+                className="p-2 rounded-full active:scale-90 transition-transform"
+                style={{ background: 'rgba(0,0,0,0.35)', color: '#fff' }}
+                aria-label="编辑资料"
+              >
+                <PencilSimple size={16} />
+              </button>
+            )}
+          </div>
         </div>
 
         {/* 头像 + 昵称：昵称在头像左边、底部对齐，头像相对封面探出一截 */}
