@@ -20,6 +20,36 @@ export type ForumTopicTag =
   | 'hobbies' | 'fitness' | 'wellness' | 'food' | 'imagination'
   | 'mystic' | 'science_pop';
 
+/**
+ * [用户确认新增] 每个分区的**评论区风气**。
+ *
+ * 加这个的直接原因：17 个分区的评论区读起来一个味儿——因为生成时话题标签只用来
+ * 分类和配额，从来没影响过"这个区的人是怎么说话的"。真实论坛里财经区和吃瓜区
+ * 的评论区完全是两个世界，这里得把那个差别写出来。
+ *
+ * 只描述**风气**，不规定内容。NPC 自己的人设仍然是第一位的——一个"安静树洞人"
+ * 到了吃瓜区也不会突然变得很吵，只是会比在别的区稍微多说两句。
+ */
+export const FORUM_TOPIC_COMMENT_STYLES: Record<ForumTopicTag, string> = {
+  social_affairs: '立场容易对立，有人认真讲道理、有人只想发泄；常见"你说的这个前提就不对"这类拆台，也常有人劝架或者阴阳两边都不讨好。',
+  film_reading: '爱聊细节和私人感受，容易跑题到别的作品上；有剧透警告的习惯，也常见"这段我看哭了"和"过誉了吧"并存。',
+  tech: '爱较参数和实测，喜欢纠正别人说错的规格；常出现"我上一代用户表示…"这种对比，偶尔演变成阵营之争。',
+  finance: '互相甩数据和图表，语气硬；常见"已上车/已下车"的自嘲，也常有人冷冷指出别人在接盘。',
+  gaming: '黑话密度最高的区，玩梗和缩写满天飞；常见开黑约人、吐槽平衡性、以及"这也能输"的互相嘲。',
+  relationships: '最容易共情也最容易跑偏：一半人在安慰、一半人在劝分；常见"我当年也这样"的经验分享，偶尔有人给出很冷的清醒发言。',
+  school_work: '苦水居多，互相心疼；常见"我们这也一样"的接龙，也有人认真给建议，语气比别的区温和。',
+  humor: '接龙和抖机灵为主，谁能接得更好谁就赢；很少认真讨论，有人认真了反而会被玩。',
+  gossip: '前排、蹲后续、阴阳怪气，三件套；爱推测和补充细节，也常有人跳出来说"别急着下结论"。',
+  daily_chatter: '最松弛的区，随口一句"确实""我也是"就够了；没人追问，也没人较真。',
+  hobbies: '同好之间热情且啰嗦，容易一口气打很长一段；新人提问会得到很耐心的回答。',
+  fitness: '互相打卡和监督，也互相劝别练废；常见具体的组数重量，偶尔有人杠动作标不标准。',
+  wellness: '经验之谈居多，代际感强；有人转述长辈说法，也有人认真科普纠偏，两边通常和平共处。',
+  food: '看图说话为主，最容易出现"好想吃""坐标哪"；地域差异一挑起来就热闹（甜咸之争那种）。',
+  imagination: '顺着楼主的设定往下接，比谁的脑洞更离谱；很少有人质疑设定，那样没意思。',
+  mystic: '认真讨论的区，不是胡闹。谈的是命理、易理、星象、民俗信仰这类有自己一套体系的东西，大家在各自的框架里认真推演。常见"按这个说法应该是…"的援引，也有人温和表示自己不信但尊重。不要写成装神弄鬼或者装模作样。',
+  science_pop: '爱补充和纠正，语气比科技区客气；常见"顺便一提"式的延伸，也常有人问很基础的问题而不会被嘲。',
+};
+
 export const FORUM_TOPIC_TAGS: { tag: ForumTopicTag; label: string }[] = [
   { tag: 'social_affairs', label: '社会时事' },
   { tag: 'film_reading', label: '电影阅读' },
@@ -39,6 +69,11 @@ export const FORUM_TOPIC_TAGS: { tag: ForumTopicTag; label: string }[] = [
   { tag: 'mystic', label: '神秘玄学' },
   { tag: 'science_pop', label: '科普杂谈' },
 ];
+
+/** 取某个分区的评论区风气说明。自定义话题（以后加的）取不到就返回空串。 */
+export function getTopicCommentStyle(tag: string): string {
+  return FORUM_TOPIC_COMMENT_STYLES[tag as ForumTopicTag] || '';
+}
 
 export function getTopicLabel(tag: ForumTopicTag): string {
   return FORUM_TOPIC_TAGS.find(t => t.tag === tag)?.label || tag;
@@ -140,14 +175,43 @@ export const FORUM_SAFETY_HARD_RULE = `### 内容安全底线（硬性约束，�
 如果某个人设常规的嘲讽方式天然容易踩到性别这条线，改成用职业/观点/网络行为习惯上
 的嘲讽去达到同等的"招人烦"效果，而不是为了保留嘲讽力度去踩线。`;
 
-export const FORUM_BILINGUAL_RULE = `### 语言风格：允许中英文自然混杂
-不要默认"整段中文，只有专有名词才夹英文"这种保守写法。以下都允许：
-- 整句直接用英文表达（如果符合这个人设的说话习惯）
-- 中英文混杂造句（比如"这波操作真的 sus""笑不活了 ngl"）
-- 词汇难度不设上限，不用为了"照顾读者"刻意换成更简单的说法或加翻译注解
+export const FORUM_BILINGUAL_RULE = `### 语言风格：这个论坛是中英双语的
+**这不是"允许"，是这个论坛本来的样子。** 每个账号后面都标着它的语言习惯，按标注写：
 
-具体混多少英文、什么调性的英文（网络黑话/学术词/日常俚语），交给这个 NPC 人设自己判断。
-也允许某些人设就是纯中文表达者，全程不夹英文——这同样正常，不强求每条内容都混英文。`;
+- 标着【中英混杂】的：必须明显带英文，不能整段纯中文糊弄过去。可以整句用英文，
+  可以中英混着造句（"这波操作真的 sus""笑不活了 ngl""honestly 我蚌埠住了"），
+  也可以一段中文里嵌一串英文从句。词汇难度不设上限，不要为了"照顾读者"换成
+  更简单的说法，更不要加翻译注解。
+- 标着【纯中文】的：就写中文，别硬夹英文单词。
+
+没有标注时（比如用户自己的账号、或者 TA 的账号），按那个人自己的说话习惯来，不要套用上面两档。
+
+具体混什么调性的英文（网络黑话 / 学术词 / 日常俚语 / 半吊子英语），交给这个人设自己判断——
+一个"较真抬杠党"夹的英文和一个"发疯乐子人"夹的英文不该是一个味儿。`;
+
+/**
+ * 某个账号说话夹不夹英文。
+ *
+ * 为什么要写死而不是让模型自由发挥：原来那条规则写的是"允许混杂"，还补了一句
+ * "也允许某些人设就是纯中文表达者"——模型看到"允许"就一律选最省事的那条路，
+ * 结果整个论坛全是纯中文，双语这件事等于没做。
+ *
+ * 用 handle 做哈希，所以同一个账号**永远**是同一档：今天夹英文的人明天也夹，
+ * 不会同一个号一会儿中英混杂一会儿纯中文。整体比例稳定在大约一半一半。
+ */
+export function getAccountLanguageStyle(handle: string): 'bilingual' | 'chinese' {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < handle.length; i++) {
+    h ^= handle.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return ((h >>> 0) % 2 === 0) ? 'bilingual' : 'chinese';
+}
+
+/** 渲染成提示词里那个标注。 */
+export function describeAccountLanguageStyle(handle: string): string {
+  return getAccountLanguageStyle(handle) === 'bilingual' ? '【中英混杂】' : '【纯中文】';
+}
 
 export const FORUM_NEWS_AUTHENTICITY_RULE = `### 新闻贴 vs 原创贴的真实性边界
 这次生成会同时给你：一批真实热点新闻条目（标题/来源/链接）、一批 NPC 人设、一份用户偏好标签。

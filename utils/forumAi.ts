@@ -29,6 +29,7 @@ import {
   getForumProfessionLabel,
   buildSharedForumHardRules, FORUM_NEWS_AUTHENTICITY_RULE,
   FORUM_DEFAULTS,
+  describeAccountLanguageStyle, getTopicCommentStyle, getTopicLabel,
 } from './forumConstants';
 import { pickRosterWithRegulars, getRelationState } from './forumSocial';
 import { maskAccountForChar, describeMaskedAccount, getCharForumIdentity } from './forumIdentityMask';
@@ -220,7 +221,8 @@ function describeAccountForPrompt(account: ForumAccount): string {
     professionLabel ? `职业:${professionLabel}` : undefined,
     persona ? `说话风格:${persona.label}——${persona.promptDescription}` : undefined,
   ].filter(Boolean).join('；');
-  return `- handle=${account.handle}（${account.displayName}）${badges ? `：${badges}` : ''}`;
+  const lang = describeAccountLanguageStyle(account.handle);
+  return `- handle=${account.handle}（${account.displayName}）${lang}${badges ? `：${badges}` : ''}`;
 }
 
 // ==================== TA 那一侧的人设（统一从 forumCharContext 取） ====================
@@ -600,9 +602,13 @@ ${charBlocks.join('\n\n') || '（这次没有具体角色在场，只有路人�
 
 === 帖子 ===
 作者：${postAuthor ? `@${postAuthor.handle}（${postAuthor.displayName}）` : '@已注销用户'}
+分区：${getTopicLabel(post.topicTag as ForumTopicTag)}
 标题：${post.title}
 正文：${post.content}
-${imageNote}
+${imageNote}${(() => {
+  const style = getTopicCommentStyle(post.topicTag);
+  return style ? `\n=== 这个区的评论区风气 ===\n${style}\n（风气只影响大家怎么说话，不覆盖每个账号自己的人设——安静的人到了热闹的区还是偏安静，只是比平时多说两句。）\n` : '';
+})()}
 === 目前的评论区（按时间从旧到新，每条前面是发言的网名）===
 ${renderCommentSection(allComments, accountsById, { floorLabels })}
 

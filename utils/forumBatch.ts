@@ -29,6 +29,7 @@ import {
   FORUM_TOPIC_TAGS, type ForumTopicTag,
   FORUM_PERSONA_ARCHETYPES,
   buildSharedForumHardRules, FORUM_NEWS_AUTHENTICITY_RULE,
+  describeAccountLanguageStyle, getTopicCommentStyle,
 } from './forumConstants';
 import type { HotNewsItem } from '../types';
 
@@ -130,7 +131,8 @@ function describeAccountForPrompt(account: ForumAccount): string {
     account.isVerified ? '蓝V认证官方号' : undefined,
     persona ? `说话风格:${persona.label}——${persona.promptDescription}` : undefined,
   ].filter(Boolean).join('；');
-  return `- handle=${account.handle}（${account.displayName}）${badges ? `：${badges}` : ''}`;
+  const lang = describeAccountLanguageStyle(account.handle);
+  return `- handle=${account.handle}（${account.displayName}）${lang}${badges ? `：${badges}` : ''}`;
 }
 
 // ==================== 工具 ====================
@@ -212,9 +214,12 @@ function buildQuotaPrompt(opts: {
 
   const totalPosts = quotas.reduce((sum, q) => sum + q.count, 0);
 
+  // 每个分区带上它自己的评论区风气 [用户确认新增]：以前 17 个区的评论读起来一个味儿，
+  // 就是因为话题标签只用来分类和配额，从没影响过"这个区的人怎么说话"。
   const quotaBlock = quotas.map(q => {
     const label = FORUM_TOPIC_TAGS.find(t => t.tag === q.tag)?.label || q.tag;
-    return `- ${q.tag}（${label}）：${q.count} 条`;
+    const style = getTopicCommentStyle(q.tag);
+    return `- ${q.tag}（${label}）：${q.count} 条${style ? `\n    这个区的风气：${style}` : ''}`;
   }).join('\n');
 
   const newsBlock = hotNewsItems.length > 0

@@ -127,8 +127,45 @@ export interface ForumPost {
    */
   images?: string[];
 
+  /**
+   * 音乐卡片。结构照抄朋友圈的 MomentMusicCard，字段一一对应，方便两边共用渲染思路。
+   *
+   * 以前"音乐帖"只是把链接拼进正文（`[分享音乐] https://…`），没有独立字段，
+   * 所以既渲染不出卡片、也没法点开播放，等于有个按钮但没有这个功能。
+   * songId 是真实的网易云歌曲 id，由链接识别时查 song/detail 拿到；
+   * 没有 songId 的卡片照样显示，只是点了不能跳去音乐 App 播放。
+   */
+  music?: ForumMusicCard;
+
+  /**
+   * 文章卡片。同样照抄朋友圈的 MomentArticleCard，但去掉了它那个 fakeComments
+   * （虚拟评论区）——论坛帖子本来就有真的评论区，不需要再给文章配一套假的。
+   */
+  article?: ForumArticleCard;
+
   /** 轨道A长期归档水位，语义与 MomentPost.memoryArchivedUntil 一致 [交接5 2.2]。 */
   memoryArchivedUntil?: number;
+}
+
+/** 音乐卡片。字段与朋友圈 MomentMusicCard 完全一致。 */
+export interface ForumMusicCard {
+  /** 网易云歌曲 id。有它才能点开跳去音乐 App 播放。 */
+  songId?: number;
+  songName: string;
+  artists: string;
+  albumPic: string;
+}
+
+/** 文章卡片。字段与朋友圈 MomentArticleCard 一致（去掉 fakeComments）。 */
+export interface ForumArticleCard {
+  title: string;
+  url?: string;
+  /** 摘要，卡片上显示的那两行。 */
+  body?: string;
+  /** 封面图（抓到的 og:image），没有就留空。 */
+  image?: string;
+  /** 完整正文。卡片上不展示，留着给 TA 读——它评论一篇文章总得先看过内容。 */
+  fullText?: string;
 }
 
 /** [交接1 2.6] 评论，与 ForumPost 分开存。不需要单独的保留字段，跟随父帖子的三条理由。 */
@@ -206,6 +243,16 @@ export interface ForumSettings {
   lastConfrontationSlotId?: string;
   /** TA 处理好友申请：同上，一个时段只问一次。 */
   lastFriendDecisionSlotId?: string;
+  /**
+   * [用户确认新增] 论坛专用 API。开了并且三项填全，论坛所有生成就走这一套，
+   * 不再跟聊天共用主 API——论坛这边调用密集（批量发帖、评论区刷新），
+   * 用一个便宜模型跑就够，没必要占着聊天那个好模型的额度。
+   * 任意一项没填就自动退回主 API，不会因为填了一半而整个不能用。
+   */
+  apiOverrideEnabled?: boolean;
+  apiOverrideBaseUrl?: string;
+  apiOverrideApiKey?: string;
+  apiOverrideModel?: string;
   updatedAt: number;
 }
 
