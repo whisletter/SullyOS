@@ -103,6 +103,14 @@ export interface MomentPost {
   imagePrompt?: string;
   music?: MomentMusicCard;
   article?: MomentArticleCard;
+  /**
+   * [用户确认新增] 定位。纯手打的一行文字，不接任何地图服务——朋友圈那条位置本来
+   * 也就是个标签，写"在家""公司楼下""某某咖啡（自己编的）"都成立，接真地图反而
+   * 把这件事变复杂了，还得处理权限和网络。
+   * 空串和 undefined 一律当没填，渲染时那一行整个不出现。
+   */
+  location?: string;
+
   likes: string[];                 // 点赞人列表（'user' 或 charId）
   likeNames: string[];             // 点赞人名字列表（与 likes 一一对应）
   comments: MomentComment[];

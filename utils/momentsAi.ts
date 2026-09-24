@@ -270,6 +270,10 @@ function formatUserPosts(
         if (p.text?.trim()) desc += `\n  配文: "${p.text.trim().slice(0, 60)}"`;
         break;
     }
+    // [用户确认新增] 定位。这是用户自己打进去的一行字，可能是"在家""公司楼下"，
+    // 也可能是某个具体地点。它常常是这条动态里信息量最大的一条线索——
+    // "又加班啊""你怎么在医院"这种话全靠它才说得出来。
+    if (p.location?.trim()) desc += `\n  定位: ${p.location.trim().slice(0, 40)}`;
     if (alreadyLiked) desc += ' (你已点赞)';
     if (alreadyCommented) desc += ' (你已评论)';
     return desc;
@@ -288,7 +292,8 @@ function formatTaRecentPosts(posts: MomentPost[], charId: string): string {
     const time = new Date(p.createdAt);
     const timeStr = `${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}`;
     const pinnedTag = p.pinned ? ' (已置顶)' : '';
-    return `[id=${p.id}] ${timeStr} "${(p.text || '').slice(0, 80)}"${pinnedTag}`;
+    const locationTag = p.location?.trim() ? `（定位:${p.location.trim().slice(0, 20)}）` : '';
+    return `[id=${p.id}] ${timeStr} "${(p.text || '').slice(0, 80)}"${locationTag}${pinnedTag}`;
   }).join('\n');
 }
 
