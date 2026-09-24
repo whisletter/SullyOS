@@ -7,7 +7,11 @@ import * as ai from '../../utils/forumAi';
 import { buildAltContinuedLookup } from '../../utils/forumSuspicion';
 import { FORUM_TOPIC_TAGS, getTopicLabel, type ForumTopicTag } from '../../utils/forumConstants';
 import TokenImg from '../../components/os/TokenImg';
+import ForumMusicCard from './ForumMusicCard';
+import ForumArticleCard from './ForumArticleCard';
 import { useOS } from '../../context/OSContext';
+import { DB } from '../../utils/db';
+import { AppID } from '../../types';
 
 interface Props {
   postId: string;
@@ -36,7 +40,7 @@ function groupByFloor(comments: db.ForumComment[]): { rootId: string; items: db.
 }
 
 const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, apiConfig, onDeleted, readOnly }) => {
-  const { addToast } = useOS();
+  const { addToast, characters, closeApp, openApp } = useOS();
   const [post, setPost] = useState<db.ForumPost | null>(null);
   const [comments, setComments] = useState<db.ForumComment[]>([]);
   const [accountsById, setAccountsById] = useState<Map<string, db.ForumAccount>>(new Map());
@@ -53,6 +57,8 @@ const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, ap
   const [confirmingDeleteComment, setConfirmingDeleteComment] = useState<string | null>(null);
   /** 点开看大图时，当前看的是第几张。null = 没在看。 */
   const [viewingImageIndex, setViewingImageIndex] = useState<number | null>(null);
+  /** 多个角色时，先让你选分享给谁。 */
+  const [pickingShareTarget, setPickingShareTarget] = useState(false);
   const [deletingComment, setDeletingComment] = useState(false);
 
   const load = useCallback(async () => {
@@ -131,6 +137,51 @@ const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, ap
       setConfirmingDeleteComment(null);
     }
   }, [post, load, addToast]);
+
+  /**
+   * 把这条音乐帖分享到跟某个角色的聊天里，落成一条可播放的 music_card 消息。
+   * 格式跟朋友圈的"转发到聊天框"完全一致（intent: 'shared' + metadata.song），
+   * 这样聊天那边现成的音乐卡渲染和播放逻辑直接就能用，不用另写一套。
+   */
+  const shareMusicToChat = useCallback(async (charId: string) => {
+    if (!post?.music) return;
+    if (!post.music.songId) {
+      addToast('这首歌没有可播放的信息，没法分享', 'error');
+      return;
+    }
+    try {
+      await DB.saveMessage({
+        charId,
+        role: 'user',
+        type: 'music_card' as any,
+        content: '[分享音乐]',
+        metadata: {
+          intent: 'shared',
+          song: {
+            songId: post.music.songId,
+            name: post.music.songName,
+            artists: post.music.artists,
+            albumPic: post.music.albumPic,
+          },
+        } as any,
+      });
+      setPickingShareTarget(false);
+      addToast('已分享到聊天框（点击跳转）', 'success', () => {
+        closeApp();
+        openApp(AppID.Chat);
+      });
+    } catch (e: any) {
+      addToast(`分享失败: ${e?.message?.slice(0, 60) || '未知错误'}`, 'error');
+    }
+  }, [post, addToast, closeApp, openApp]);
+
+  /** 只有一个角色就别多问一步，直接分享。 */
+  const handleShareMusic = useCallback(() => {
+    const list = (characters || []).filter(c => c.id);
+    if (list.length === 0) { addToast('还没有角色可以分享', 'info'); return; }
+    if (list.length === 1) { void shareMusicToChat(list[0].id); return; }
+    setPickingShareTarget(true);
+  }, [characters, shareMusicToChat, addToast]);
 
   const handleSubmitComment = useCallback(async () => {
     const text = inputText.trim();
@@ -240,6 +291,38 @@ const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, ap
                 ))}
               </div>
             )}
+            {/* 音乐卡：点了跳去音乐 App 播放。文章卡：点了在新标签页开原文。 */}
+            {post.music && (
+              <>
+                <ForumMusicCard music={post.music} playable />
+                {!readOnly && (
+                  <button
+                    onClick={handleShareMusic}
+                    className="mt-1.5 text-[12px] px-3 py-1.5 rounded-full"
+                    style={{ background: 'rgba(59,130,246,0.14)', color: '#3b82f6' }}
+                  >
+                    分享给 TA
+                  </button>
+                )}
+                {pickingShareTarget && (
+                  <div className="mt-1.5 p-2 rounded-lg space-y-1.5" style={{ background: 'rgba(127,127,127,0.1)' }}>
+                    <div className="text-[12px] opacity-60">分享给谁？</div>
+                    {(characters || []).filter(c => c.id).map(c => (
+                      <button
+                        key={c.id}
+                        onClick={() => shareMusicToChat(c.id)}
+                        className="w-full text-left px-3 py-2 rounded-lg text-sm"
+                        style={{ background: 'rgba(127,127,127,0.12)' }}
+                      >
+                        {c.name}
+                      </button>
+                    ))}
+                    <button onClick={() => setPickingShareTarget(false)} className="text-[12px] opacity-50">取消</button>
+                  </div>
+                )}
+              </>
+            )}
+            {post.article && <ForumArticleCard article={post.article} openable />}
             {post.postKind === 'news' && post.sourceNewsUrl && (
               <a href={post.sourceNewsUrl} target="_blank" rel="noreferrer" className="text-[12px] opacity-50 mt-1.5 block underline">
                 原文：{post.sourceNewsTitle || post.sourceNewsUrl}

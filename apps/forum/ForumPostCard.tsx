@@ -3,6 +3,8 @@ import { Newspaper, Heart } from '@phosphor-icons/react';
 import type { ForumAccount, ForumPost } from '../../utils/forumDb';
 import { getTopicLabel, type ForumTopicTag } from '../../utils/forumConstants';
 import TokenImg from '../../components/os/TokenImg';
+import ForumMusicCard from './ForumMusicCard';
+import ForumArticleCard from './ForumArticleCard';
 
 interface Props {
   post: ForumPost;
@@ -58,6 +60,10 @@ const ForumPostCard: React.FC<Props> = ({ post, author, commentCount, onClick })
               ))}
             </div>
           )}
+          {/* 音乐/文章卡：列表里只展示，不可点——点整条卡片是进帖子详情，
+              在这儿再塞一个"跳去音乐 App"的点击区会互相打架。 */}
+          {post.music && <ForumMusicCard music={post.music} />}
+          {post.article && <ForumArticleCard article={post.article} />}
           <div className="text-[11px] opacity-50 mt-1 flex items-center gap-3">
             <span>{commentCount} 条评论</span>
             {post.likes.length > 0 && (

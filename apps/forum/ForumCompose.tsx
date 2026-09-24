@@ -7,6 +7,10 @@ import { filesToForumImageTokens, FORUM_MAX_POST_IMAGES } from '../../utils/foru
 import TokenImg from '../../components/os/TokenImg';
 import { useOS } from '../../context/OSContext';
 import { pinForumPostIfEligible } from '../../utils/forumMemoryBridge';
+import { useMusic, musicApi, toHttps } from '../../context/MusicContext';
+import { expandShortUrl, extractWebpageContent, detectFirstUrl } from '../../utils/webpageExtractor';
+import ForumMusicCard from './ForumMusicCard';
+import ForumArticleCard from './ForumArticleCard';
 
 interface Props {
   activeAccount: db.ForumAccount;
@@ -29,12 +33,21 @@ type ComposeType = 'text' | 'image' | 'music' | 'article';
  */
 const ForumCompose: React.FC<Props> = ({ activeAccount, onDone }) => {
   const { addToast, characters } = useOS();
+  const { cfg: musicCfg } = useMusic();
   const [composeType, setComposeType] = useState<ComposeType>('text');
   const [title, setTitle] = useState('');
   const [text, setText] = useState('');
   const [images, setImages] = useState<string[]>([]);
   const [musicUrl, setMusicUrl] = useState('');
   const [articleUrl, setArticleUrl] = useState('');
+  // 音乐：粘链接自动识别出来的真实歌曲信息（口径跟朋友圈完全一致）
+  const [musicCard, setMusicCard] = useState<db.ForumMusicCard | null>(null);
+  const [musicParsing, setMusicParsing] = useState(false);
+  const [musicParseError, setMusicParseError] = useState('');
+  // 文章：粘链接自动抓标题/摘要/封面/正文
+  const [articleCard, setArticleCard] = useState<db.ForumArticleCard | null>(null);
+  const [articleParsing, setArticleParsing] = useState(false);
+  const [articleParseError, setArticleParseError] = useState('');
   const [topicTag, setTopicTag] = useState<ForumTopicTag>('daily_chatter');
   const [submitting, setSubmitting] = useState(false);
   const [picking, setPicking] = useState(false);
@@ -58,23 +71,114 @@ const ForumCompose: React.FC<Props> = ({ activeAccount, onDone }) => {
     }
   };
 
+  /** 从网易云链接（长链或 163cn.tv 短链展开后）里抠出 songId。跟朋友圈同一条正则。 */
+  const extractNeteaseSongId = (url: string): number | null => {
+    const match = /[?&#]id=(\d+)/.exec(url) || /\/song\/(\d+)/.exec(url);
+    return match ? Number(match[1]) : null;
+  };
+
+  /**
+   * 粘进来的东西一看像网易云链接就自动识别：短链先展开，抠出 songId 再查 song/detail，
+   * 拿**真实**的歌名/歌手/封面。以前这里是把链接原样拼进正文（`[分享音乐] …`），
+   * 既渲染不出卡片也点不开，等于按钮在功能不在。
+   */
+  const handleMusicUrlChange = async (rawInput: string) => {
+    setMusicUrl(rawInput);
+    setMusicParseError('');
+    const trimmed = rawInput.trim();
+    if (!trimmed) { setMusicCard(null); return; }
+
+    const looksLikeLink = /^https?:\/\//i.test(trimmed) || /music\.163\.com|163cn\.tv/i.test(trimmed);
+    if (!looksLikeLink) { setMusicCard(null); return; }
+
+    setMusicParsing(true);
+    try {
+      let resolvedUrl = trimmed;
+      // 163cn.tv 这类短链里没有 songId，得先跟着重定向展开成长链
+      if (/163cn\.tv/i.test(trimmed) && !/music\.163\.com/i.test(trimmed)) {
+        resolvedUrl = await expandShortUrl(trimmed);
+      }
+      const songId = extractNeteaseSongId(resolvedUrl);
+      if (!songId) {
+        setMusicParseError('没能从链接里识别出歌曲，换个链接试试');
+        setMusicCard(null);
+        return;
+      }
+      const detail = await musicApi.call(musicCfg, 'song/detail', { ids: [songId] });
+      const song = detail?.songs?.[0];
+      if (!song) {
+        setMusicParseError('没查到这首歌的信息，可能已下架');
+        setMusicCard(null);
+        return;
+      }
+      setMusicCard({
+        songId,
+        songName: song.name || '未知歌曲',
+        artists: (song.ar || song.artists || []).map((a: any) => a.name).filter(Boolean).join(' / ') || '未知歌手',
+        albumPic: toHttps(song.al?.picUrl || song.album?.picUrl || ''),
+      });
+    } catch (e: any) {
+      setMusicParseError(`识别失败: ${e?.message?.slice(0, 60) || '未知错误'}`);
+      setMusicCard(null);
+    } finally {
+      setMusicParsing(false);
+    }
+  };
+
+  /**
+   * 文章链接：抓标题/摘要/封面/正文。抓不到也把链接本身留着——你可能就想留个链接、
+   * 标题自己手打。正文（fullText）不在卡片上显示，是留给 TA 读的：它要评论一篇文章，
+   * 总得先看过内容，不然只能对着标题瞎猜。
+   */
+  const handleArticleUrlChange = async (rawInput: string) => {
+    setArticleUrl(rawInput);
+    setArticleParseError('');
+    const trimmed = rawInput.trim();
+    if (!trimmed) { setArticleCard(null); return; }
+
+    const url = detectFirstUrl(trimmed) || trimmed;
+    if (!/^https?:\/\//i.test(url)) { setArticleCard(null); return; }
+
+    setArticleParsing(true);
+    try {
+      const webpage = await extractWebpageContent(url);
+      setArticleCard({
+        title: webpage.title || '',
+        url: webpage.finalUrl || url,
+        body: webpage.excerpt || '',
+        image: webpage.image || '',
+        fullText: webpage.content || '',
+      });
+    } catch (e: any) {
+      setArticleParseError(`识别失败: ${e?.message?.slice(0, 60) || '这个链接抓不到内容'}`);
+      setArticleCard({ title: '', url: trimmed });
+    } finally {
+      setArticleParsing(false);
+    }
+  };
+
   const removeImage = (index: number) => {
     // 只摘引用，不删 Blob：同一张图可能被别处引用着，孤儿统一交给存储面板的 GC 收口。
     setImages(prev => prev.filter((_, i) => i !== index));
   };
 
+  /**
+   * 正文。音乐/文章现在有独立字段了，所以正文里只放你自己写的那句话，
+   * 不再拼 `[分享音乐] 链接` —— 那串链接既占正文、又会被原样喂给 AI。
+   */
   const buildContent = (): string => {
     if (composeType === 'text') return text.slice(0, 10000);
-    if (composeType === 'image') return text.trim();
-    if (composeType === 'music') return `[分享音乐] ${musicUrl}${text ? `\n${text}` : ''}`;
-    return `[分享文章] ${articleUrl}${text ? `\n${text}` : ''}`;
+    return text.trim();
   };
 
   const handleSubmit = async () => {
     const content = buildContent();
-    // 图片贴允许没配文——有图就算有内容，跟朋友圈一致。
-    if (!content.trim() && !(composeType === 'image' && images.length > 0)) {
-      addToast('内容不能是空的', 'info');
+    // 图片/音乐/文章贴都允许没配文——有卡片就算有内容，跟朋友圈一致。
+    const hasAttachment = (composeType === 'image' && images.length > 0)
+      || (composeType === 'music' && !!musicCard)
+      || (composeType === 'article' && !!articleCard);
+    if (!content.trim() && !hasAttachment) {
+      addToast(composeType === 'music' ? '先贴一个音乐链接' : composeType === 'article' ? '先贴一个文章链接' : '内容不能是空的', 'info');
       return;
     }
     setSubmitting(true);
@@ -88,6 +192,8 @@ const ForumCompose: React.FC<Props> = ({ activeAccount, onDone }) => {
         title: title.slice(0, 100),
         content,
         images: composeType === 'image' && images.length > 0 ? images : undefined,
+        music: composeType === 'music' && musicCard ? musicCard : undefined,
+        article: composeType === 'article' && articleCard ? articleCard : undefined,
         createdAt: now,
         lastActivityAt: now,
         isCollected: false,
@@ -178,7 +284,16 @@ const ForumCompose: React.FC<Props> = ({ activeAccount, onDone }) => {
 
         {composeType === 'music' && (
           <div className="space-y-2">
-            <input value={musicUrl} onChange={e => setMusicUrl(e.target.value)} placeholder="音乐链接" className="w-full px-3 py-2 rounded-lg text-sm outline-none" style={{ background: 'rgba(127,127,127,0.1)' }} />
+            <input
+              value={musicUrl}
+              onChange={e => handleMusicUrlChange(e.target.value)}
+              placeholder="贴网易云歌曲链接，自动识别"
+              className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+              style={{ background: 'rgba(127,127,127,0.1)' }}
+            />
+            {musicParsing && <div className="text-[12px] opacity-50">识别中…</div>}
+            {musicParseError && <div className="text-[12px]" style={{ color: '#ef4444' }}>{musicParseError}</div>}
+            {musicCard && <ForumMusicCard music={musicCard} />}
             <textarea value={text} onChange={e => setText(e.target.value)} placeholder="想说的话（可选）" rows={3}
                       className="w-full px-3 py-2 rounded-lg text-sm outline-none resize-none" style={{ background: 'rgba(127,127,127,0.1)' }} />
           </div>
@@ -186,7 +301,30 @@ const ForumCompose: React.FC<Props> = ({ activeAccount, onDone }) => {
 
         {composeType === 'article' && (
           <div className="space-y-2">
-            <input value={articleUrl} onChange={e => setArticleUrl(e.target.value)} placeholder="文章链接" className="w-full px-3 py-2 rounded-lg text-sm outline-none" style={{ background: 'rgba(127,127,127,0.1)' }} />
+            <input
+              value={articleUrl}
+              onChange={e => handleArticleUrlChange(e.target.value)}
+              placeholder="贴文章链接，自动抓标题和摘要"
+              className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+              style={{ background: 'rgba(127,127,127,0.1)' }}
+            />
+            {articleParsing && <div className="text-[12px] opacity-50">抓取中…</div>}
+            {articleParseError && <div className="text-[12px]" style={{ color: '#f59e0b' }}>{articleParseError}</div>}
+            {articleCard && (
+              <>
+                <ForumArticleCard article={articleCard} />
+                {/* 抓不到标题时给你手填的机会，不至于发出去一张空卡 */}
+                {!articleCard.title && (
+                  <input
+                    value={articleCard.title}
+                    onChange={e => setArticleCard({ ...articleCard, title: e.target.value })}
+                    placeholder="没抓到标题，自己写一个"
+                    className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+                    style={{ background: 'rgba(127,127,127,0.1)' }}
+                  />
+                )}
+              </>
+            )}
             <textarea value={text} onChange={e => setText(e.target.value)} placeholder="想说的话（可选）" rows={3}
                       className="w-full px-3 py-2 rounded-lg text-sm outline-none resize-none" style={{ background: 'rgba(127,127,127,0.1)' }} />
           </div>
