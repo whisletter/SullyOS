@@ -4053,6 +4053,10 @@ export interface FullBackupData {
     // 跟眠光一样属于隐私内容，media_only（可分享档）不带。
     forum?: import('./utils/forumDb').ForumBackupData;
 
+    // 朋友圈（独立 IndexedDB 库 SullyOS_Moments 的全量快照）。
+    // 动态 / 评论 / 每个角色的朋友圈设置都在这一份里。同样 media_only 不带。
+    moments?: import('./utils/momentsDb').MomentsBackupData;
+
     // 独立协同工作数据库。二进制文件放在 ZIP 的 collaboration/assets/，JSON 只存索引。
     collaborationBackupVersion?: 1;
     collaborationBackupMode?: 'text_only' | 'media_only' | 'full';
