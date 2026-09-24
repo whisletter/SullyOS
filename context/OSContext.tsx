@@ -91,6 +91,7 @@ import { createBuiltinSullyLive2DConfig, isBuiltinSullyLive2D, upgradeBuiltinSul
 import { normalizeCharacterRoomAssetsInPlace } from '../utils/roomTemplateAssets';
 import { exportMingLightAll, importMingLightAll } from '../utils/mingLightDb';
 import { exportForumAll, importForumAll } from '../utils/forumDb';
+import { exportMomentsAll, importMomentsAll } from '../utils/momentsDb';
 
 interface ProactiveQueueEntry {
   charId: string;
@@ -4181,6 +4182,26 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               backupData.forum = forumSnapshot;
           }
 
+          // 朋友圈同样是独立的 IndexedDB 库（SullyOS_Moments），也不在主 store 清单里。
+          // 动态、评论、每个角色的朋友圈设置全在这一个库里，漏掉的话换设备或清一次
+          // 缓存就全没了。含评论往来，跟眠光/论坛同理：media_only（可分享档）不带。
+          if (mode === 'text_only' || mode === 'full') {
+              const momentsSnapshot = await exportMomentsAll();
+              if (mode === 'text_only') {
+                  // 纯文字档不带图。朋友圈的图跟论坛一样是 blobref 令牌而不是 base64，
+                  // 通用的 stripBase64 认不出，留着令牌但包里没有对应的 Blob，
+                  // 恢复后只会是一堆打不开的破图，所以这里按字段显式清掉。
+                  momentsSnapshot.posts = momentsSnapshot.posts.map(post => {
+                      if (!post.images && !post.article?.image) return post;
+                      const next = { ...post };
+                      delete next.images;
+                      if (next.article?.image) next.article = { ...next.article, image: undefined };
+                      return next;
+                  });
+              }
+              backupData.moments = momentsSnapshot;
+          }
+
           // 桌面皮肤偏好（电子宠物/手游风的界面配色 + 看板 banner）——异步（看板图令牌需解析为
           // data URL 才能跨设备），所以在对象字面量外单独 await。text_only 只带配色偏好、跳过看板大图。
           backupData.desktopSkinLocal = await exportDesktopSkinLocal(mode !== 'text_only');
@@ -5051,6 +5072,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           if (data.forum) {
               try { await importForumAll(data.forum); }
               catch (e) { console.warn('[Backup] 论坛数据还原失败:', e); }
+          }
+          // 朋友圈同上：整库 clear + 重填。老备份包没有这个字段就跳过，不动现有数据。
+          if (data.moments) {
+              try { await importMomentsAll(data.moments); }
+              catch (e) { console.warn('[Backup] 朋友圈数据还原失败:', e); }
           }
 
           if (data.customIcons !== undefined || data.appearancePresets !== undefined) {
