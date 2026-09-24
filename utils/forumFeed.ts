@@ -200,12 +200,14 @@ export interface PendingFloor {
  * [交接4 二.3.2] 判定单位是"楼"（顶层评论+其楼中楼回复算一楼），
  * 看这个楼当前最新一条是不是用户发的。
  *
- * @param taHandles 用于检测 @TA 的 handle 列表（TA 主号 + 目前继续沿用的小号的 handle）。
+ * @param taMentions 用于检测 @TA 的字符串列表。**handle 和昵称都要传**——
+ *   [用户确认] 以前只认 handle（`moss_club` 这种英文串），而界面上根本没告诉用户
+ *   handle 是什么，所以大家都打的是昵称，@ 自然一次都没生效过。
  */
 export async function getPendingFloors(
   postId: string,
   accountsById: Map<string, ForumAccount>,
-  taHandles: string[]
+  taMentions: string[]
 ): Promise<PendingFloor[]> {
   const comments = await db.getCommentsByPost(postId);
   const byRoot = new Map<string, ForumComment[]>();
@@ -222,7 +224,7 @@ export async function getPendingFloors(
     const latestAccount = accountsById.get(latest.authorAccountId);
     if (!isUserSideAccount(latestAccount)) continue; // 最新一条不是用户发的，不算垫底
 
-    const mentionsTA = taHandles.some(h => h && latest.content.includes(`@${h}`));
+    const mentionsTA = textMentionsAny(latest.content, taMentions);
     pending.push({ threadRootId, latestComment: latest, mentionsTA });
   }
   return pending;
@@ -246,6 +248,24 @@ export function pickFloorsForRefresh(
   const stillPending = rest.filter(f => !pickedIds.has(f.threadRootId));
 
   return { mustReply, randomlyPicked, stillPending };
+}
+
+/**
+ * 这段文字里有没有 @ 到列表里的某一个名字。
+ *
+ * [用户确认] handle 和昵称都认。以前只认 handle，而 handle 是 `moss_club` 这种英文串，
+ * 界面上又没有任何地方告诉用户它是什么——所以用户打的一直是 `@深夜观察员`，
+ * 一次都没匹配上。判定放宽之后，配上输入框的 @ 补全，这件事才算真的能用。
+ *
+ * 昵称里可能带空格、emoji、特殊符号，所以只做朴素的子串匹配，不上正则边界判断——
+ * 中文本来也没有词边界，硬套只会误伤。
+ */
+export function textMentionsAny(text: string, names: string[]): boolean {
+  if (!text) return false;
+  return names.some(n => {
+    const name = (n || '').trim();
+    return !!name && text.includes(`@${name}`);
+  });
 }
 
 // ==================== 七、点赞 / 编辑 / 删除（用户方账号自己管理自己的内容） ====================

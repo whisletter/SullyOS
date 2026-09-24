@@ -490,9 +490,11 @@ export async function runPostRefresh(params: RunPostRefreshParams): Promise<void
   const accounts = await db.getAllForumAccounts();
   const accountsById = new Map(accounts.map(a => [a.id, a]));
   const npcAccounts = accounts.filter(a => a.ownerType === 'npc' && a.status === 'active');
-  const taHandles = taAccounts.map(a => a.handle);
+  // [用户确认] @ 判定 handle 和昵称都认。以前只认 handle，而界面上根本没告诉用户
+  // handle 是什么，所以大家打的都是昵称，@ 从来没生效过。
+  const taMentions = taAccounts.flatMap(a => [a.handle, a.displayName]).filter(Boolean);
 
-  const pending = await feed.getPendingFloors(postId, accountsById, taHandles);
+  const pending = await feed.getPendingFloors(postId, accountsById, taMentions);
   const { mustReply, randomlyPicked } = feed.pickFloorsForRefresh(pending, heatLevel);
 
   const rosterSize = Math.min(npcAccounts.length, 8);
@@ -504,13 +506,27 @@ export async function runPostRefresh(params: RunPostRefreshParams): Promise<void
   // 每个角色都要带完整人设 + 最近的聊天，全塞进来又慢又容易串味（生成器会把 A 知道的事
   // 安到 B 头上）。所以：被 @ 的角色一定在场，另外再随机拉一个角色进来——它可能正好在
   // 逛这条帖子，也可能看了不说话。代价是没被 @ 的角色不是每次刷新都出现。
-  const charIdsByHandle = new Map<string, string>();
-  for (const acc of taAccounts) if (acc.charId) charIdsByHandle.set(acc.handle, acc.charId);
+  // 每个角色可被 @ 到的所有写法：名下每个号的 handle 和昵称
+  const mentionNamesByChar = new Map<string, string[]>();
+  for (const acc of taAccounts) {
+    if (!acc.charId) continue;
+    const list = mentionNamesByChar.get(acc.charId) || [];
+    if (acc.handle) list.push(acc.handle);
+    if (acc.displayName) list.push(acc.displayName);
+    mentionNamesByChar.set(acc.charId, list);
+  }
 
   const mentionedCharIds = new Set<string>();
-  for (const floor of mustReply) {
-    for (const [handle, charId] of charIdsByHandle) {
-      if (handle && floor.latestComment.content.includes(`@${handle}`)) mentionedCharIds.add(charId);
+  for (const [charId, names] of mentionNamesByChar) {
+    // 垫底楼里 @ 的
+    if (mustReply.some(floor => feed.textMentionsAny(floor.latestComment.content, names))) {
+      mentionedCharIds.add(charId);
+      continue;
+    }
+    // [用户确认新增] 帖子正文里 @ 的也算。以前只扫"楼"，帖子本身不是楼，
+    // 所以你在发帖时 @ 谁完全没作用——这是 @ 感觉失灵的另一半原因。
+    if (feed.textMentionsAny(`${post.title || ''}\n${post.content || ''}`, names)) {
+      mentionedCharIds.add(charId);
     }
   }
   const allCharIds = Array.from(new Set(taAccounts.map(a => a.charId).filter((x): x is string => !!x)));
