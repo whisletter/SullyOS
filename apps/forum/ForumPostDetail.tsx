@@ -273,8 +273,15 @@ const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, ap
       ))}
 
       {/* 底部评论输入框 */}
-      <div className="fixed bottom-0 left-0 right-0 flex items-center gap-2 px-3 py-2 border-t"
-           style={{ background: 'inherit', borderColor: 'rgba(127,127,127,0.15)' }}>
+      {/* 背景原来写的是 inherit，父级透明所以它也透明，帖子内容会从字底下透上来。
+          改成根节点挂的主题变量，拿到当前深浅色的实色。
+          再补一层安全区内边距，免得在手势条机型上被系统条压住。 */}
+      <div className="fixed bottom-0 left-0 right-0 z-40 flex items-center gap-2 px-3 pt-2 border-t"
+           style={{
+             background: 'var(--forum-bg, #1A1A1E)',
+             borderColor: 'rgba(127,127,127,0.15)',
+             paddingBottom: 'calc(var(--safe-bottom, 0px) + 8px)',
+           }}>
         {replyTarget && (
           <button onClick={() => setReplyTarget(null)} className="text-[11px] opacity-50 shrink-0">
             回复中✕

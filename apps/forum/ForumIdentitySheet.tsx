@@ -127,9 +127,15 @@ const ForumIdentitySheet: React.FC<Props> = ({ activeAccount, characters, onSwit
   return (
     <div className="fixed inset-0 z-50 flex items-end" onClick={onClose}>
       <div className="absolute inset-0 bg-black/40" />
+      {/* 面板背景原来是 inherit，父级是透明遮罩层，于是整块面板都透着底下的页面。
+          改成根节点挂的主题变量，拿到当前深浅色的实色；底部补安全区内边距。 */}
       <div
         className="relative w-full rounded-t-2xl p-4 space-y-3 max-h-[80vh] overflow-y-auto"
-        style={{ background: 'inherit' }}
+        style={{
+          background: 'var(--forum-bg, #1A1A1E)',
+          color: 'var(--forum-text, inherit)',
+          paddingBottom: 'calc(var(--safe-bottom, 0px) + 16px)',
+        }}
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-center justify-between">
