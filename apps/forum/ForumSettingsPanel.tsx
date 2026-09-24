@@ -112,7 +112,12 @@ const ForumSettingsPanel: React.FC<Props> = ({ heatLevel, onHeatLevelChange, dar
       <div>
         <div className="text-sm font-bold mb-1">论坛热度</div>
         <div className="text-[12px] opacity-50 mb-2">
-          决定帖子刷新按钮每次从"垫底"队列里最多接几条路人回复（数值越大越热闹，@TA的楼不受这个限制，必回）。
+          帖子详情页点刷新时，<b>这个数字 = 这次新开几楼评论</b>。
+          其中一部分楼底下会有人接话（每楼 1-3 句），所以实际冒出来的条数会比这个数字多——
+          比如 5 就是 5 楼加上 2 楼有人接，一共 7-11 条。
+          <br />
+          同时它也决定最多接几条"垫底楼"（就是最新一条是你发的、等着人回的楼）。
+          @了TA的楼不受这个限制，必回。
         </div>
         <input
           type="range"
