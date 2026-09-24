@@ -77,9 +77,10 @@ const ForumProfile: React.FC<Props> = ({ accountId, myAccountId, onOpenPost, rea
     return () => { cancelled = true; };
   }, [tab, commentsLoaded, accountId]);
 
-  if (loading) return <div className="text-center py-16 text-sm opacity-50">加载中…</div>;
-  if (!account) return <div className="text-center py-16 text-sm opacity-50">账号不存在</div>;
-
+  // ⚠️ 这个 useCallback 必须待在下面两个提前 return 的**前面**。
+  // React 要求每次渲染调用的 hook 数量一致；放在 return 后面的话，loading 那一帧
+  // 少一个 hook、加载完又多一个，就会抛 "Rendered more hooks than during the
+  // previous render"（生产环境显示为 Minified React error #310）。
   /**
    * 一次性给这个号名下「还没有评论」的帖子配上评论（最多 3 条，每条 3-5 句）。
    * 跟帖子详情页那个刷新是两件事：那个是"我在看这条，让它热闹起来"，
@@ -110,6 +111,9 @@ const ForumProfile: React.FC<Props> = ({ accountId, myAccountId, onOpenPost, rea
       setBatchCommenting(false);
     }
   }, [batchCommenting, apiConfig, accountId, addToast]);
+
+  if (loading) return <div className="text-center py-16 text-sm opacity-50">加载中…</div>;
+  if (!account) return <div className="text-center py-16 text-sm opacity-50">账号不存在</div>;
 
   const canEdit = isUserSideAccount(account) && !readOnly && account.status === 'active';
   /** 只有你自己的号才给这个按钮——给路人的帖子批量配评论没有意义。 */
