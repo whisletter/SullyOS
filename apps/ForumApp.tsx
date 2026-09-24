@@ -270,18 +270,26 @@ const ForumApp: React.FC = () => {
         const now = new Date();
         const dateKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
         const minutesOfDay = now.getHours() * 60 + now.getMinutes();
-        const sharedAccounts = (await db.getAllForumAccounts())
-          .filter(a => a.ownerType === 'shared' && a.status === 'active');
-        for (const acc of sharedAccounts) {
-          const freeWindows = await loadCharFreeWindows(acc.charId, characters || []);
-          const due = scheduler.findDueSharedAccountBand(acc.id, dateKey, minutesOfDay, freeWindows);
+        // [用户确认改动] 档位改成按**角色**算，不再按共管账号算。以前只有建了共管号的
+        // 角色才会发帖，现在只要这个角色在论坛上有号（主号/小号/共管号任意一个）就有份，
+        // 具体用哪个号发由 TA 自己选（见 forumAi.runSharedAccountExclusivePost）。
+        const allAccounts = await db.getAllForumAccounts();
+        const charIdsWithAccounts = Array.from(new Set(
+          allAccounts
+            .filter(a => a.status === 'active' && (a.ownerType === 'char' || a.ownerType === 'shared'))
+            .map(a => a.charId)
+            .filter((x): x is string => !!x),
+        ));
+        for (const cid of charIdsWithAccounts) {
+          const freeWindows = await loadCharFreeWindows(cid, characters || []);
+          const due = scheduler.findDueSharedAccountBand(cid, dateKey, minutesOfDay, freeWindows);
           if (!due) continue;
           const post = await ai.runSharedAccountExclusivePost({
-            apiConfig, sharedAccountId: acc.id, bandLabel: due.band.label,
+            apiConfig, charId: cid, bandLabel: due.band.label,
           });
-          scheduler.markSharedAccountBandFired(acc.id, dateKey, due.bandIndex);
+          scheduler.markSharedAccountBandFired(cid, dateKey, due.bandIndex);
           if (post && !cancelled) setFeedRefreshKey(k => k + 1);
-          break; // 一次进 App 只处理一个共管账号的一档，别连着烧调用
+          break; // 一次进 App 只处理一个角色的一档，别连着烧调用
         }
       } catch (e: any) {
         console.warn('[Forum] 共管账号定时动态失败:', e?.message || String(e));
