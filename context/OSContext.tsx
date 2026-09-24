@@ -90,6 +90,7 @@ import { assertSupportedSullyBackup } from '../utils/backupImportPolicy';
 import { createBuiltinSullyLive2DConfig, isBuiltinSullyLive2D, upgradeBuiltinSullyLive2DDefaults } from '../utils/builtinSullyLive2D';
 import { normalizeCharacterRoomAssetsInPlace } from '../utils/roomTemplateAssets';
 import { exportMingLightAll, importMingLightAll } from '../utils/mingLightDb';
+import { exportForumAll, importForumAll } from '../utils/forumDb';
 
 interface ProactiveQueueEntry {
   charId: string;
@@ -4152,6 +4153,34 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               backupData.mingLight = await exportMingLightAll();
           }
 
+          // 论坛「杂波频段」也是独立的 IndexedDB 库（SullyOS_Forum），同样不在主 store
+          // 清单里。账号、帖子、评论、私信、好友关系、TA 对各个号的怀疑记录、小号销号
+          // 次数全在这一个库里，漏掉的话换设备或清一次缓存就全没了，而且这些东西
+          // 没法重新生成。
+          // 含私信和怀疑记录，属于隐私内容，跟眠光同理：media_only（可分享档）不带。
+          if (mode === 'text_only' || mode === 'full') {
+              const forumSnapshot = await exportForumAll();
+              if (mode === 'text_only') {
+                  // 纯文字档不带图。论坛存的是 blobref 令牌而不是 base64，通用的
+                  // stripBase64 认不出它，所以这里按字段显式清掉——留着令牌但包里没有
+                  // 对应的 Blob，恢复后只会是一堆打不开的破图。
+                  forumSnapshot.posts = forumSnapshot.posts.map(post => {
+                      if (!post.images) return post;
+                      const next = { ...post };
+                      delete next.images;
+                      return next;
+                  });
+                  forumSnapshot.accounts = forumSnapshot.accounts.map(account => {
+                      if (!account.avatar && !account.banner) return account;
+                      const next = { ...account };
+                      delete next.avatar;
+                      delete next.banner;
+                      return next;
+                  });
+              }
+              backupData.forum = forumSnapshot;
+          }
+
           // 桌面皮肤偏好（电子宠物/手游风的界面配色 + 看板 banner）——异步（看板图令牌需解析为
           // data URL 才能跨设备），所以在对象字面量外单独 await。text_only 只带配色偏好、跳过看板大图。
           backupData.desktopSkinLocal = await exportDesktopSkinLocal(mode !== 'text_only');
@@ -5016,6 +5045,12 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           if (data.mingLight) {
               try { await importMingLightAll(data.mingLight); }
               catch (e) { console.warn('[Backup] 眠光数据还原失败:', e); }
+          }
+          // 论坛同样是独立 IndexedDB 库，单独还原。importForumAll 是整库 clear + 重填，
+          // 跟眠光一个语义。老备份包里没有这个字段（undefined），直接跳过，不动现有论坛数据。
+          if (data.forum) {
+              try { await importForumAll(data.forum); }
+              catch (e) { console.warn('[Backup] 论坛数据还原失败:', e); }
           }
 
           if (data.customIcons !== undefined || data.appearancePresets !== undefined) {
