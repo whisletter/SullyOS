@@ -33,6 +33,7 @@ import {
   X,
   Plus,
   Image as ImageIcon,
+  MapPin,
 } from '@phosphor-icons/react';
 import { useOS } from '../context/OSContext';
 import TokenImg from '../components/os/TokenImg';
@@ -164,6 +165,8 @@ const MomentsApp: React.FC = () => {
   const [composeArticleImage, setComposeArticleImage] = useState('');
   const [composeArticleFullText, setComposeArticleFullText] = useState('');
   const [composeArticleLinkInput, setComposeArticleLinkInput] = useState('');
+  /** 定位：纯手打的一行字，四种动态类型都能填。 */
+  const [composeLocation, setComposeLocation] = useState('');
   const [articleParsing, setArticleParsing] = useState(false);
   const [articleParseError, setArticleParseError] = useState('');
   const [articleParsed, setArticleParsed] = useState(false);
@@ -460,6 +463,7 @@ const MomentsApp: React.FC = () => {
         image: composeArticleImage || undefined,
         fullText: composeArticleFullText || undefined,
       } : undefined,
+      location: composeLocation.trim() || undefined,
       likes: [],
       likeNames: [],
       comments: [],
@@ -492,10 +496,11 @@ const MomentsApp: React.FC = () => {
     setComposeArticleLinkInput('');
     setArticleParsed(false);
     setArticleParseError('');
+    setComposeLocation('');
     setComposeType(null);
     setView('main');
     addToast('已发布', 'success');
-  }, [charId, composeType, composeText, composeImages, composeMusicName, composeMusicArtist, composeMusicCover, composeArticleTitle, composeArticleUrl, composeArticleBody, composeArticleImage, composeArticleFullText, userProfile, addToast, apiConfig.visionApi, memoryPalaceConfig?.lightLLM]);
+  }, [charId, composeType, composeText, composeImages, composeMusicName, composeMusicArtist, composeMusicCover, composeArticleTitle, composeArticleUrl, composeArticleBody, composeArticleImage, composeArticleFullText, composeLocation, userProfile, addToast, apiConfig.visionApi, memoryPalaceConfig?.lightLLM]);
 
   // ==================== 图片上传 ====================
 
@@ -1262,6 +1267,14 @@ const MomentsApp: React.FC = () => {
             {/* 文章卡片 */}
             {post.article && renderArticleCard(post.article, post.id)}
 
+            {/* 定位：跟真朋友圈一样，贴在时间那一行上面，蓝色小字 */}
+            {post.location && (
+              <div className="flex items-center gap-1 mt-2 text-xs" style={{ color: '#5b8def' }}>
+                <MapPin size={12} weight="fill" className="shrink-0" />
+                <span className="truncate">{post.location}</span>
+              </div>
+            )}
+
             {/* 时间 + 操作栏 */}
             <div className="flex items-center justify-between mt-3">
               <div className="text-xs" style={{ color: 'var(--moments-text-secondary, #64748b)' }}>
@@ -1724,6 +1737,27 @@ const MomentsApp: React.FC = () => {
               )}
             </div>
           )}
+
+          {/* 定位：四种类型都能填，自己打字，不接地图服务 [用户确认新增]。
+              朋友圈那条位置本来也就是个标签，"在家""公司楼下"都成立。 */}
+          <div className="flex items-center gap-2 pt-3 mt-1 border-t border-white/10">
+            <MapPin size={16} className={composeLocation.trim() ? 'text-sky-400 shrink-0' : 'text-white/30 shrink-0'} />
+            <input
+              value={composeLocation}
+              onChange={e => setComposeLocation(e.target.value.slice(0, 40))}
+              placeholder="所在位置（可选）"
+              className="flex-1 min-w-0 bg-transparent text-sm text-white/90 placeholder:text-white/25 border-none outline-none"
+            />
+            {composeLocation && (
+              <button
+                onClick={() => setComposeLocation('')}
+                className="shrink-0 text-white/30 active:scale-90 transition"
+                aria-label="清除位置"
+              >
+                <X size={14} />
+              </button>
+            )}
+          </div>
         </div>
       </div>
     );
