@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import * as db from '../../utils/forumDb';
 import * as feed from '../../utils/forumFeed';
 import { FORUM_DEFAULTS } from '../../utils/forumConstants';
 import { useOS } from '../../context/OSContext';
@@ -16,6 +17,9 @@ const ForumSettingsPanel: React.FC<Props> = ({ heatLevel, onHeatLevelChange, dar
   const { addToast } = useOS();
   const [confirmingClear, setConfirmingClear] = useState(false);
   const [clearing, setClearing] = useState(false);
+  /** 图片清理的二次确认：null=没在确认，'posts'=只清帖子配图，'all'=连头像背景一起清。 */
+  const [confirmingImagePurge, setConfirmingImagePurge] = useState<null | 'posts' | 'all'>(null);
+  const [purgingImages, setPurgingImages] = useState(false);
 
   const handleGentleClear = async () => {
     setClearing(true);
@@ -25,6 +29,22 @@ const ForumSettingsPanel: React.FC<Props> = ({ heatLevel, onHeatLevelChange, dar
     } finally {
       setClearing(false);
       setConfirmingClear(false);
+    }
+  };
+
+  const handlePurgeImages = async (scope: 'posts' | 'all') => {
+    setPurgingImages(true);
+    try {
+      const r = await db.purgeForumImages({ includeAccountArtwork: scope === 'all' });
+      const parts = [`已去掉 ${r.images} 处图片引用`];
+      if (r.posts > 0) parts.push(`${r.posts} 条帖子`);
+      if (r.accounts > 0) parts.push(`${r.accounts} 个账号`);
+      addToast(`${parts.join('，')}。空间要等下一次「孤儿图片清理」才会真的释放`, 'success');
+    } catch (e: any) {
+      addToast(`清理失败：${e?.message?.slice(0, 60) || '未知错误'}`, 'error');
+    } finally {
+      setPurgingImages(false);
+      setConfirmingImagePurge(null);
     }
   };
 
@@ -74,6 +94,59 @@ const ForumSettingsPanel: React.FC<Props> = ({ heatLevel, onHeatLevelChange, dar
                 {clearing ? '清空中…' : '确定清空'}
               </button>
               <button onClick={() => setConfirmingClear(false)} className="px-4 py-2 rounded-full" style={{ background: 'rgba(127,127,127,0.15)' }}>
+                取消
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div>
+        <div className="text-sm font-bold mb-1">清理图片</div>
+        <div className="text-[12px] opacity-50 mb-2">
+          帖子和账号里的图片存在浏览器本地，清掉能腾空间。
+          <b>文字内容一个字都不动</b>，只是图没了。注意：这里抹掉的是引用，
+          空间要等下一次「孤儿图片清理」扫过才真的释放。不能撤销。
+        </div>
+
+        {confirmingImagePurge === null ? (
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => setConfirmingImagePurge('posts')}
+              className="text-sm px-4 py-2 rounded-full"
+              style={{ background: 'rgba(239,68,68,0.15)', color: '#ef4444' }}
+            >
+              清掉帖子配图
+            </button>
+            <button
+              onClick={() => setConfirmingImagePurge('all')}
+              className="text-sm px-4 py-2 rounded-full"
+              style={{ background: 'rgba(239,68,68,0.15)', color: '#ef4444' }}
+            >
+              连头像背景一起清
+            </button>
+          </div>
+        ) : (
+          <div className="text-sm space-y-2">
+            <div>
+              {confirmingImagePurge === 'posts'
+                ? '确定清掉所有帖子里的配图吗？包括你自己发的帖，外链图也会一起去掉。'
+                : '确定清掉全部图片吗？除了帖子配图，所有账号（你的、TA的、路人的）的头像和背景图也会一并清空。'}
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => handlePurgeImages(confirmingImagePurge)}
+                disabled={purgingImages}
+                className="px-4 py-2 rounded-full disabled:opacity-40"
+                style={{ background: '#ef4444', color: '#fff' }}
+              >
+                {purgingImages ? '清理中…' : '确定清理'}
+              </button>
+              <button
+                onClick={() => setConfirmingImagePurge(null)}
+                className="px-4 py-2 rounded-full"
+                style={{ background: 'rgba(127,127,127,0.15)' }}
+              >
                 取消
               </button>
             </div>
