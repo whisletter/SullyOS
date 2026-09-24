@@ -16,6 +16,8 @@ interface Props {
   apiConfig: { baseUrl: string; apiKey: string; model: string };
   /** 删除后调用，父组件负责导航回上一页（比如回主页）。不传就只是留在原地显示"已删除"。 */
   onDeleted?: () => void;
+  /** 当前身份是已注销的号：全站只读。编辑/删除/发评论/刷新一律关掉。 */
+  readOnly?: boolean;
 }
 
 /** 评论树里的一层，只按"楼"分组、楼内按时间线性展开（楼中楼这里不做多级缩进，
@@ -33,7 +35,7 @@ function groupByFloor(comments: db.ForumComment[]): { rootId: string; items: db.
     .sort((a, b) => a.items[0].createdAt - b.items[0].createdAt);
 }
 
-const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, apiConfig, onDeleted }) => {
+const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, apiConfig, onDeleted, readOnly }) => {
   const { addToast } = useOS();
   const [post, setPost] = useState<db.ForumPost | null>(null);
   const [comments, setComments] = useState<db.ForumComment[]>([]);
@@ -47,6 +49,9 @@ const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, ap
   const [editContent, setEditContent] = useState('');
   const [editTopicTag, setEditTopicTag] = useState<ForumTopicTag>('daily_chatter');
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  /** 正在确认删除的那条评论 id。null = 没在确认。 */
+  const [confirmingDeleteComment, setConfirmingDeleteComment] = useState<string | null>(null);
+  const [deletingComment, setDeletingComment] = useState(false);
 
   const load = useCallback(async () => {
     const [p, c, accounts] = await Promise.all([
@@ -79,7 +84,9 @@ const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, ap
   const author = post ? accountsById.get(post.authorAccountId) : undefined;
   // [用户确认新增] 编辑/删除只对"用户方账号发的帖子"开放（主号/小号/共管账号），
   // 不要求必须是当前激活身份——切换回主号也该能管自己小号发过的旧帖。
-  const canManage = isUserSideAccount(author);
+  // readOnly（当前登录的是已注销的小号）时一律关掉，原来这里漏接了，
+  // 切到注销号照样能编辑/删除帖子。
+  const canManage = isUserSideAccount(author) && !readOnly;
 
   const startEdit = useCallback(() => {
     if (!post) return;
@@ -103,9 +110,29 @@ const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, ap
     if (onDeleted) onDeleted();
   }, [post, onDeleted]);
 
+  /** 这一下会删掉几条（含楼中楼）。确认文案要用，所以先算出来。 */
+  const commentDeleteCount = useCallback((commentId: string) => (
+    feed.collectCommentSubtreeIds(comments, commentId).length
+  ), [comments]);
+
+  const handleDeleteComment = useCallback(async (commentId: string) => {
+    if (!post) return;
+    setDeletingComment(true);
+    try {
+      const { deleted } = await feed.deleteCommentCascade(post.id, commentId);
+      addToast(deleted > 1 ? `已删除 ${deleted} 条` : '已删除', 'success');
+      await load();
+    } catch (e: any) {
+      addToast(`删除失败: ${e?.message?.slice(0, 60) || '未知错误'}`, 'error');
+    } finally {
+      setDeletingComment(false);
+      setConfirmingDeleteComment(null);
+    }
+  }, [post, load, addToast]);
+
   const handleSubmitComment = useCallback(async () => {
     const text = inputText.trim();
-    if (!text || !post) return;
+    if (!text || !post || readOnly) return;
     await feed.appendComment(post.id, {
       authorAccountId: activeAccount.id,
       content: replyTarget ? text : text, // @提及靠正文里的 @handle 字符串，不额外拼接
@@ -115,10 +142,10 @@ const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, ap
     setInputText('');
     setReplyTarget(null);
     await load();
-  }, [inputText, post, activeAccount, replyTarget, load]);
+  }, [inputText, post, activeAccount, replyTarget, load, readOnly]);
 
   const handleRefresh = useCallback(async () => {
-    if (!post) return;
+    if (!post || readOnly) return;
     if (!apiConfig?.baseUrl || !apiConfig?.apiKey || !apiConfig?.model) {
       addToast('请先配置 API', 'info');
       return;
@@ -145,7 +172,7 @@ const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, ap
     } finally {
       setRefreshing(false);
     }
-  }, [post, apiConfig, heatLevel, addToast, load]);
+  }, [post, apiConfig, heatLevel, addToast, load, readOnly]);
 
   if (loading) return <div className="text-center py-16 text-sm opacity-50">加载中…</div>;
   if (!post) return <div className="text-center py-16 text-sm opacity-50">这条帖子不见了</div>;
@@ -240,7 +267,7 @@ const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, ap
         <span className="text-[13px] font-bold opacity-60">评论 {comments.length}</span>
         <button
           onClick={handleRefresh}
-          disabled={refreshing}
+          disabled={refreshing || readOnly}
           className="ml-auto p-1.5 rounded-full active:scale-90 transition-transform disabled:opacity-40"
         >
           <ArrowsClockwise size={18} className={refreshing ? 'animate-spin' : ''} />
@@ -253,6 +280,8 @@ const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, ap
         <div key={floor.rootId} className="px-3 py-2.5 border-b" style={{ borderColor: 'rgba(127,127,127,0.08)' }}>
           {floor.items.map((c, i) => {
             const commenter = accountsById.get(c.authorAccountId);
+            const isMine = isUserSideAccount(commenter);
+            const willDelete = confirmingDeleteComment === c.id ? commentDeleteCount(c.id) : 0;
             return (
               <div key={c.id} className={i > 0 ? 'ml-6 mt-1.5' : ''}>
                 <div className="text-[13px]">
@@ -260,12 +289,52 @@ const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, ap
                   {commenter?.isVerified && <span className="text-blue-400 ml-0.5">✔</span>}
                   <span className="ml-1.5">{c.content}</span>
                 </div>
-                <button
-                  onClick={() => setReplyTarget(c)}
-                  className="text-[11px] opacity-40 mt-0.5 flex items-center gap-1"
-                >
-                  <ArrowBendUpLeft size={11} /> 回复
-                </button>
+                <div className="flex items-center gap-3 mt-0.5">
+                  <button
+                    onClick={() => setReplyTarget(c)}
+                    disabled={readOnly}
+                    className="text-[11px] opacity-40 flex items-center gap-1 disabled:opacity-20"
+                  >
+                    <ArrowBendUpLeft size={11} /> 回复
+                  </button>
+                  {/* 谁的评论都能删 [用户确认]——路人的、TA 的都行。这是你自己的 App。
+                      只读身份（已注销的小号）下整排都收起来。 */}
+                  {!readOnly && (
+                    <button
+                      onClick={() => setConfirmingDeleteComment(c.id)}
+                      className="text-[11px] opacity-40 flex items-center gap-1"
+                    >
+                      <TrashSimple size={11} /> 删除
+                    </button>
+                  )}
+                </div>
+
+                {confirmingDeleteComment === c.id && (
+                  <div className="mt-1.5 text-[12px] space-y-1.5 p-2 rounded-lg" style={{ background: 'rgba(239,68,68,0.1)' }}>
+                    <div>
+                      {isMine ? '删掉你这条评论？' : `删掉 ${commenter?.displayName || '这个账号'} 的这条评论？`}
+                      {willDelete > 1 && `底下的 ${willDelete - 1} 条回复会一起删掉。`}
+                      不能撤销。
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => handleDeleteComment(c.id)}
+                        disabled={deletingComment}
+                        className="px-3 py-1 rounded-full text-[11px] disabled:opacity-40"
+                        style={{ background: '#ef4444', color: '#fff' }}
+                      >
+                        {deletingComment ? '删除中…' : '确定删除'}
+                      </button>
+                      <button
+                        onClick={() => setConfirmingDeleteComment(null)}
+                        className="px-3 py-1 rounded-full text-[11px]"
+                        style={{ background: 'rgba(127,127,127,0.15)' }}
+                      >
+                        取消
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })}
@@ -291,11 +360,14 @@ const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, ap
           value={inputText}
           onChange={e => setInputText(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter') handleSubmitComment(); }}
-          placeholder={replyTarget ? `回复：${replyTarget.content.slice(0, 10)}…` : '说点什么…（@handle 可以精准点名）'}
-          className="flex-1 min-w-0 px-3 py-2 rounded-full text-sm outline-none"
+          disabled={readOnly}
+          placeholder={readOnly
+            ? '这个号已注销，只能看不能发'
+            : replyTarget ? `回复：${replyTarget.content.slice(0, 10)}…` : '说点什么…（@handle 可以精准点名）'}
+          className="flex-1 min-w-0 px-3 py-2 rounded-full text-sm outline-none disabled:opacity-50"
           style={{ background: 'rgba(127,127,127,0.12)' }}
         />
-        <button onClick={handleSubmitComment} className="text-sm font-bold px-3 shrink-0">发送</button>
+        <button onClick={handleSubmitComment} disabled={readOnly} className="text-sm font-bold px-3 shrink-0 disabled:opacity-30">发送</button>
       </div>
     </div>
   );
