@@ -511,7 +511,19 @@ const ForumApp: React.FC = () => {
   return (
     <div
       className="relative h-full w-full flex flex-col overflow-hidden"
-      style={{ background: themeTokens.bg, color: themeTokens.text }}
+      // 主题色同时挂成 CSS 变量：弹层/悬浮条（帖子详情的评论栏、身份面板、编辑资料）
+      // 原来写的是 background:'inherit'，而它们的父级本身是透明的，于是 inherit 到的
+      // 也是透明——底下的内容会直接透上来。这些元素都是这个根节点的后代，变量能
+      // 正常往下继承，所以它们只要写 var(--forum-bg) 就能拿到当前深浅色的实色背景，
+      // 不用一层层往下传 props。
+      style={{
+        background: themeTokens.bg,
+        color: themeTokens.text,
+        '--forum-bg': themeTokens.bg,
+        '--forum-subtle-bg': themeTokens.subtleBg,
+        '--forum-border': themeTokens.border,
+        '--forum-text': themeTokens.text,
+      } as React.CSSProperties}
     >
       {/* 顶栏：返回 + 标题 + 手动刷新（仅主页显示）+ 浅色/夜色切换 */}
       <div
@@ -614,8 +626,11 @@ const ForumApp: React.FC = () => {
         </div>
       </div>
 
-      {/* 右下角悬浮「发帖」：底下垫一层同色光晕做悬浮感，正在发布页时隐藏，免得挡住工具条 */}
-      {ready && activeAccount && !readOnly && section.kind !== 'compose' && (
+      {/* 右下角悬浮「发帖」：底下垫一层同色光晕做悬浮感。
+          正在发布页时隐藏，免得挡住工具条；
+          在帖子详情页也隐藏——那里底部有一条常驻的评论输入栏，这颗按钮正好压在
+          「发送」上面，点不到。看帖子时该做的事是评论，要发新帖退一步就有。 */}
+      {ready && activeAccount && !readOnly && section.kind !== 'compose' && section.kind !== 'post' && (
         <div className="absolute right-5 z-30 pointer-events-none" style={{ bottom: 'calc(var(--safe-bottom, 0px) + 22px)' }}>
           <div
             className="absolute -inset-3 rounded-full"
