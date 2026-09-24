@@ -59,6 +59,21 @@ interface FlowItem {
  * footer 单独开一个插槽而不是塞进 children：底部操作条要钉在屏幕底部，
  * 跟着内容一起滚的话，问到第十几楼时那排按钮就跑到看不见的地方去了。
  */
+/**
+ * 把汤面按句子拆行。
+ *
+ * 汤面常常是三五句挤成一整段，谜题本来就要反复回读，挤成一坨很难扫。
+ * 按句末标点断开、一句一行之后，"哪句话有问题"一眼就能定位。
+ * 只在**展示**时拆，数据本身不动——喂给主持人和 TA 的还是原文。
+ */
+function splitSoupFace(face: string): string[] {
+  return face
+    .replace(/([。！？…])\s*/g, '$1\n')
+    .split('\n')
+    .map(l => l.trim())
+    .filter(Boolean);
+}
+
 const Shell: React.FC<{
   title: string;
   onBack: () => void;
@@ -579,8 +594,8 @@ const TurtleSoupGame: React.FC<Props> = ({ onBack }) => {
             <span style={{ opacity: 0.7 }}>{soup.difficulty}</span>
           </div>
           <div className="font-bold text-[18px] mb-2" style={{ color: palette.title }}>{soup.title}</div>
-          <div className="text-[14px] leading-relaxed whitespace-pre-wrap" style={{ color: palette.body }}>
-            {soup.face}
+          <div className="text-[14px] leading-relaxed space-y-1.5" style={{ color: palette.body }}>
+            {splitSoupFace(soup.face).map((line, i) => <div key={i}>{line}</div>)}
           </div>
         </div>
 
