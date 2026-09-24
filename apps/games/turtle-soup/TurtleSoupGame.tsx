@@ -6,11 +6,11 @@ import { createChatMirror } from '../shared/chatMirror';
 import { SOUPS, type Soup, type SoupDifficulty } from './soups';
 import {
   RULES, ruleOf, createGame, canAsk, canHint, isOutOfQuestions, preCheckQuestion,
-  drawSoup, filterSoups, soupById, scoreTier, makeQaId,
+  drawSoup, filterSoups, soupById, scoreTier, makeQaId, makeChatId,
   loadPlayed, savePlayed, loadFilter, saveFilter, loadGame, saveGame,
   loadApiSetting, saveApiSetting, apiFilled, EMPTY_API,
   KEY_HOST_API, KEY_TA_API, SHELL, VERDICT_COLORS, paletteOf, soupKind,
-  type GameApiSetting, type GameState, type QaEntry, type RuleLevel, type SoupFilter,
+  type ChatEntry, type GameApiSetting, type GameState, type QaEntry, type RuleLevel, type SoupFilter,
 } from './engine';
 import { askHost, askTaQuestion, askTaGuess, scoreSubmission, type AiContext } from './ai';
 
@@ -23,10 +23,12 @@ const DIFFICULTIES: SoupDifficulty[] = ['简单', '中等', '困难', '抽象'];
 /** 聊天流里的一条。系统条用来显示提示、驳回、结算这些非问答内容。 */
 interface FlowItem {
   id: string;
-  kind: 'qa' | 'system' | 'aside' | 'guess';
+  kind: 'qa' | 'system' | 'aside' | 'guess' | 'chat';
   text: string;
   qa?: QaEntry;
   who?: string;
+  /** chat 用：是你说的还是 TA 说的，决定气泡靠哪边。 */
+  mine?: boolean;
 }
 
 /**
@@ -138,6 +140,8 @@ const TurtleSoupGame: React.FC<Props> = ({ onBack }) => {
   const [game, setGame] = useState<GameState | null>(null);
   const [flow, setFlow] = useState<FlowItem[]>([]);
   const [input, setInput] = useState('');
+  /** 输入框这一句是问主持人还是跟 TA 聊。两条路完全不同，所以显式切换而不是靠猜。 */
+  const [inputMode, setInputMode] = useState<'ask' | 'chat'>('ask');
   const [busy, setBusy] = useState<null | 'host' | 'ta' | 'score'>(null);
   const [played, setPlayed] = useState<Set<string>>(() => loadPlayed(charId));
   const [filter, setFilter] = useState<SoupFilter>(() => loadFilter(charId));
@@ -163,10 +167,18 @@ const TurtleSoupGame: React.FC<Props> = ({ onBack }) => {
       setRule(saved.rule);
       setScreen('playing');
       const s = soupById(saved.soupId);
-      setFlow(saved.qa.map(q => ({
-        id: q.id, kind: 'qa', qa: q,
-        text: q.question, who: q.asker === 'user' ? names.user : names.ta,
-      })));
+      // 问答和闲聊按时间合并，续玩时看到的顺序跟当时一致
+      const merged: FlowItem[] = [
+        ...saved.qa.map(q => ({
+          id: q.id, kind: 'qa' as const, qa: q, at: q.at,
+          text: q.question, who: q.asker === 'user' ? names.user : names.ta,
+        })),
+        ...(saved.chat || []).map(c => ({
+          id: c.id, kind: 'chat' as const, at: c.at, text: c.text,
+          who: c.who === 'user' ? names.user : names.ta, mine: c.who === 'user',
+        })),
+      ].sort((a: any, b: any) => a.at - b.at).map(({ at, ...rest }: any) => rest);
+      setFlow(merged);
       if (s && saved.hintsUsed > 0) {
         // 续玩时把已经掀开的提示补回流里，不然看不到自己用过什么
         setFlow(prev => [
@@ -260,6 +272,28 @@ const TurtleSoupGame: React.FC<Props> = ({ onBack }) => {
     mirror.current(asker === 'user' ? 'user' : 'assistant', `${question} → 主持人：${answer.verdict}`);
   }, [game, soup, aiCtx, names.user, names.ta, pushFlow]);
 
+  /**
+   * 跟 TA 说句话。[用户确认改动]
+   *
+   * **只记下来，不立刻叫它回。** 一开始我做成了发完就回，但那会打断猜谜的节奏——
+   * 你想说的往往是"我怀疑这人根本不是人"这种随口一句，说完就该接着问下一个问题，
+   * 而不是停下来等它答话。
+   *
+   * 它在下一次被你点「让{TA}问」时，会先接你这句再提问（那句 aside 本来就有）。
+   * 想立刻听它说什么，点「{TA}怎么想」。
+   *
+   * 所以这个动作**一次 API 都不花**，纯本地记录。
+   */
+  const handleChat = useCallback(() => {
+    const text = input.trim();
+    if (!text || !game || busy) return;
+    const entry: ChatEntry = { id: makeChatId(), who: 'user', text, at: Date.now() };
+    setGame(g => g ? { ...g, chat: [...(g.chat || []), entry] } : g);
+    pushFlow({ kind: 'chat', text, who: names.user, mine: true });
+    setInput('');
+    mirror.current('user', text);
+  }, [input, game, busy, names.user, pushFlow]);
+
   const handleAsk = useCallback(async () => {
     const q = input.trim();
     if (!q || !game || busy) return;
@@ -297,7 +331,11 @@ const TurtleSoupGame: React.FC<Props> = ({ onBack }) => {
         return;
       }
       if (thought.aside) {
-        pushFlow({ kind: 'aside', who: names.ta, text: thought.aside });
+        // aside 同时记进 chat：它接你话说的这句，下次它自己也该看得到，
+        // 否则每轮都像失忆一样重新开始搭话。
+        const taChat: ChatEntry = { id: makeChatId(), who: 'ta', text: thought.aside, at: Date.now() };
+        setGame(g => g ? { ...g, chat: [...(g.chat || []), taChat] } : g);
+        pushFlow({ kind: 'chat', text: thought.aside, who: names.ta, mine: false });
         mirror.current('assistant', thought.aside);
       }
       // TA 想出来的问题也过一遍本地闸：它也会重复提问
@@ -588,17 +626,40 @@ const TurtleSoupGame: React.FC<Props> = ({ onBack }) => {
         {!done && !submitting && (
           <div className="shrink-0 border-t px-3 pt-2 space-y-2"
                style={{ borderColor: SHELL.border, background: SHELL.bg, paddingBottom: 'calc(var(--safe-bottom, 0px) + 8px)' }}>
+            {/* 两条路完全不同（问主持人扣次数、只得四个词；跟 TA 聊不扣次数、
+                主持人不参与），所以显式切换，不靠猜你想干嘛。 */}
+            <div className="flex items-center gap-1.5">
+              {([['ask', '问主持人'], ['chat', `跟${names.ta}聊`]] as const).map(([m, label]) => (
+                <button
+                  key={m}
+                  onClick={() => setInputMode(m)}
+                  className="text-[12px] px-3 py-1 rounded-full"
+                  style={inputMode === m
+                    ? { background: 'rgba(217,164,65,0.18)', color: SHELL.amber, fontWeight: 700 }
+                    : { background: SHELL.panel, color: SHELL.dim }}
+                >
+                  {label}
+                </button>
+              ))}
+              <span className="text-[11px] ml-auto" style={{ color: SHELL.dim }}>
+                {inputMode === 'ask' ? '扣 1 次提问' : `不扣次数，${names.ta}下次开口时会接`}
+              </span>
+            </div>
+
             <div className="flex items-center gap-2">
               <input
                 value={input}
                 onChange={e => setInput(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') handleAsk(); }}
-                disabled={!!busy || !canAsk(game, 'user')}
-                placeholder={canAsk(game, 'user') ? '问一个能用是/否回答的问题…' : '你的提问次数用完了'}
+                onKeyDown={e => { if (e.key === 'Enter') (inputMode === 'ask' ? handleAsk() : handleChat()); }}
+                disabled={!!busy || (inputMode === 'ask' && !canAsk(game, 'user'))}
+                placeholder={inputMode === 'chat'
+                  ? `说给${names.ta}听…（它下次开口时会接）`
+                  : canAsk(game, 'user') ? '问一个能用是/否回答的问题…' : '你的提问次数用完了'}
                 className="flex-1 min-w-0 px-3 py-2 rounded-full text-sm outline-none disabled:opacity-40"
                 style={{ background: SHELL.panel, color: SHELL.text, border: `1px solid ${SHELL.border}` }}
               />
-              <button onClick={handleAsk} disabled={!input.trim() || !!busy}
+              <button onClick={() => (inputMode === 'ask' ? handleAsk() : handleChat())}
+                      disabled={!input.trim() || !!busy}
                       className="shrink-0 p-2 rounded-full disabled:opacity-30"
                       style={{ background: SHELL.amber, color: '#1a1206' }}>
                 <PaperPlaneTilt size={16} weight="fill" />
@@ -675,6 +736,20 @@ const TurtleSoupGame: React.FC<Props> = ({ onBack }) => {
                 <div key={item.id} className="text-[12px] px-3 py-2 rounded-lg leading-relaxed"
                      style={{ background: SHELL.panel, color: SHELL.dim }}>
                   {item.text}
+                </div>
+              );
+            }
+            if (item.kind === 'chat') {
+              // 闲聊做成左右分边的气泡，跟提问那种"一行 + 判定"明显区分开
+              return (
+                <div key={item.id} className={`flex ${item.mine ? 'justify-end' : 'justify-start'}`}>
+                  <div className="max-w-[78%] px-3 py-2 rounded-2xl text-[13px] leading-relaxed whitespace-pre-wrap"
+                       style={item.mine
+                         ? { background: 'rgba(217,164,65,0.18)', color: SHELL.text }
+                         : { background: 'rgba(255,255,255,0.06)', color: SHELL.text }}>
+                    {!item.mine && <div className="text-[11px] mb-0.5" style={{ color: SHELL.amber }}>{item.who}</div>}
+                    {item.text}
+                  </div>
                 </div>
               );
             }

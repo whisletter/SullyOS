@@ -68,6 +68,13 @@ function renderQaLog(g: GameState, taName: string, userName: string): string {
   }).join('\n');
 }
 
+/** 最近的闲聊。TA 提问和推断时也要看——你随口说的想法往往就是最好的线索。 */
+function renderChat(g: GameState, taName: string, userName: string, limit = 10): string {
+  const recent = (g.chat || []).slice(-limit);
+  if (recent.length === 0) return '（还没聊过）';
+  return recent.map(c => `${c.who === 'user' ? userName : taName}：${c.text}`).join('\n');
+}
+
 function renderHints(g: GameState, soup: Soup): string {
   if (g.hintsUsed === 0) return '（还没用提示）';
   return soup.hints.slice(0, g.hintsUsed).map((h, i) => `提示${i + 1}：${h}`).join('\n');
@@ -188,8 +195,10 @@ export async function askTaQuestion(
 - 你还剩 ${left} 提问机会。
 
 说话就按你自己的性格来，不要变成一个标准的推理机器。
-aside 是你问问题时顺口说的一句话（比如"我怀疑这人根本不是人"），可以带情绪、可以吐槽、
-可以跟${ctx.userName}说话。不想说就留空。
+aside 是你开口提问前顺口说的一句话。**${ctx.userName}刚才跟你说的话就在下面，
+要是有值得接的，先接一句再问**——这是你们俩唯一的交谈机会，别把它浪费成客套。
+接话可以是附和、反驳、吐槽这题难、或者顺着对方的思路说下去。
+没什么可接的就说说你自己此刻在想什么。实在没有就留空。
 
 只返回 JSON：
 {"question":"你要问的那一句","aside":"可选的一句嘴碎，留空就不要这个字段"}`;
@@ -203,7 +212,11 @@ ${renderQaLog(g, ctx.taName, ctx.userName)}
 【已经放出来的提示】
 ${renderHints(g, soup)}
 
-轮到你问了。`;
+【你们俩刚才聊的】
+${renderChat(g, ctx.taName, ctx.userName)}
+
+轮到你问了。先看看${ctx.userName}刚才说了什么——有值得接的就在 aside 里接一句，
+有值得顺着挖的方向就顺着问。`;
 
   const reply = await callGameAI({
     api: pickApi(ctx, 'ta'),
@@ -260,6 +273,9 @@ ${renderQaLog(g, ctx.taName, ctx.userName)}
 【提示】
 ${renderHints(g, soup)}
 
+【你们俩聊过的】
+${renderChat(g, ctx.taName, ctx.userName)}
+
 你觉得真相是什么？`;
 
   const reply = await callGameAI({
@@ -271,6 +287,60 @@ ${renderHints(g, soup)}
     meta: { appName: '与昼', charId: ctx.charId, charName: ctx.taName, purpose: '海龟汤 · TA的推断' },
   });
   return reply ? reply.trim().slice(0, 600) : null;
+}
+
+/**
+ * 跟 TA 闲聊。[用户确认新增]
+ *
+ * 跟提问是两条完全不同的路：提问要过主持人、扣次数、只能得到四个词；
+ * 闲聊只在你和它之间，不惊动主持人、不扣次数，就是猜谜时随口说的那些话——
+ * "我怀疑这人根本不是人""你刚才那个方向我觉得不对""这题好难"。
+ *
+ * **同样看不到汤底。** 它跟你一样在猜，所以聊天里它说的推测可能是错的，
+ * 也可能正好点醒你——这正是两个人一起猜比一个人猜有意思的地方。
+ */
+export async function askTaChat(
+  ctx: AiContext,
+  soup: Soup,
+  g: GameState,
+  userMessage: string,
+): Promise<string | null> {
+  const system = `${ctx.taPersona}
+
+你在和${ctx.userName}一起玩海龟汤。现在不是提问环节，是你们俩在**聊天**——
+${ctx.userName}刚跟你说了句话，你回一句。
+
+- **你不知道答案。** 你看到的和${ctx.userName}一样多，所以别装作心里有数。
+- 就按你自己的性格说话。可以附和、可以反驳、可以吐槽这题难、可以顺着对方的思路往下推、
+  也可以说一个你自己的猜测。
+- 说人话，别写成分析报告，不要用列表。两三句就够，聊天不是演讲。
+- 这只是闲聊，**不要在这里向主持人提问**——要问问题是另一个按钮的事。
+
+只输出你要说的那句话，不要 JSON，不要任何前缀。`;
+
+  const user = `【汤面】
+${soup.face}
+
+【已经问过的】
+${renderQaLog(g, ctx.taName, ctx.userName)}
+
+【已经放出来的提示】
+${renderHints(g, soup)}
+
+【你们刚才聊的】
+${renderChat(g, ctx.taName, ctx.userName)}
+
+${ctx.userName}刚说：${userMessage}`;
+
+  const reply = await callGameAI({
+    api: pickApi(ctx, 'ta'),
+    label: ctx.taName,
+    temperature: 0.95,
+    system,
+    messages: [{ role: 'user', content: user }],
+    meta: { appName: '与昼', charId: ctx.charId, charName: ctx.taName, purpose: '海龟汤 · 闲聊' },
+  });
+  return reply ? reply.trim().slice(0, 500) : null;
 }
 
 // ==================== 四、评分 ====================
