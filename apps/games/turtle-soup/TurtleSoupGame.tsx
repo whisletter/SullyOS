@@ -133,6 +133,8 @@ const TurtleSoupGame: React.FC<Props> = ({ onBack }) => {
   const names = readNames(userProfile, char);
 
   const [screen, setScreen] = useState<Screen>('lobby');
+  /** 从哪一屏点进设置的。有未完成对局时是从对局页进来的，返回要回对局页而不是大厅。 */
+  const [settingsFrom, setSettingsFrom] = useState<Screen>('lobby');
   const [game, setGame] = useState<GameState | null>(null);
   const [flow, setFlow] = useState<FlowItem[]>([]);
   const [input, setInput] = useState('');
@@ -359,7 +361,7 @@ const TurtleSoupGame: React.FC<Props> = ({ onBack }) => {
       <Shell
         onBack={onBack}
         title="海龟汤 · 共猜"
-        right={<button onClick={() => setScreen('settings')} className="p-1.5"><Gear size={18} /></button>}
+        right={<button onClick={() => { setSettingsFrom('lobby'); setScreen('settings'); }} className="p-1.5"><Gear size={18} /></button>}
       >
         <div className="px-4 py-5 space-y-5">
           <div className="text-center py-6">
@@ -412,8 +414,59 @@ const TurtleSoupGame: React.FC<Props> = ({ onBack }) => {
   // ── 设置 ──
   if (screen === 'settings') {
     return (
-      <Shell onBack={onBack} title="设置" right={<button onClick={() => setScreen('lobby')} className="text-[13px] px-2" style={{ color: SHELL.amber }}>完成</button>}>
+      <Shell onBack={onBack} title="设置" right={<button onClick={() => setScreen(settingsFrom)} className="text-[13px] px-2" style={{ color: SHELL.amber }}>完成</button>}>
         <div className="px-4 py-4 space-y-6">
+          {/* 玩法说明放最上面：设置页是唯一一个能从容看字的地方，
+              而海龟汤的规则（只能问是否题、四种判定、评分三档）不说清楚是玩不明白的。 */}
+          <div className="space-y-2">
+            <div className="text-sm font-bold">怎么玩</div>
+            <div className="text-[12px] leading-relaxed space-y-2" style={{ color: SHELL.dim }}>
+              <p>
+                <b style={{ color: SHELL.text }}>海龟汤</b>是情境猜谜：给你一段古怪的
+                <b style={{ color: SHELL.text }}>汤面</b>（故事开头），你和{names.ta}轮流向主持人提问，
+                一层层把藏在底下的<b style={{ color: SHELL.text }}>汤底</b>（完整真相）挖出来。
+              </p>
+              <p>
+                <b style={{ color: SHELL.text }}>提问只能是「是/否」能回答的。</b>
+                主持人只回四个词，各自的意思是：
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {([['是', '按汤底这句话成立'], ['否', '不成立'],
+                   ['是也不是', '部分成立，或换个理解就不成立'], ['无关', '汤底里根本没这回事，别往下挖了']] as const)
+                  .map(([v, meaning]) => (
+                    <div key={v} className="flex items-center gap-1.5 px-2 py-1 rounded-lg" style={{ background: 'rgba(255,255,255,0.04)' }}>
+                      <span className="text-[11px] font-bold px-1.5 py-0.5 rounded"
+                            style={{ color: VERDICT_COLORS[v].fg, background: VERDICT_COLORS[v].bg }}>{v}</span>
+                      <span className="text-[11px]">{meaning}</span>
+                    </div>
+                  ))}
+              </div>
+              <p>
+                问了开放式问题（"为什么""是谁"）会被驳回，<b style={{ color: SHELL.text }}>不扣次数</b>；
+                重复的问题也会被拦下来，直接告诉你上次问到的答案。
+              </p>
+              <p>
+                卡住了点<b style={{ color: SHELL.text }}>提示</b>——提示是分级的，越用越接近答案，
+                而且<b style={{ color: SHELL.text }}>不花 API</b>。
+                想听听{names.ta}怎么想就点「{names.ta}怎么想」，它会把自己的推断讲一遍——
+                <b style={{ color: SHELL.text }}>它和你一样不知道答案</b>，所以也可能是错的。
+              </p>
+              <p>
+                有把握了点<b style={{ color: SHELL.text }}>提交</b>，把还原的完整故事写下来。
+                <b style={{ color: SHELL.text }}>提交即结算，之后不能再提问</b>。
+                主持人按三档打分：关键情节命中 40% + 逻辑连贯 30% + 细节还原 30%，
+                最后可以选择揭晓原汤底复盘。
+              </p>
+              <p>
+                三档规则难度只影响次数：<b style={{ color: SHELL.text }}>轻松</b>无限提问无限提示、
+                <b style={{ color: SHELL.text }}>正常</b>每人 6 问 + 3 次提示、
+                <b style={{ color: SHELL.text }}>严格</b>每人 3 问且没有提示。
+                汤本身的难度（简单/中等/困难/抽象）是另一回事，在下面筛选里选。
+              </p>
+              <p>同一碗汤不会重复抽到。喝完的记录在最下面可以清空。</p>
+            </div>
+          </div>
+
           <ApiBlock
             label="主持人 API"
             note="整局里调用最频繁的一环——每问一句就是一次，干的却是最不需要脑子的活（对着汤底判是非）。挂个便宜模型完全够用，按量计费时这里最省钱。"
@@ -520,7 +573,14 @@ const TurtleSoupGame: React.FC<Props> = ({ onBack }) => {
       onBack={onBack}
       title="海龟汤"
       right={
-        <button onClick={() => endGame(false)} className="text-[12px] px-2" style={{ color: SHELL.dim }}>退出</button>
+        <>
+          {/* 对局中也要能进设置：有未完成的局时 App 直接跳到这一屏，
+              大厅那个齿轮根本够不着，等于设置页永远打不开。 */}
+          <button onClick={() => { setSettingsFrom('playing'); setScreen('settings'); }} className="p-1.5">
+            <Gear size={17} />
+          </button>
+          <button onClick={() => endGame(false)} className="text-[12px] px-2" style={{ color: SHELL.dim }}>退出</button>
+        </>
       }
       footer={
         <>
