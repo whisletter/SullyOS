@@ -44,6 +44,73 @@ interface FlowItem {
  * TA 提问是**手动触发**的：一次点击花两次调用（它想问题 + 主持人判定），
  * 什么时候花由你决定，不自动连发。
  */
+/**
+ * 游戏外壳。
+ *
+ * ⚠️ 必须定义在组件**外面**。定义在组件体内的话，每次 render 都会生成一个新的
+ * 函数标识，React 会当成"换了一个组件类型"，把整棵子树卸载重建——最直接的后果是
+ * 输入框每打一个字就失焦，根本没法打字。
+ *
+ * 根节点必须是 absolute inset-0 + 高 z-index：游戏大厅（YuZhouApp 的 YuZhouGamePage）
+ * 把游戏渲染在它自己那个 absolute inset-0 z-[60] 的容器里面，作为列表的兄弟节点。
+ * 根节点要是普通流，就会被排在列表下方——渲染了但看不见，表现就是"点了没反应"。
+ * 大富翁那边是 z-[70]，这里跟它对齐。
+ *
+ * footer 单独开一个插槽而不是塞进 children：底部操作条要钉在屏幕底部，
+ * 跟着内容一起滚的话，问到第十几楼时那排按钮就跑到看不见的地方去了。
+ */
+const Shell: React.FC<{
+  title: string;
+  onBack: () => void;
+  right?: React.ReactNode;
+  footer?: React.ReactNode;
+  children: React.ReactNode;
+}> = ({ title, onBack, right, footer, children }) => (
+  <div className="absolute inset-0 z-[70] flex flex-col overflow-hidden"
+       style={{ background: SHELL.bg, color: SHELL.text }}>
+    <div className="flex items-center gap-2 px-3 py-2.5 shrink-0 border-b"
+         style={{ borderColor: SHELL.border, paddingTop: 'calc(var(--safe-top, 0px) + 10px)' }}>
+      <button onClick={onBack} className="p-1 active:scale-90 transition-transform"><CaretLeft size={20} /></button>
+      <span className="font-bold text-[15px]">{title}</span>
+      <div className="ml-auto flex items-center gap-1">{right}</div>
+    </div>
+    <div className="flex-1 min-h-0 overflow-y-auto">{children}</div>
+    {footer}
+  </div>
+);
+
+/**
+ * 一套 API 配置的输入块。
+ *
+ * ⚠️ 跟 Shell 同样的理由，必须定义在组件外面：定义在里面的话每次 render 都是新的
+ * 组件类型，React 会把这三个 input 卸载重建，打一个字就失焦一次，根本填不进去。
+ */
+const ApiBlock: React.FC<{
+  label: string;
+  note: string;
+  value: GameApiSetting;
+  onChange: (v: GameApiSetting) => void;
+}> = ({ label, note, value, onChange }) => (
+  <div className="space-y-2">
+    <div className="text-sm font-bold">{label}</div>
+    <div className="text-[11px] leading-relaxed" style={{ color: SHELL.dim }}>{note}</div>
+    {(['baseUrl', 'apiKey', 'model'] as const).map(field => (
+      <input
+        key={field}
+        value={value[field]}
+        type={field === 'apiKey' ? 'password' : 'text'}
+        onChange={e => onChange({ ...value, [field]: e.target.value })}
+        placeholder={field === 'baseUrl' ? 'Base URL' : field === 'apiKey' ? 'API Key' : 'Model'}
+        className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+        style={{ background: SHELL.panel, color: SHELL.text, border: `1px solid ${SHELL.border}` }}
+      />
+    ))}
+    <div className="text-[11px]" style={{ color: apiFilled(value) ? '#7fd4a0' : SHELL.dim }}>
+      {apiFilled(value) ? '已配置，这一侧走这套' : '留空 = 用 App 的主 API'}
+    </div>
+  </div>
+);
+
 const TurtleSoupGame: React.FC<Props> = ({ onBack }) => {
   const { activeCharacterId, characters, userProfile, apiConfig, addToast } = useOS();
   const charId = activeCharacterId || '';
@@ -271,23 +338,11 @@ const TurtleSoupGame: React.FC<Props> = ({ onBack }) => {
 
   // ==================== 渲染 ====================
 
-  const Shell: React.FC<{ title: string; right?: React.ReactNode; children: React.ReactNode }> =
-    ({ title, right, children }) => (
-      <div className="h-full flex flex-col" style={{ background: SHELL.bg, color: SHELL.text }}>
-        <div className="flex items-center gap-2 px-3 py-2.5 shrink-0 border-b"
-             style={{ borderColor: SHELL.border, paddingTop: 'calc(var(--safe-top, 0px) + 10px)' }}>
-          <button onClick={onBack} className="p-1 active:scale-90 transition-transform"><CaretLeft size={20} /></button>
-          <span className="font-bold text-[15px]">{title}</span>
-          <div className="ml-auto flex items-center gap-1">{right}</div>
-        </div>
-        <div className="flex-1 min-h-0 overflow-y-auto">{children}</div>
-      </div>
-    );
-
   // ── 大厅 ──
   if (screen === 'lobby') {
     return (
       <Shell
+        onBack={onBack}
         title="海龟汤 · 共猜"
         right={<button onClick={() => setScreen('settings')} className="p-1.5"><Gear size={18} /></button>}
       >
@@ -341,32 +396,8 @@ const TurtleSoupGame: React.FC<Props> = ({ onBack }) => {
 
   // ── 设置 ──
   if (screen === 'settings') {
-    const ApiBlock: React.FC<{
-      label: string; note: string; value: GameApiSetting;
-      onChange: (v: GameApiSetting) => void;
-    }> = ({ label, note, value, onChange }) => (
-      <div className="space-y-2">
-        <div className="text-sm font-bold">{label}</div>
-        <div className="text-[11px] leading-relaxed" style={{ color: SHELL.dim }}>{note}</div>
-        {(['baseUrl', 'apiKey', 'model'] as const).map(field => (
-          <input
-            key={field}
-            value={value[field]}
-            type={field === 'apiKey' ? 'password' : 'text'}
-            onChange={e => onChange({ ...value, [field]: e.target.value })}
-            placeholder={field === 'baseUrl' ? 'Base URL' : field === 'apiKey' ? 'API Key' : 'Model'}
-            className="w-full px-3 py-2 rounded-lg text-sm outline-none"
-            style={{ background: SHELL.panel, color: SHELL.text, border: `1px solid ${SHELL.border}` }}
-          />
-        ))}
-        <div className="text-[11px]" style={{ color: apiFilled(value) ? '#7fd4a0' : SHELL.dim }}>
-          {apiFilled(value) ? '已配置，这一侧走这套' : '留空 = 用 App 的主 API'}
-        </div>
-      </div>
-    );
-
     return (
-      <Shell title="设置" right={<button onClick={() => setScreen('lobby')} className="text-[13px] px-2" style={{ color: SHELL.amber }}>完成</button>}>
+      <Shell onBack={onBack} title="设置" right={<button onClick={() => setScreen('lobby')} className="text-[13px] px-2" style={{ color: SHELL.amber }}>完成</button>}>
         <div className="px-4 py-4 space-y-6">
           <ApiBlock
             label="主持人 API"
@@ -460,7 +491,7 @@ const TurtleSoupGame: React.FC<Props> = ({ onBack }) => {
 
   // ── 对局 ──
   if (!game || !soup || !palette) {
-    return <Shell title="海龟汤"><div className="text-center py-16 text-sm opacity-50">这碗汤不见了</div></Shell>;
+    return <Shell onBack={onBack} title="海龟汤"><div className="text-center py-16 text-sm opacity-50">这碗汤不见了</div></Shell>;
   }
 
   const r = ruleOf(game.rule);
@@ -471,9 +502,63 @@ const TurtleSoupGame: React.FC<Props> = ({ onBack }) => {
 
   return (
     <Shell
+      onBack={onBack}
       title="海龟汤"
       right={
         <button onClick={() => endGame(false)} className="text-[12px] px-2" style={{ color: SHELL.dim }}>退出</button>
+      }
+      footer={
+        <>
+      {/* 底部操作条 */}
+        {!done && !submitting && (
+          <div className="shrink-0 border-t px-3 pt-2 space-y-2"
+               style={{ borderColor: SHELL.border, background: SHELL.bg, paddingBottom: 'calc(var(--safe-bottom, 0px) + 8px)' }}>
+            <div className="flex items-center gap-2">
+              <input
+                value={input}
+                onChange={e => setInput(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') handleAsk(); }}
+                disabled={!!busy || !canAsk(game, 'user')}
+                placeholder={canAsk(game, 'user') ? '问一个能用是/否回答的问题…' : '你的提问次数用完了'}
+                className="flex-1 min-w-0 px-3 py-2 rounded-full text-sm outline-none disabled:opacity-40"
+                style={{ background: SHELL.panel, color: SHELL.text, border: `1px solid ${SHELL.border}` }}
+              />
+              <button onClick={handleAsk} disabled={!input.trim() || !!busy}
+                      className="shrink-0 p-2 rounded-full disabled:opacity-30"
+                      style={{ background: SHELL.amber, color: '#1a1206' }}>
+                <PaperPlaneTilt size={16} weight="fill" />
+              </button>
+            </div>
+            <div className="flex items-center gap-2">
+              <button onClick={handleTaAsk} disabled={!!busy || !canAsk(game, 'ta')}
+                      className="flex items-center gap-1 text-[12px] px-3 py-1.5 rounded-full disabled:opacity-30"
+                      style={{ background: 'rgba(217,164,65,0.14)', color: SHELL.amber }}>
+                <Sparkle size={13} weight="fill" /> 让{names.ta}问
+              </button>
+              <button onClick={handleHint} disabled={!!busy || !canHint(game, soup)}
+                      className="flex items-center gap-1 text-[12px] px-3 py-1.5 rounded-full disabled:opacity-30"
+                      style={{ background: SHELL.panel, color: SHELL.text }}>
+                <Lightbulb size={13} /> 提示
+              </button>
+              <button onClick={handleTaGuess} disabled={!!busy}
+                      className="flex items-center gap-1 text-[12px] px-3 py-1.5 rounded-full disabled:opacity-30"
+                      style={{ background: SHELL.panel, color: SHELL.text }}>
+                <ArrowsClockwise size={13} /> {names.ta}怎么想
+              </button>
+              <button onClick={() => setSubmitting(true)} disabled={!!busy}
+                      className="ml-auto text-[12px] px-3 py-1.5 rounded-full font-bold disabled:opacity-30"
+                      style={{ background: 'rgba(127,212,160,0.15)', color: '#7fd4a0' }}>
+                提交
+              </button>
+            </div>
+            {isOutOfQuestions(game) && (
+              <div className="text-[11px] text-center pb-1" style={{ color: SHELL.dim }}>
+                双方提问次数都用完了，只剩提交
+              </div>
+            )}
+          </div>
+        )}
+        </>
       }
     >
       <div className="px-3 py-3 space-y-3 pb-4">
@@ -629,55 +714,6 @@ const TurtleSoupGame: React.FC<Props> = ({ onBack }) => {
         )}
       </div>
 
-      {/* 底部操作条 */}
-      {!done && !submitting && (
-        <div className="shrink-0 border-t px-3 pt-2 space-y-2"
-             style={{ borderColor: SHELL.border, background: SHELL.bg, paddingBottom: 'calc(var(--safe-bottom, 0px) + 8px)' }}>
-          <div className="flex items-center gap-2">
-            <input
-              value={input}
-              onChange={e => setInput(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') handleAsk(); }}
-              disabled={!!busy || !canAsk(game, 'user')}
-              placeholder={canAsk(game, 'user') ? '问一个能用是/否回答的问题…' : '你的提问次数用完了'}
-              className="flex-1 min-w-0 px-3 py-2 rounded-full text-sm outline-none disabled:opacity-40"
-              style={{ background: SHELL.panel, color: SHELL.text, border: `1px solid ${SHELL.border}` }}
-            />
-            <button onClick={handleAsk} disabled={!input.trim() || !!busy}
-                    className="shrink-0 p-2 rounded-full disabled:opacity-30"
-                    style={{ background: SHELL.amber, color: '#1a1206' }}>
-              <PaperPlaneTilt size={16} weight="fill" />
-            </button>
-          </div>
-          <div className="flex items-center gap-2">
-            <button onClick={handleTaAsk} disabled={!!busy || !canAsk(game, 'ta')}
-                    className="flex items-center gap-1 text-[12px] px-3 py-1.5 rounded-full disabled:opacity-30"
-                    style={{ background: 'rgba(217,164,65,0.14)', color: SHELL.amber }}>
-              <Sparkle size={13} weight="fill" /> 让{names.ta}问
-            </button>
-            <button onClick={handleHint} disabled={!!busy || !canHint(game, soup)}
-                    className="flex items-center gap-1 text-[12px] px-3 py-1.5 rounded-full disabled:opacity-30"
-                    style={{ background: SHELL.panel, color: SHELL.text }}>
-              <Lightbulb size={13} /> 提示
-            </button>
-            <button onClick={handleTaGuess} disabled={!!busy}
-                    className="flex items-center gap-1 text-[12px] px-3 py-1.5 rounded-full disabled:opacity-30"
-                    style={{ background: SHELL.panel, color: SHELL.text }}>
-              <ArrowsClockwise size={13} /> {names.ta}怎么想
-            </button>
-            <button onClick={() => setSubmitting(true)} disabled={!!busy}
-                    className="ml-auto text-[12px] px-3 py-1.5 rounded-full font-bold disabled:opacity-30"
-                    style={{ background: 'rgba(127,212,160,0.15)', color: '#7fd4a0' }}>
-              提交
-            </button>
-          </div>
-          {isOutOfQuestions(game) && (
-            <div className="text-[11px] text-center pb-1" style={{ color: SHELL.dim }}>
-              双方提问次数都用完了，只剩提交
-            </div>
-          )}
-        </div>
-      )}
     </Shell>
   );
 };
