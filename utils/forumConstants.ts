@@ -49,11 +49,10 @@ export const FORUM_TOPIC_COMMENT_STYLES: Record<ForumTopicTag, string> = {
   imagination: '顺着楼主的设定往下接，比谁的脑洞更离谱；很少有人质疑设定，那样没意思。',
   mystic: '认真讨论的区，不是胡闹。谈的是命理、易理、星象、民俗信仰这类有自己一套体系的东西，大家在各自的框架里认真推演。常见"按这个说法应该是…"的援引，也有人温和表示自己不信但尊重。不要写成装神弄鬼或者装模作样。',
   science_pop: '爱补充和纠正，语气比科技区客气；常见"顺便一提"式的延伸，也常有人问很基础的问题而不会被嘲。',
-  couples: '三种帖子混在一起：两性相处的讨论、情侣日常的吐槽、还有认真写的成人nsfw内容的经验/教学帖。'
+  couples: '三种帖子混在一起：两性相处的讨论、情侣日常的吐槽、还有认真写的经验/教学帖。'
     + '吐槽帖底下是"我家那位也这样"的接龙和起哄，语气轻；讨论帖底下会有人认真给不同视角，'
     + '也会有人现身说法；教学帖底下是提问和补充，偶尔有人说"这套对我没用"。'
-    + '甜的帖子会有人喊"狗粮"但不带恶意。吵架的帖子会有人劝和也有人劝分，两边都不算越界。'
-    + '成人nsfw内容的经验/教学帖底下有没经验认真问的，也有抖机灵开黄腔的，只是一种多样性评论的体现。',
+    + '甜的帖子会有人喊"狗粮"但不带恶意。吵架的帖子会有人劝和也有人劝分，两边都不算越界。',
 };
 
 export const FORUM_TOPIC_TAGS: { tag: ForumTopicTag; label: string }[] = [
@@ -281,6 +280,12 @@ export const FORUM_DEFAULTS = {
   postRefreshSubCommentRange: [1, 3] as [number, number],
   /** 有人接话的主楼数上限。十楼里八楼都有人接，那不像论坛像群聊。 */
   postRefreshRepliedFloorCap: 4,
+  /** 个人主页"批量配评论"：一次最多处理几条还没评论的帖子。 */
+  profileBatchMaxPosts: 3,
+  /** 每条帖子配几条评论。这里不要楼中楼——先让每条都有点动静就行。 */
+  profileBatchCommentRange: [3, 5] as [number, number],
+  /** 这一批总共最多送几张配图给模型看（几条帖子共用这个预算）。 */
+  profileBatchMaxImages: 6,
   /** 刷新评论区时，最多把帖子的几张配图一起送给模型看。
    *  [用户确认] 全给——帖子本来就最多 9 张。嫌慢或嫌贵就把这个数字调小。 */
   postRefreshMaxImages: 9,

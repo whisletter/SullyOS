@@ -1475,3 +1475,153 @@ ${buildSharedForumHardRules()}
 
   return post;
 }
+
+// ==================== 个人主页 · 批量给自己的帖子配评论 [用户确认新增] ====================
+
+export interface RunProfileBatchCommentsParams {
+  apiConfig: ForumApiConfig;
+  /** 给哪个账号名下的帖子配评论（当前正在看的那个主页）。 */
+  accountId: string;
+  /** 这次最多处理几条帖子。默认 3。 */
+  maxPosts?: number;
+}
+
+export interface ProfileBatchCommentsResult {
+  /** 实际处理了几条帖子。 */
+  posts: number;
+  /** 一共新增了几条评论。 */
+  comments: number;
+  /** 没有可处理的帖子（都已经有评论了 / 一条帖子都没有）。 */
+  nothingToDo: boolean;
+}
+
+/**
+ * 一次调用，给这个号名下**还没有任何评论**的帖子批量配上评论。
+ *
+ * 跟帖子详情页那个刷新是两件事，别混：
+ *   - 详情页刷新 = "我在看这条，让它热闹起来"，所以按热度出多楼 + 楼中楼，还会拉 TA 到场；
+ *   - 这个 = "我一口气发了好几条，先都有点动静"，每条三五句就够，想看哪条热闹再单独进去刷。
+ *
+ * 只让路人来评论，**不拉 TA 参与**。两个原因：TA 一开口就会给帖子打上
+ * involvesCharInteraction（永久保留），不该由一个批量按钮顺手决定；而且每个角色都要带
+ * 完整人设和聊天记录，三条帖子全塞进来会又慢又容易串味。想让 TA 说话，进那条帖子单独刷。
+ *
+ * 帖子的配图会一起送给模型看（跟详情页刷新同一条路），所以评论能对得上图。
+ */
+export async function runProfileBatchComments(
+  params: RunProfileBatchCommentsParams,
+): Promise<ProfileBatchCommentsResult> {
+  const { apiConfig, accountId, maxPosts = FORUM_DEFAULTS.profileBatchMaxPosts } = params;
+  const empty: ProfileBatchCommentsResult = { posts: 0, comments: 0, nothingToDo: true };
+
+  const allPosts = await db.getForumPostsByAuthor(accountId);
+  if (allPosts.length === 0) return empty;
+
+  // 只挑还没有评论的，新的排前面——刚发的那几条才是你想让它有动静的
+  const counts = await db.getCommentCountsByPosts(allPosts.map(p => p.id));
+  const targets = allPosts
+    .filter(p => (counts.get(p.id) || 0) === 0)
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, Math.max(1, maxPosts));
+  if (targets.length === 0) return empty;
+
+  const npcAccounts = await db.getActiveNpcAccounts();
+  if (npcAccounts.length === 0) return empty;
+
+  const rosterSize = Math.min(npcAccounts.length, 6 + targets.length * 3);
+  const roster = await pickRosterWithRegulars(npcAccounts, rosterSize, userMainAccountId());
+  const validHandles = new Set(roster.map(a => a.handle));
+  const accountByHandle = new Map(roster.map(a => [a.handle, a]));
+
+  const [minComments, maxComments] = FORUM_DEFAULTS.profileBatchCommentRange;
+
+  // 配图：几条帖子共用一个预算，按顺序送，正文里说明每张图属于哪条帖子——
+  // 图是接在整条消息后面的，不说清楚归属的话模型会把 A 的图当成 B 的。
+  let imageBudget = FORUM_DEFAULTS.profileBatchMaxImages;
+  const promptImages: ForumPromptImage[] = [];
+  const imageManifest: string[] = [];
+  for (let i = 0; i < targets.length; i++) {
+    if (imageBudget <= 0) break;
+    const { sent } = await resolvePostImagesForPrompt(targets[i].images, imageBudget);
+    if (sent.length === 0) continue;
+    promptImages.push(...sent);
+    imageManifest.push(`帖子${i + 1} 的 ${sent.length} 张`);
+    imageBudget -= sent.length;
+  }
+
+  const postBlock = targets.map((p, i) => {
+    const style = getTopicCommentStyle(p.topicTag);
+    return [
+      `【帖子${i + 1}】id=${p.id}`,
+      `分区：${getTopicLabel(p.topicTag as ForumTopicTag)}`,
+      p.title ? `标题：${p.title}` : undefined,
+      `正文：${p.content}`,
+      p.music ? `配了一首歌：《${p.music.songName}》- ${p.music.artists}` : undefined,
+      p.article ? `配了一篇文章：《${p.article.title}》${p.article.body ? `——${p.article.body.slice(0, 80)}` : ''}` : undefined,
+      style ? `这个区的风气：${style}` : undefined,
+    ].filter(Boolean).join('\n');
+  }).join('\n\n');
+
+  const prompt = `
+你是这个论坛的"评论区生成器"。下面有 ${targets.length} 条刚发出来还没人回的帖子，
+给每一条各配 ${minComments}-${maxComments} 条路人评论。
+
+=== 这几条帖子 ===
+${postBlock}
+${promptImages.length > 0 ? `
+=== 配图 ===
+这条消息后面附了 ${promptImages.length} 张图，按顺序分别是：${imageManifest.join('、')}。
+评论可以针对图里的内容说话，但别每条都提图；也别描述图里明显没有的东西。
+` : ''}
+=== 可用的路人账号 ===
+${roster.map(describeAccountForPrompt).join('\n')}
+
+=== 怎么写 ===
+- 每条帖子配 ${minComments}-${maxComments} 条评论，都是独立的一楼，**这次不要楼中楼**。
+- 评论要贴着这条帖子本身说话，不要写成放在哪条帖子下面都成立的通用话。
+- 同一条帖子下面的几个人语气要有差别，不要一水儿的附和。按上面标注的人设和语言习惯来。
+- 不同帖子的评论人可以重合，但别让同一个人在每条帖子下面都出现。
+- 这些帖子是同一个人发的，但路人不知道你在一次性看好几条——每条评论都要写得像
+  是单独刷到这一条时留下的，不要出现"你上一条也说过"这种跨帖子的话。
+
+${buildSharedForumHardRules()}
+
+请只返回 JSON：
+{
+  "byPost": [
+    { "postId": "上面给的 id 原样抄回来", "comments": [{ "authorHandle": "handle", "content": "评论内容" }] }
+  ]
+}`.trim();
+
+  const raw = await callForumAI(apiConfig, prompt, '论坛主页批量配评论', promptImages);
+  const parsed = extractJson<any>(raw);
+  const groups = Array.isArray(parsed?.byPost) ? parsed.byPost : [];
+  const targetIds = new Set(targets.map(p => p.id));
+
+  let commentCount = 0;
+  const touchedPosts = new Set<string>();
+  const now = Date.now();
+  let offset = 0;
+
+  for (const group of groups) {
+    const postId = String(group?.postId || '');
+    if (!targetIds.has(postId)) continue; // 编出来的 id 一律丢掉
+    const comments = Array.isArray(group?.comments) ? group.comments : [];
+    for (const c of comments) {
+      const handle = String(c?.authorHandle || '');
+      if (!validHandles.has(handle)) continue;
+      const commenter = accountByHandle.get(handle);
+      if (!commenter || !c?.content) continue;
+      offset += 1000; // 逐条错开一秒，楼的先后顺序才稳定
+      await feed.appendComment(postId, {
+        authorAccountId: commenter.id,
+        content: String(c.content).slice(0, 2000),
+        createdAt: now + offset,
+      });
+      commentCount += 1;
+      touchedPosts.add(postId);
+    }
+  }
+
+  return { posts: touchedPosts.size, comments: commentCount, nothingToDo: false };
+}
