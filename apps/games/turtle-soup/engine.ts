@@ -53,11 +53,25 @@ export interface QaEntry {
   at: number;
 }
 
+/**
+ * 对局里的闲聊。跟提问是两回事：提问要过主持人、扣次数；闲聊只在你和 TA 之间，
+ * 不扣次数、不惊动主持人，就是猜谜过程里随口说的话——
+ * "我怀疑这人根本不是人""你刚才那个方向我觉得不对"之类。
+ */
+export interface ChatEntry {
+  id: string;
+  who: Asker;
+  text: string;
+  at: number;
+}
+
 export interface GameState {
   soupId: string;
   rule: RuleLevel;
   /** 公开问答记录。TA 看得到全部，但永远看不到汤底。 */
   qa: QaEntry[];
+  /** 你和 TA 的闲聊。不扣提问次数，也不经过主持人。 */
+  chat: ChatEntry[];
   /** 已经放出去的提示条数（对应 soup.hints 的前 n 条）。 */
   hintsUsed: number;
   userAsked: number;
@@ -89,7 +103,7 @@ export const scoreTier = (score: number): string => {
 
 export function createGame(soupId: string, rule: RuleLevel): GameState {
   return {
-    soupId, rule, qa: [], hintsUsed: 0,
+    soupId, rule, qa: [], chat: [], hintsUsed: 0,
     userAsked: 0, taAsked: 0, turn: 'user',
     startedAt: Date.now(),
   };
@@ -292,6 +306,8 @@ export function loadGame(charId: string): GameState | null {
     const v = JSON.parse(localStorage.getItem(keyGame(charId)) || 'null');
     if (!v || typeof v !== 'object' || !v.soupId) return null;
     if (!soupById(v.soupId)) return null; // 汤库变了，旧档作废
+    // chat 是后加的字段，这次改动之前存的档没有它。不补的话渲染时 .map 会炸。
+    if (!Array.isArray(v.chat)) v.chat = [];
     return v as GameState;
   } catch { return null; }
 }
@@ -302,6 +318,8 @@ export function saveGame(charId: string, g: GameState | null): void {
     else localStorage.setItem(keyGame(charId), JSON.stringify(g));
   } catch { /* ignore */ }
 }
+
+export const makeChatId = () => `ct_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 
 export const makeQaId = () => `qa_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 
@@ -381,3 +399,36 @@ export const VERDICT_COLORS: Record<HostVerdict, { fg: string; bg: string }> = {
   '是也不是': { fg: '#e5b95c', bg: 'rgba(229,185,92,0.14)' },
   '无关': { fg: '#8b8a86', bg: 'rgba(255,255,255,0.07)' },
 };
+
+// ==================== 七、苹果币结算 [用户确认] ====================
+
+/**
+ * 这一局各得几个苹果币。
+ *
+ * 海龟汤是**协作**游戏——你和 TA 对着同一道谜题，不是互相赢。所以两边拿一样多，
+ * 这件事本身就在表达"我们是一队的"。
+ *
+ * 档位基础分：
+ *   完全还原 15 / 基本还原 10 / 部分还原 5 / 方向错误 2
+ * 方向错误也给 2 而不是 0：海龟汤本来就经常猜不中，空手而归会让人不想开第二局。
+ *
+ * 难度系数：严格 ×1.5 / 正常 ×1 / 轻松 ×0.6
+ * 轻松是无限提问无限提示，拿满分太容易，不该跟严格一个价。
+ *
+ * 没用提示 +3：硬猜出来的应该比查着答案猜出来的值钱。
+ *
+ * 上限是严格难度完全还原不用提示：15×1.5+3 = 25。
+ */
+export function calcTurtleReward(score: number, rule: RuleLevel, hintsUsed: number): {
+  coins: number;
+  /** 拆开给结算页显示，让你知道钱是怎么来的。 */
+  breakdown: { base: number; multiplier: number; noHintBonus: number };
+} {
+  const base = score >= 85 ? 15 : score >= 65 ? 10 : score >= 40 ? 5 : 2;
+  const multiplier = rule === 'hard' ? 1.5 : rule === 'easy' ? 0.6 : 1;
+  const noHintBonus = hintsUsed === 0 ? 3 : 0;
+  return {
+    coins: Math.max(1, Math.round(base * multiplier) + noHintBonus),
+    breakdown: { base, multiplier, noHintBonus },
+  };
+}

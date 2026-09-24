@@ -6,13 +6,14 @@ import { createChatMirror } from '../shared/chatMirror';
 import { SOUPS, type Soup, type SoupDifficulty } from './soups';
 import {
   RULES, ruleOf, createGame, canAsk, canHint, isOutOfQuestions, preCheckQuestion,
-  drawSoup, filterSoups, soupById, scoreTier, makeQaId, makeChatId,
+  drawSoup, filterSoups, soupById, scoreTier, makeQaId, makeChatId, calcTurtleReward,
   loadPlayed, savePlayed, loadFilter, saveFilter, loadGame, saveGame,
   loadApiSetting, saveApiSetting, apiFilled, EMPTY_API,
   KEY_HOST_API, KEY_TA_API, SHELL, VERDICT_COLORS, paletteOf, soupKind,
   type ChatEntry, type GameApiSetting, type GameState, type QaEntry, type RuleLevel, type SoupFilter,
 } from './engine';
 import { askHost, askTaQuestion, askTaGuess, scoreSubmission, type AiContext } from './ai';
+import { award, isPaid, markPaid, countPaid, resetPaid, loadWallet, type Wallet } from '../shared/wallet';
 
 interface Props { onBack: () => void }
 
@@ -151,6 +152,12 @@ const TurtleSoupGame: React.FC<Props> = ({ onBack }) => {
   const [submitting, setSubmitting] = useState(false);
   const [submitText, setSubmitText] = useState('');
   const [revealed, setRevealed] = useState(false);
+  /** 这一局结算发了几个币。null = 还没结算，或这碗汤之前已经发过了。 */
+  const [payout, setPayout] = useState<{ coins: number; already: boolean } | null>(null);
+  const [wallet, setWallet] = useState<Wallet>(() => loadWallet(charId));
+  /** 129 碗里已经结算过币的碗数。设置页用它决定能不能重置。 */
+  const [paidCount, setPaidCount] = useState(() => countPaid(charId, 'turtle:'));
+  const [confirmingCoinReset, setConfirmingCoinReset] = useState(false);
 
   const flowEndRef = useRef<HTMLDivElement>(null);
   const mirror = useRef(createChatMirror(charId, 'turtle_soup'));
@@ -220,6 +227,7 @@ const TurtleSoupGame: React.FC<Props> = ({ onBack }) => {
     setGame(g);
     setFlow([]);
     setRevealed(false);
+    setPayout(null);
     setSubmitText('');
     setSubmitting(false);
     setScreen('playing');
@@ -386,6 +394,23 @@ const TurtleSoupGame: React.FC<Props> = ({ onBack }) => {
         result: { ...result, tier: scoreTier(result.score), submitted: text, at: Date.now() },
       } : g);
       setSubmitting(false);
+
+      // 苹果币：你和 TA 同得（这是协作游戏，不是互相赢）。
+      // 同一碗汤只发一次——设置页能清空抽取记录，不挡的话可以无限刷同一碗。
+      const token = `turtle:${soup.id}`;
+      const { coins } = calcTurtleReward(result.score, game.rule, game.hintsUsed);
+      if (isPaid(charId, token)) {
+        setPayout({ coins, already: true });
+      } else {
+        const reason = `海龟汤 · ${scoreTier(result.score)} · ${ruleOf(game.rule).label}`;
+        setWallet(award(charId, [
+          { side: 'user', amount: coins, game: 'turtle_soup', reason },
+          { side: 'ta', amount: coins, game: 'turtle_soup', reason },
+        ]));
+        markPaid(charId, token);
+        setPaidCount(countPaid(charId, 'turtle:'));
+        setPayout({ coins, already: false });
+      }
       mirror.current('user', `我的还原：${text}`);
       mirror.current('system', `【海龟汤】得分 ${result.score}（${scoreTier(result.score)}）`);
     } finally { setBusy(null); }
@@ -572,7 +597,8 @@ const TurtleSoupGame: React.FC<Props> = ({ onBack }) => {
           <div className="space-y-2">
             <div className="text-sm font-bold">抽取记录</div>
             <div className="text-[11px]" style={{ color: SHELL.dim }}>
-              已经喝过 {played.size} 碗。清空之后这些汤会重新进入抽取池。
+              已经喝过 {played.size} 碗。清空之后这些汤会重新进入抽取池，
+              但<b>不会</b>恢复苹果币资格——同一碗汤只发一次币。
             </div>
             <button
               onClick={() => { setPlayed(new Set()); savePlayed(charId, new Set()); addToast('已清空', 'success'); }}
@@ -581,6 +607,64 @@ const TurtleSoupGame: React.FC<Props> = ({ onBack }) => {
             >
               清空抽取记录
             </button>
+          </div>
+
+          {/* 全通之后重开一轮。
+              门槛定在"全库 129 碗都结算过"而不是"当前筛选下的都结算过"——
+              后者可以靠把筛选调窄（比如只留 12 碗抽象汤）几分钟刷一轮，那就成了提款机。 */}
+          <div className="space-y-2">
+            <div className="text-sm font-bold">苹果币资格</div>
+            <div className="text-[11px]" style={{ color: SHELL.dim }}>
+              已结算 <b style={{ color: SHELL.text }}>{paidCount}</b> / {SOUPS.length} 碗。
+              {paidCount >= SOUPS.length
+                ? '全部喝完了——可以重置一轮，所有汤重新能赚币，抽取记录也会一起清掉。'
+                : '喝完全部 129 碗之后，这里可以重置，从头再来一轮。'}
+            </div>
+            <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'rgba(255,255,255,0.07)' }}>
+              <div className="h-full rounded-full transition-all"
+                   style={{ width: `${Math.min(100, (paidCount / SOUPS.length) * 100)}%`, background: SHELL.amber }} />
+            </div>
+
+            {paidCount < SOUPS.length ? (
+              <button disabled className="text-sm px-4 py-2 rounded-full opacity-35"
+                      style={{ background: SHELL.panel, color: SHELL.text }}>
+                还差 {SOUPS.length - paidCount} 碗
+              </button>
+            ) : !confirmingCoinReset ? (
+              <button onClick={() => setConfirmingCoinReset(true)}
+                      className="text-sm px-4 py-2 rounded-full font-bold"
+                      style={{ background: SHELL.amber, color: '#1a1206' }}>
+                重置，再来一轮
+              </button>
+            ) : (
+              <div className="text-[12px] space-y-2">
+                <div style={{ color: SHELL.text }}>
+                  确定重置吗？129 碗汤会全部重新可以赚币，抽取记录一并清空。
+                  <b>已经赚到的苹果币不受影响，不会被扣掉。</b>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      resetPaid(charId, 'turtle:');
+                      setPaidCount(0);
+                      setPlayed(new Set());
+                      savePlayed(charId, new Set());
+                      setConfirmingCoinReset(false);
+                      addToast('已重置，129 碗汤重新开张', 'success');
+                    }}
+                    className="px-4 py-2 rounded-full font-bold"
+                    style={{ background: SHELL.amber, color: '#1a1206' }}
+                  >
+                    确定重置
+                  </button>
+                  <button onClick={() => setConfirmingCoinReset(false)}
+                          className="px-4 py-2 rounded-full"
+                          style={{ background: 'rgba(255,255,255,0.08)' }}>
+                    取消
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="pt-4 border-t space-y-1 text-[11px] leading-relaxed"
@@ -812,6 +896,31 @@ const TurtleSoupGame: React.FC<Props> = ({ onBack }) => {
               ))}
             </div>
             <div className="text-[13px] leading-relaxed" style={{ color: SHELL.text }}>{game.result.comment}</div>
+
+            {/* 苹果币：两边同得。🍏 是你，🍎 是 TA。 */}
+            {payout && (
+              <div className="rounded-xl p-3" style={{ background: 'rgba(217,164,65,0.10)' }}>
+                {payout.already ? (
+                  <div className="text-[12px]" style={{ color: SHELL.dim }}>
+                    这碗汤之前已经结算过苹果币了，同一碗只发一次。
+                  </div>
+                ) : (
+                  <>
+                    <div className="flex items-center justify-center gap-5 text-[15px] font-bold">
+                      <span>🍏 +{payout.coins}</span>
+                      <span>🍎 +{payout.coins}</span>
+                    </div>
+                    <div className="text-[11px] text-center mt-1" style={{ color: SHELL.dim }}>
+                      一起猜出来的，两边一样多
+                    </div>
+                  </>
+                )}
+                <div className="flex items-center justify-center gap-5 text-[11px] mt-2" style={{ color: SHELL.dim }}>
+                  <span>🍏 共 {wallet.user}</span>
+                  <span>🍎 共 {wallet.ta}</span>
+                </div>
+              </div>
+            )}
 
             {revealed ? (
               <div className="text-[13px] leading-relaxed p-3 rounded-xl whitespace-pre-wrap"
