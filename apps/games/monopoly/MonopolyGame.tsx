@@ -11,6 +11,7 @@ import { DB } from '../../../utils/db';
 import { callGameAI } from '../shared/ai';
 import { extractModelIds } from '../../../utils/modelList';
 import { createChatMirror } from '../shared/chatMirror';
+import { award } from '../shared/wallet';
 import { detectSex, readNames, readPersona } from '../shared/profile';
 import Modal from '../../../components/os/Modal';
 import {
@@ -801,7 +802,33 @@ const MonopolyGame: React.FC<{ onBack: () => void }> = ({ onBack }) => {
     }
     if (!CHAT_MIRROR.milestones || prev.phase === next.phase) return;
     if (next.phase === 'stopped') mirrorSystem('有人按了飞鸟，游戏停下了。');
-    if (next.phase === 'over') mirrorSystem(`这局结束了：${nm.user} ${next.players.user.coins} 币，${nm.ta} ${next.players.ta.coins} 币。`);
+    if (next.phase === 'over') {
+      mirrorSystem(`这局结束了：${nm.user} ${next.players.user.coins} 币，${nm.ta} ${next.players.ta.coins} 币。`);
+      settleApplecoins(next);
+    }
+  }
+
+  /**
+   * 苹果币结算 [用户确认]：只奖励赢的一方 15 个，输的没有。
+   *
+   * 挂在 phase 跃迁到 'over' 这一刻，而不是渲染结果页时——大富翁没有"每局唯一 id"，
+   * 靠跃迁这个时机天然就是一次性的：这个函数只在 prev.phase !== 'over' 时才走到，
+   * 重新打开 App 时读到的已经是 'over'，不会再跃迁一次，所以不会重复发。
+   *
+   * 平局不发：游戏本身给了「加掷决胜」按钮，让胜负分出来再说。
+   */
+  function settleApplecoins(g: GameState) {
+    const nm = g.profiles.names;
+    const mine = g.players.user.coins;
+    const theirs = g.players.ta.coins;
+    if (mine === theirs) return; // 平局 → 去加掷决胜
+    const winner = mine > theirs ? 'user' : 'ta';
+    award(charId, [{
+      side: winner,
+      amount: 15,
+      game: 'monopoly',
+      reason: `大富翁 · ${nm[winner]}赢了（${Math.max(mine, theirs)} : ${Math.min(mine, theirs)}）`,
+    }]);
   }
 
   // TA 接话：只有点「💞 让TA接话」才调用一次 API，TA 会看到上次回复之后发生的所有事
