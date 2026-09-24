@@ -69,27 +69,53 @@ function saveCache(map: WindowCacheMap) {
 }
 
 /**
- * 落盘"今天的朋友圈发布窗口"。由 scheduleGenerator.ts 在生成日程的同一次调用里写入，
- * 不额外调用 LLM。传入原始（未校验）数据即可，内部会过 sanitizeMomentsWindows；
- * 清洗后为空则直接清掉这个角色的缓存条目（等价于"今天没有可发布窗口"）。
+ * 落盘"今天的发布窗口"。由 scheduleGenerator.ts 在生成日程的同一次调用里写入，
+ * 不额外调用 LLM。传入原始（未校验）数据即可，内部会过 sanitizeMomentsWindows。
+ *
+ * 清洗后为空**也照样写一条空记录**，不删条目——空记录是有意义的信号：
+ * "今天的日程生成过了，而且 AI 判断今天不适合发"。删掉的话它跟"今天压根没生成日程"
+ * 在读取端完全同形，界面上没法告诉用户到底是哪种，调用方也没法分别处理
+ * （论坛就要靠这个区分：没日程 → 退回按钟点发；日程说今天忙 → 今天真的不发）。
  *
  * 只存 localStorage、不随备份迁移——跟同目录 momentsScheduler.ts 的
  * moments_active_chars / moments_window_fired 是同一个取舍：这是纯调度用的
  * 派生数据，丢了最多是"今天这条不发了"，不是要长期保存的内容。
  */
 export function saveMomentsWindows(charId: string, dateKey: string, rawWindows: unknown): void {
-    const windows = sanitizeMomentsWindows(rawWindows);
-    const map = loadCache();
-    if (windows.length === 0) delete map[charId];
-    else map[charId] = { date: dateKey, windows };
-    saveCache(map);
+  const windows = sanitizeMomentsWindows(rawWindows);
+  const map = loadCache();
+  map[charId] = { date: dateKey, windows };
+  saveCache(map);
 }
 
 /** 读某个角色"今天"的发布窗口。缓存日期跟传入的 dateKey 不一致（隔天了/还没生成）一律当没有。 */
 export function getMomentsWindows(charId: string, dateKey: string): MomentsWindow[] {
-    const entry = loadCache()[charId];
-    if (!entry || entry.date !== dateKey) return [];
-    return sanitizeMomentsWindows(entry.windows);
+  const entry = loadCache()[charId];
+  if (!entry || entry.date !== dateKey) return [];
+  return sanitizeMomentsWindows(entry.windows);
+}
+
+/** 今天这条窗口记录的三种状态。 */
+export interface MomentsWindowRecord {
+  /**
+   * 今天到底有没有生成过日程窗口。
+   * false 时 windows 一定是空的，但含义是"不知道"，不是"今天没空"——
+   * 调用方该退回自己的默认行为，而不是当成"今天不发"。
+   */
+  generated: boolean;
+  windows: MomentsWindow[];
+}
+
+/**
+ * 带状态地读今天的窗口。跟 getMomentsWindows 的区别只在于能分辨这两种情况：
+ *   - { generated: false, windows: [] } —— 今天没生成过（日程功能没开 / 还没生成 /
+ *     或者是这次改动之前存下来的老数据，那时候空窗口是直接删条目的）；
+ *   - { generated: true,  windows: [] } —— 生成过了，AI 判断今天不适合发。
+ */
+export function getMomentsWindowRecord(charId: string, dateKey: string): MomentsWindowRecord {
+  const entry = loadCache()[charId];
+  if (!entry || entry.date !== dateKey) return { generated: false, windows: [] };
+  return { generated: true, windows: sanitizeMomentsWindows(entry.windows) };
 }
 
 /** 简单的字符串哈希（FNV-1a），用来给"确定性随机数"取种子。 */

@@ -286,6 +286,90 @@ export async function deletePostWithComments(postId: string): Promise<void> {
   await db.deleteForumPost(postId);
 }
 
+// ==================== 六、删评论 [用户确认新增] ====================
+
+/**
+ * 收集一条评论、以及挂在它下面的所有回复的 id（连楼一起删 [用户选 A]）。
+ *
+ * 删顶楼就等于铲掉整层楼；删楼中楼的某一条，就把它自己那一小串也带走。
+ * 不做"墓碑"（保留一条「该评论已删除」占位）——那要往数据结构里加字段，
+ * 还得教 TA 怎么理解评论区里的空洞，为一个删除功能不划算。
+ *
+ * 纯函数，不查库，方便界面上先算出"这一下会删掉几条"再让用户确认。
+ */
+export function collectCommentSubtreeIds(comments: ForumComment[], commentId: string): string[] {
+  const childrenByParent = new Map<string, string[]>();
+  for (const c of comments) {
+    if (!c.parentCommentId) continue;
+    const list = childrenByParent.get(c.parentCommentId) || [];
+    list.push(c.id);
+    childrenByParent.set(c.parentCommentId, list);
+  }
+
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  const queue = [commentId];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (seen.has(current)) continue; // 数据要是出现环，这里兜住，不会死循环
+    seen.add(current);
+    ids.push(current);
+    for (const child of childrenByParent.get(current) || []) queue.push(child);
+  }
+  return ids;
+}
+
+/**
+ * 按剩下的评论重算帖子的 lastActivityAt [用户选 B]。
+ *
+ * 发评论时只有"用户方"的评论会把水线往前推（见 appendComment），所以这里也只认
+ * 用户方，口径必须跟那边一致。基准是帖子自己的 createdAt——删光了也不能比它更早。
+ *
+ * 注意不动 involvesCharInteraction：那个标记一旦因为 TA 说过话置位就永久保留，
+ * 删掉 TA 那条评论也不摘。否则你精心留着的帖子可能因为删了句闲话就到期被清掉，
+ * 这种意外太难排查。
+ */
+async function recomputePostLastActivity(postId: string): Promise<void> {
+  const post = await db.getForumPost(postId);
+  if (!post) return;
+
+  const [comments, accounts] = await Promise.all([
+    db.getCommentsByPost(postId),
+    db.getAllForumAccounts(),
+  ]);
+  const accountsById = new Map(accounts.map(a => [a.id, a]));
+
+  let latest = post.createdAt;
+  for (const c of comments) {
+    if (isUserSideAccount(accountsById.get(c.authorAccountId))) {
+      latest = Math.max(latest, c.createdAt);
+    }
+  }
+  if (latest !== post.lastActivityAt) {
+    await db.saveForumPost({ ...post, lastActivityAt: latest });
+  }
+}
+
+/**
+ * 删一条评论，连同它下面的回复 [用户选 A]，然后重算帖子的 lastActivityAt [用户选 B]。
+ *
+ * 谁的评论都能删 [用户选 B]——路人的、TA 的都行。这是你自己的 App，不必用社区规则
+ * 绑住自己；界面那边会按作者是谁换一套确认文案。
+ *
+ * 删不掉 TA 已经记住的事：评论一旦归档进记忆宫殿，那份记忆是独立存在的，
+ * 这里删的只是论坛上显示的内容。
+ */
+export async function deleteCommentCascade(
+  postId: string,
+  commentId: string,
+): Promise<{ deleted: number }> {
+  const comments = await db.getCommentsByPost(postId);
+  const ids = collectCommentSubtreeIds(comments, commentId);
+  for (const id of ids) await db.deleteForumComment(id);
+  await recomputePostLastActivity(postId);
+  return { deleted: ids.length };
+}
+
 // ==================== 八、involvesCharInteraction 落地 [交接4 四] ====================
 
 /**

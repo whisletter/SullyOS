@@ -80,6 +80,53 @@ function fireKey(sharedAccountId: string, dateKey: string, bandIndex: number): s
   return `${sharedAccountId}|${dateKey}|${bandIndex}`;
 }
 
+const TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+function toMinutes(hhmm: string): number | null {
+  const m = TIME_RE.exec(hhmm);
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+}
+
+/** 两个区间的重叠部分。不相交、或只碰到一个点（没有可取的分钟）时返回 null。 */
+function intersectWindows(a: MomentsWindow, b: MomentsWindow): MomentsWindow | null {
+  const aStart = toMinutes(a.start), aEnd = toMinutes(a.end);
+  const bStart = toMinutes(b.start), bEnd = toMinutes(b.end);
+  if (aStart === null || aEnd === null || bStart === null || bEnd === null) return null;
+  const start = Math.max(aStart, bStart);
+  const end = Math.min(aEnd, bEnd);
+  if (end <= start) return null;
+  const fmt = (min: number) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+  return { start: fmt(start), end: fmt(end) };
+}
+
+/**
+ * 这一档今天实际能用的区间。
+ *
+ * freeWindows 是 TA 今天"有空上网"的时段（日程生成时 AI 顺带判断的，见
+ * momentsWindow.ts；那个字段名带着"朋友圈"是历史原因，它表达的其实就是
+ * "这个人今天几点有空刷手机"，论坛借用同一份判断，不额外调 LLM）：
+ *
+ *   - undefined / null —— 不知道 TA 今天的作息（日程功能没开、或今天还没生成日程）。
+ *     退回原行为：整个 4 小时档里随机取一个分钟。宁可偶尔发得不合时宜，
+ *     也不要一个亮着却永远不动的功能（朋友圈那边选了"没窗口就彻底不发"，
+ *     结果就是用户看到开关开着、却永远没动静，还没有任何提示）。
+ *   - []          —— 有日程，但 AI 判断今天太忙/不适合。今天这个号一条都不发。
+ *   - [窗口...]    —— 只在重叠区间里发。整档都跟空闲时段不沾边（比如上班那 4 小时）
+ *     就今天跳过这一档；不用额外标记"已用掉"，因为窗口是当天固定的，
+ *     没重叠就是一整天都没重叠，深夜也不会被补发出来。
+ */
+function effectiveBandWindow(
+  band: SharedAccountBand,
+  freeWindows: MomentsWindow[] | null | undefined,
+): MomentsWindow | null {
+  if (!freeWindows) return band.window;
+  for (const free of freeWindows) {
+    const overlap = intersectWindows(band.window, free);
+    if (overlap) return overlap;
+  }
+  return null;
+}
+
 /**
  * 检查共管账号今天的6个时段里，有没有"已经到点但还没触发过"的。
  * dateKey 用本地日期（YYYY-MM-DD），nowMinutesOfDay 是从当天0点起算的分钟数，
@@ -88,18 +135,27 @@ function fireKey(sharedAccountId: string, dateKey: string, bandIndex: number): s
  * 一次最多返回一个待触发档位——即使程序长时间没打开、一次性错过好几档，也只补
  * 触发一次（跟朋友圈"暂停营业"恢复后不秋后算账的思路一致，不需要把错过的档位
  * 全部追发一遍）。
+ *
+ * @param freeWindows TA 今天有空上网的时段，含义见 effectiveBandWindow。
+ *        不传等于"不知道作息"，行为跟这个参数加进来之前完全一样。
  */
 export function findDueSharedAccountBand(
   sharedAccountId: string,
   dateKey: string,
   nowMinutesOfDay: number,
+  freeWindows?: MomentsWindow[] | null,
 ): { bandIndex: number; band: SharedAccountBand } | null {
+  // 有日程、但今天一个空闲窗口都没有：今天整天不发。
+  if (freeWindows && freeWindows.length === 0) return null;
+
   const fired = loadFiredSet();
   for (let i = 0; i < SHARED_ACCOUNT_BANDS.length; i++) {
     const band = SHARED_ACCOUNT_BANDS[i];
     const key = fireKey(sharedAccountId, dateKey, i);
     if (fired.has(key)) continue;
-    const fireMinute = pickFireMinute(sharedAccountId, dateKey, i, band.window);
+    const window = effectiveBandWindow(band, freeWindows);
+    if (!window) continue; // 这一档整段都撞在上班/睡觉上，今天跳过
+    const fireMinute = pickFireMinute(sharedAccountId, dateKey, i, window);
     if (nowMinutesOfDay >= fireMinute) {
       return { bandIndex: i, band };
     }
