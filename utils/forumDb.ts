@@ -1122,3 +1122,78 @@ export async function getForumCommentsByIds(ids: string[]): Promise<Map<string, 
   rows.forEach(c => { if (c) result.set(c.id, c); });
   return result;
 }
+
+// ==================== 图片清理 ====================
+
+/**
+ * 把论坛库里存着的图片引用全部抹掉，用来腾本地空间。
+ *
+ * 只有两个地方存着图片令牌：帖子的 images、账号的 avatar/banner（评论和私信都是纯文本）。
+ * 这里抹掉的是**引用**，不是图片数据本身——数据在共享的 blob 库里，等下一轮
+ * 「孤儿图片清理」(utils/blobGc.ts) 扫到没人引用了才真正释放。所以点完这个按钮
+ * 空间不会立刻变小，得再跑一次那个清理。
+ *
+ * 外链图（http(s)）也一起去掉。它们本来就不占本地空间，但留着会让帖子图文不全，
+ * 而且用户点这个按钮的意思就是"把图都清了"。
+ *
+ * 读和写分成两个事务：IndexedDB 的事务在微任务队列排空时会自动提交，
+ * 在同一个 readwrite 事务里 await 一次 getAll 再回头 put，赶上时序不好就会
+ * TransactionInactiveError。读完再开一个写事务不会有这个问题。
+ */
+export interface ForumImagePurgeResult {
+  /** 有多少条帖子被清掉了配图。 */
+  posts: number;
+  /** 一共去掉了多少个图片引用。 */
+  images: number;
+  /** 有多少个账号被清掉了头像/背景图。 */
+  accounts: number;
+}
+
+export async function purgeForumImages(
+  options: { includeAccountArtwork?: boolean } = {},
+): Promise<ForumImagePurgeResult> {
+  const result: ForumImagePurgeResult = { posts: 0, images: 0, accounts: 0 };
+  const database = await openDb();
+
+  // ---- 帖子配图 ----
+  const readPosts = database.transaction(STORE_POSTS, 'readonly');
+  const allPosts = (await reqResult<ForumPost[]>(readPosts.objectStore(STORE_POSTS).getAll())) || [];
+  const postsToStrip = allPosts.filter(p => Array.isArray(p.images) && p.images.length > 0);
+
+  if (postsToStrip.length > 0) {
+    const writePosts = database.transaction(STORE_POSTS, 'readwrite');
+    const store = writePosts.objectStore(STORE_POSTS);
+    for (const post of postsToStrip) {
+      result.posts += 1;
+      result.images += post.images!.length;
+      const next: ForumPost = { ...post };
+      delete next.images;
+      store.put(next);
+    }
+    await txDone(writePosts);
+  }
+
+  if (!options.includeAccountArtwork) return result;
+
+  // ---- 账号头像 / 背景图 ----
+  const readAccounts = database.transaction(STORE_ACCOUNTS, 'readonly');
+  const allAccounts = (await reqResult<ForumAccount[]>(readAccounts.objectStore(STORE_ACCOUNTS).getAll())) || [];
+  const accountsToStrip = allAccounts.filter(a => !!a.avatar || !!a.banner);
+
+  if (accountsToStrip.length > 0) {
+    const writeAccounts = database.transaction(STORE_ACCOUNTS, 'readwrite');
+    const store = writeAccounts.objectStore(STORE_ACCOUNTS);
+    const now = Date.now();
+    for (const account of accountsToStrip) {
+      result.accounts += 1;
+      result.images += (account.avatar ? 1 : 0) + (account.banner ? 1 : 0);
+      const next: ForumAccount = { ...account, updatedAt: now };
+      delete next.avatar;
+      delete next.banner;
+      store.put(next);
+    }
+    await txDone(writeAccounts);
+  }
+
+  return result;
+}
