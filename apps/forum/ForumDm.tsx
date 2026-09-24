@@ -38,6 +38,11 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig, readOnly, onActive
   const [admitting, setAdmitting] = useState(false);
   const [answering, setAnswering] = useState(false);
   const [picking, setPicking] = useState(false);
+  /** 长按/点开自己那条消息之后弹出的操作条。null = 没选中。 */
+  const [actingMessageId, setActingMessageId] = useState<string | null>(null);
+  /** 正在改内容的那条。 */
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editText, setEditText] = useState('');
   const [pickKeyword, setPickKeyword] = useState('');
   /** 跟我有拉黑关系的账号（任一方向）。拉黑双向断，被拉黑的人也发不过来。 */
   const [blockedIds, setBlockedIds] = useState<Set<string>>(new Set());
@@ -81,6 +86,42 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig, readOnly, onActive
     setMessages(msgs);
     await markThreadRead(counterpartId);
   }, [activeAccount.id, markThreadRead]);
+
+  /**
+   * 改自己发过的一条私信。[用户确认新增]
+   *
+   * 改完 TA 下次读这个会话时看到的就是新内容——它不会知道原来写的是什么。
+   * 这跟朋友圈那边"改定位"是同一个性质：你在悄悄修正它对世界的认知。
+   */
+  const handleEditMessage = useCallback(async (id: string) => {
+    const next = editText.trim();
+    if (!next) return;
+    try {
+      const msg = await db.getForumDmMessage(id);
+      if (!msg) { addToast('这条消息不见了', 'error'); return; }
+      await db.saveForumDmMessage({ ...msg, content: next.slice(0, 2000) });
+      setMessages(prev => prev.map(m => (m.id === id ? { ...m, content: next.slice(0, 2000) } : m)));
+      setEditingMessageId(null);
+      setActingMessageId(null);
+      setEditText('');
+      await loadThreads();
+    } catch (e: any) {
+      addToast(`修改失败: ${e?.message?.slice(0, 60) || '未知错误'}`, 'error');
+    }
+  }, [editText, addToast, loadThreads]);
+
+  /** 删掉自己发过的一条私信。删了就没了，TA 下次读也看不到。 */
+  const handleDeleteMessage = useCallback(async (id: string) => {
+    try {
+      await db.deleteForumDmMessage(id);
+      setMessages(prev => prev.filter(m => m.id !== id));
+      setActingMessageId(null);
+      setEditingMessageId(null);
+      await loadThreads();
+    } catch (e: any) {
+      addToast(`删除失败: ${e?.message?.slice(0, 60) || '未知错误'}`, 'error');
+    }
+  }, [addToast, loadThreads]);
 
   const handleSend = useCallback(async () => {
     const text = inputText.trim();
@@ -257,11 +298,78 @@ const ForumDm: React.FC<Props> = ({ activeAccount, apiConfig, readOnly, onActive
         <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2">
           {messages.map(m => {
             const mine = m.fromAccountId === activeAccount.id;
+            const acting = actingMessageId === m.id;
+            const editing = editingMessageId === m.id;
+
+            // 只有自己发的能改能删。别人（TA/路人）发的点了没反应——
+            // 那是它说过的话，你能删的只有自己的。
             return (
-              <div key={m.id} className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
-                <div className="max-w-[75%] px-3 py-2 rounded-2xl text-sm" style={{ background: mine ? '#3b82f6' : 'rgba(127,127,127,0.15)', color: mine ? '#fff' : 'inherit' }}>
-                  {m.content}
-                </div>
+              <div key={m.id} className={`flex flex-col ${mine ? 'items-end' : 'items-start'}`}>
+                {editing ? (
+                  <div className="w-[85%] space-y-1.5">
+                    <textarea
+                      value={editText}
+                      onChange={e => setEditText(e.target.value.slice(0, 2000))}
+                      rows={3}
+                      autoFocus
+                      className="w-full px-3 py-2 rounded-xl text-sm outline-none resize-none"
+                      style={{ background: 'rgba(127,127,127,0.15)' }}
+                    />
+                    <div className="flex gap-2 justify-end">
+                      <button
+                        onClick={() => handleEditMessage(m.id)}
+                        disabled={!editText.trim()}
+                        className="text-xs px-3 py-1.5 rounded-full font-bold disabled:opacity-40"
+                        style={{ background: '#3b82f6', color: '#fff' }}
+                      >
+                        保存
+                      </button>
+                      <button
+                        onClick={() => { setEditingMessageId(null); setEditText(''); }}
+                        className="text-xs px-3 py-1.5 rounded-full"
+                        style={{ background: 'rgba(127,127,127,0.15)' }}
+                      >
+                        取消
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => {
+                      if (!mine || readOnly) return;
+                      setActingMessageId(acting ? null : m.id);
+                    }}
+                    className="max-w-[75%] px-3 py-2 rounded-2xl text-sm text-left active:scale-[0.99] transition-transform"
+                    style={{ background: mine ? '#3b82f6' : 'rgba(127,127,127,0.15)', color: mine ? '#fff' : 'inherit' }}
+                  >
+                    {m.content}
+                  </button>
+                )}
+
+                {acting && !editing && (
+                  <div className="flex gap-2 mt-1">
+                    <button
+                      onClick={() => { setEditingMessageId(m.id); setEditText(m.content); }}
+                      className="text-[11px] px-2.5 py-1 rounded-full"
+                      style={{ background: 'rgba(127,127,127,0.15)' }}
+                    >
+                      编辑
+                    </button>
+                    <button
+                      onClick={() => handleDeleteMessage(m.id)}
+                      className="text-[11px] px-2.5 py-1 rounded-full"
+                      style={{ background: 'rgba(239,68,68,0.15)', color: '#ef4444' }}
+                    >
+                      删除
+                    </button>
+                    <button
+                      onClick={() => setActingMessageId(null)}
+                      className="text-[11px] px-2.5 py-1 rounded-full opacity-50"
+                    >
+                      取消
+                    </button>
+                  </div>
+                )}
               </div>
             );
           })}
