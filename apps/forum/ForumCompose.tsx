@@ -11,6 +11,7 @@ import { useMusic, musicApi, toHttps } from '../../context/MusicContext';
 import { expandShortUrl, extractWebpageContent, detectFirstUrl } from '../../utils/webpageExtractor';
 import ForumMusicCard from './ForumMusicCard';
 import ForumArticleCard from './ForumArticleCard';
+import ForumMentionSuggest from './ForumMentionSuggest';
 
 interface Props {
   activeAccount: db.ForumAccount;
@@ -239,9 +240,13 @@ const ForumCompose: React.FC<Props> = ({ activeAccount, onDone }) => {
 
         <input value={title} onChange={e => setTitle(e.target.value)} placeholder="标题（可选）" className="w-full px-3 py-2 rounded-lg text-sm outline-none" style={{ background: 'rgba(127,127,127,0.1)' }} />
 
+        {/* 正文里 @ 谁，刷新时那个角色一定会到场——帖子正文的 @ 以前是完全不生效的 */}
         {composeType === 'text' && (
-          <textarea value={text} onChange={e => setText(e.target.value.slice(0, 10000))} placeholder="说点什么…（最多1万字）" rows={10}
-                    className="w-full px-3 py-2 rounded-lg text-sm outline-none resize-none" style={{ background: 'rgba(127,127,127,0.1)' }} />
+          <div className="relative">
+            <ForumMentionSuggest value={text} onChange={v => setText(v.slice(0, 10000))} excludeAccountIds={[activeAccount.id]} />
+            <textarea value={text} onChange={e => setText(e.target.value.slice(0, 10000))} placeholder="说点什么…（最多1万字，打 @ 可以点名）" rows={10}
+                      className="w-full px-3 py-2 rounded-lg text-sm outline-none resize-none" style={{ background: 'rgba(127,127,127,0.1)' }} />
+          </div>
         )}
 
         {composeType === 'image' && (

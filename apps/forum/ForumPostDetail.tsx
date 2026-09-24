@@ -9,6 +9,7 @@ import { FORUM_TOPIC_TAGS, getTopicLabel, type ForumTopicTag } from '../../utils
 import TokenImg from '../../components/os/TokenImg';
 import ForumMusicCard from './ForumMusicCard';
 import ForumArticleCard from './ForumArticleCard';
+import ForumMentionSuggest from './ForumMentionSuggest';
 import { useOS } from '../../context/OSContext';
 import { DB } from '../../utils/db';
 import { AppID } from '../../types';
@@ -442,17 +443,27 @@ const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, ap
             回复中✕
           </button>
         )}
-        <input
-          value={inputText}
-          onChange={e => setInputText(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') handleSubmitComment(); }}
-          disabled={readOnly}
-          placeholder={readOnly
-            ? '这个号已注销，只能看不能发'
-            : replyTarget ? `回复：${replyTarget.content.slice(0, 10)}…` : '说点什么…（@handle 可以精准点名）'}
-          className="flex-1 min-w-0 px-3 py-2 rounded-full text-sm outline-none disabled:opacity-50"
-          style={{ background: 'rgba(127,127,127,0.12)' }}
-        />
+        {/* @ 补全浮在输入框上方。以前要你自己记住对方的 handle（moss_club 这种），
+            界面又不显示，所以 @ 基本没人用对过。 */}
+        <div className="flex-1 min-w-0 relative">
+          <ForumMentionSuggest
+            value={inputText}
+            onChange={setInputText}
+            priorityAccountIds={floors.flatMap(f => f.items.map(c => c.authorAccountId))}
+            excludeAccountIds={[activeAccount.id]}
+          />
+          <input
+            value={inputText}
+            onChange={e => setInputText(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') handleSubmitComment(); }}
+            disabled={readOnly}
+            placeholder={readOnly
+              ? '这个号已注销，只能看不能发'
+              : replyTarget ? `回复：${replyTarget.content.slice(0, 10)}…` : '说点什么…（打 @ 可以点名）'}
+            className="w-full px-3 py-2 rounded-full text-sm outline-none disabled:opacity-50"
+            style={{ background: 'rgba(127,127,127,0.12)' }}
+          />
+        </div>
         <button onClick={handleSubmitComment} disabled={readOnly} className="text-sm font-bold px-3 shrink-0 disabled:opacity-30">发送</button>
       </div>
 
