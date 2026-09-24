@@ -559,6 +559,7 @@ const ForumApp: React.FC = () => {
             myAccountId={activeAccount.id}
             onOpenPost={postId => navigate({ kind: 'post', postId })}
             readOnly={readOnly}
+            apiConfig={forumApiConfig}
           />
         );
       case 'settings':
