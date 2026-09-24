@@ -463,6 +463,13 @@ export async function runPostRefresh(params: RunPostRefreshParams): Promise<void
   }
 
   const newCommentCount = pickInRange(FORUM_DEFAULTS.postRefreshNewCommentRange);
+  // [用户确认] 主楼底下要有人接话，评论区才像评论区。随机挑几条主楼带楼中楼，
+  // 不是每条都带——每条都有人接反而显得假。
+  const repliedFloorCount = Math.min(
+    newCommentCount,
+    pickInRange(FORUM_DEFAULTS.postRefreshRepliedFloorRange),
+  );
+  const subCommentRange = FORUM_DEFAULTS.postRefreshSubCommentRange;
 
   // 评论区全貌：TA 看到的就是一个普通网友看到的样子——一堆网名和话，没有"用户"这种标签。
   const allComments = await db.getCommentsByPost(postId);
@@ -526,7 +533,12 @@ ${buildSharedForumHardRules()}
 - 角色本人发言时同样不要在论坛上复述私下聊过的内容——论坛是公开场合，别人看得见。
 
 === 产出数量 ===
-- 新增装饰性评论：${newCommentCount} 条。
+- 新增主楼评论：${newCommentCount} 条（每条都是新开的一楼）。
+- 这 ${newCommentCount} 条里挑 ${repliedFloorCount} 条，底下各带 ${subCommentRange[0]}-${subCommentRange[1]} 条楼中楼回复
+  （写进那条主楼的 replies 数组里）。挑哪几条你自己定——挑最容易引起反应的那种，
+  别机械地挑前几条。剩下的主楼 replies 留空数组或者不写。
+- 楼中楼要像真的在接话：可以是附和、抬杠、歪楼、追问，回的是**这一楼说的内容**，
+  不是重新对帖子发表一遍看法。同一楼里的几条也可以互相呛。
 - 垫底楼回复：上面列出几条就产出几条，threadRootId 必须精确对应。
 
 === 可选：角色起疑 ===
@@ -538,7 +550,7 @@ ${buildSharedForumHardRules()}
 
 请只返回 JSON：
 {
-  "newComments": [{ "authorHandle": "handle", "content": "评论内容" }],
+  "newComments": [{ "authorHandle": "handle", "content": "评论内容", "replies": [{ "authorHandle": "handle", "content": "楼中楼回复" }] }],
   "floorReplies": [{ "threadRootId": "对应上面给的楼id", "authorHandle": "handle", "content": "回复内容" }],
   "suspicion": { "byHandle": "起疑的是角色的哪个号", "targetHandle": "它怀疑的那个账号", "reason": "一句话说明凭什么这么觉得" }
 }
@@ -555,7 +567,30 @@ ${buildSharedForumHardRules()}
     if (!validHandles.has(String(c?.authorHandle || ''))) continue;
     const account = accountByHandle.get(String(c?.authorHandle || ''));
     if (!account || !c?.content) continue;
-    await feed.appendComment(postId, { authorAccountId: account.id, content: String(c.content).slice(0, 2000), createdAt: now });
+    const root = await feed.appendComment(postId, {
+      authorAccountId: account.id,
+      content: String(c.content).slice(0, 2000),
+      createdAt: now,
+    });
+
+    // 楼中楼：挂在刚落库的这条主楼下面。时间戳逐条加 1 秒，保证楼内排序稳定——
+    // appendComment 里楼内是按 createdAt 排的，全都同一毫秒的话顺序就不确定了。
+    const replies = Array.isArray(c?.replies) ? c.replies : [];
+    let offset = 0;
+    for (const r of replies) {
+      const replyHandle = String(r?.authorHandle || '');
+      if (!validHandles.has(replyHandle)) continue;
+      const replyAccount = accountByHandle.get(replyHandle);
+      if (!replyAccount || !r?.content) continue;
+      offset += 1000;
+      await feed.appendComment(postId, {
+        authorAccountId: replyAccount.id,
+        content: String(r.content).slice(0, 2000),
+        createdAt: now + offset,
+        parentCommentId: root.id,
+      });
+      await feed.markCharInteractionIfApplicable(postId, replyAccount, altIsContinuedInUse(replyAccount.id));
+    }
   }
 
   const floorReplies = Array.isArray(parsed?.floorReplies) ? parsed.floorReplies : [];
@@ -1027,58 +1062,77 @@ ${historyBlock}
 
 export interface RunSharedAccountExclusivePostParams {
   apiConfig: ForumApiConfig;
-  sharedAccountId: string;
+  /** 由谁来发。TA 名下的主号/小号/共管号都在候选里，具体用哪个由它自己选。 */
+  charId: string;
   /** 时段标签，直接传 forumScheduler.SHARED_ACCOUNT_BANDS 里对应项的 label（如"08:00–12:00"）。 */
   bandLabel: string;
 }
 
-/** 1次调用同时产出帖子正文 + 一批装饰性NPC评论/点赞，只在共管账号自己主页可见。 */
+/** 把一个账号的档案渲染成提示词里的几行。签名每次现读，你在界面上改完下一条就按新的来。 */
+function describeOwnAccountForPrompt(account: ForumAccount, kindLabel: string, userName: string): string {
+  const lines = [`【${kindLabel}】@${account.handle}（${account.displayName}）`];
+  if (account.bio && account.bio.trim()) {
+    lines.push(`  签名：${account.bio.trim()}`);
+    lines.push(`  （签名是这个号公开的调性，论坛上谁都看得到。它要是写明了这个号该发什么、`
+      + `不该发什么、用什么口气，就照着走；只是句普通签名的话，当成底色，别跟它拧着来。）`);
+  }
+  if (account.avatar || account.banner) lines.push(`  这个号有自己的头像/封面。`);
+  return lines.join('\n');
+}
+
+/**
+ * TA 在论坛上发一条帖子。1 次调用同时产出正文 + 一批装饰性 NPC 评论。
+ *
+ * [用户确认改动] 以前这里写死只有共管号能发。现在 TA 名下的三个号都是候选，
+ * **用哪个由它自己选**：
+ *   - 主号：摆明是它本人发的，谁都看得出来；
+ *   - 小号：论坛上没人知道那是它，但${'${userName}'}可能从说话方式认出来——这是它自己要担的风险；
+ *   - 共管号：它和用户共用的号，发出去等于代表你们俩。
+ * 三种后果都写进提示词里，让它按当下想说什么、想不想被认出来自己权衡。
+ */
 export async function runSharedAccountExclusivePost(params: RunSharedAccountExclusivePostParams): Promise<ForumPost | null> {
-  const { apiConfig, sharedAccountId, bandLabel } = params;
-  const account = await db.getForumAccount(sharedAccountId);
-  if (!account || account.ownerType !== 'shared') return null;
+  const { apiConfig, charId, bandLabel } = params;
+
+  const identity = await getCharForumIdentity(charId);
+  const candidates: { account: ForumAccount; kind: 'main' | 'alt' | 'shared'; label: string }[] = [];
+  if (identity.main) candidates.push({ account: identity.main, kind: 'main', label: '你的主号' });
+  if (identity.alt) candidates.push({ account: identity.alt, kind: 'alt', label: '你的小号' });
+  if (identity.shared) candidates.push({ account: identity.shared, kind: 'shared', label: '共管账号' });
+  if (candidates.length === 0) return null;
 
   const npcAccounts = await db.getActiveNpcAccounts();
   const roster = pickNpcPoolForBatch(npcAccounts, [], Math.min(npcAccounts.length, 5));
   const accountByHandle = new Map(roster.map(a => [a.handle, a]));
 
-  // 这条动态是 TA 本人发的，不是系统代笔。以前这里是一个既不认识你、也不认识 TA 的
+  // 这条帖子是 TA 本人发的，不是系统代笔。以前这里是一个既不认识你、也不认识 TA 的
   // 模型在写，写完还会进 TA 的长期记忆——等于往它脑子里塞别人的日记。
-  const ctx = account.charId ? await getForumCharContext(account.charId) : null;
+  const ctx = await getForumCharContext(charId);
   const user = ctx?.user || await loadForumUserProfile();
 
-  // 这个号的档案每次生成时现读（上面那句 getForumAccount 就是从库里现取的），所以
-  // 你在共管号主页改完签名，下一条自动动态立刻按新的来，不用重启也不用改代码。
-  // 内容一个字都不写死：签名写什么、要不要写，全由你在界面上定。
-  const sharedProfileLines: string[] = [
-    `- 账号名：${account.displayName}（@${account.handle}）`,
-  ];
-  if (account.bio && account.bio.trim()) {
-    sharedProfileLines.push(`- 这个号的签名：${account.bio.trim()}`);
-    sharedProfileLines.push(
-      `  （签名是你和${user.name}给这个号定下的调性，论坛上谁都看得到。`
-      + `如果它写明了这个号该发什么、不该发什么、用什么口气，就照着走；`
-      + `如果它只是一句普通的签名，那就当成这个号的底色，别跟它拧着来。）`,
-    );
-  } else {
-    sharedProfileLines.push(`- 这个号还没写签名，调性由你自己拿捏。`);
-  }
-  if (account.avatar) sharedProfileLines.push(`- 这个号有自己的头像。`);
-  if (account.banner) sharedProfileLines.push(`- 这个号有自己的封面图。`);
+  // 每个号的档案都是现读的，所以你在界面上改完签名，下一条帖子立刻按新的来。
+  const accountBlock = candidates
+    .map(c => describeOwnAccountForPrompt(c.account, c.label, user.name))
+    .join('\n');
 
   const prompt = `
 ${ctx?.text || ''}
 
-=== 这个共管账号 ===
-${sharedProfileLines.join('\n')}
+=== 你名下的论坛账号 ===
+${accountBlock}
 
 === 现在这件事 ===
-现在是 ${bandLabel} 这个时段。你要用共管账号"${account.displayName}"（handle=${account.handle}）发一条动态。
-这个号是你和${user.name}共同使用的，论坛上所有人都看得到你们用它发的东西。
+现在是 ${bandLabel} 这个时段。你要在论坛「杂波频段」上发一条**帖子**。
 
-写什么由你定：可以是你们俩之间的日常、你此刻在做的事、你想说给${user.name}听又不介意别人看到的话。
-按你们现在的关系、你自己的性格，以及上面那个号定下的调性来写——不要写成一段谁都能发的通用动态。
-也不要在里面写论坛上没人该知道的事（你们私下聊过的细节、你另外那个小号之类）。
+先决定用上面哪个号发，再写内容。三个号的后果不一样，按你此刻想说什么、想不想被认出来自己权衡：
+- 用主号：论坛上谁都看得出这是你。想说的话要是你不介意被人对上号，就用它。
+- 用小号：论坛上没人知道那是你。但${user.name}也在这个论坛上，可能从你的说话方式认出来——
+  这个风险你自己担。有些话只有在没人知道是你的时候才说得出口，那就用它。
+- 用共管账号：那是你和${user.name}共用的号，发出去等于代表你们俩，不只是你一个人。
+
+写什么由你定：此刻在做的事、突然想到的一句话、想说给${user.name}听又不介意别人看到的话都行。
+按你自己的性格、你们现在的关系、以及那个号本身的调性来写——不要写成一篇谁都能发的通用帖子。
+也不要在正文里写论坛上没人该知道的事（你们私下聊过的细节、你另外那个号之类），
+更不要在小号的帖子里暗示"其实我是某某"。
 
 === 可用的装饰性评论/点赞账号池（路人，随便谁来留两句）===
 ${roster.map(describeAccountForPrompt).join('\n')}
@@ -1087,6 +1141,7 @@ ${buildSharedForumHardRules()}
 
 请只返回 JSON：
 {
+  "accountHandle": "你决定用哪个号发（必须是上面列出的 handle 之一）",
   "topicTag": "话题tag",
   "title": "标题",
   "content": "正文",
@@ -1094,16 +1149,25 @@ ${buildSharedForumHardRules()}
 }
 `.trim();
 
-  const raw = await callForumAI(apiConfig, prompt, '论坛共管账号专属动态生成');
+  const raw = await callForumAI(apiConfig, prompt, '论坛角色发帖');
   const parsed = extractJson<any>(raw);
   const content = String(parsed?.content || '').trim();
   if (!content) return null;
+
+  // 它选的号。选不出来或乱填就退回共管号，没有共管号就退回主号——宁可摆在明面上，
+  // 也不替它拿小号去冒不该冒的风险（跟挑明那边同一个取舍）。
+  const chosenHandle = String(parsed?.accountHandle || '').trim();
+  const chosen = candidates.find(c => c.account.handle === chosenHandle)
+    || candidates.find(c => c.kind === 'shared')
+    || candidates.find(c => c.kind === 'main')
+    || candidates[0];
+  const account = chosen.account;
 
   const now = Date.now();
   const topicTag = FORUM_TOPIC_TAGS.some(t => t.tag === parsed?.topicTag) ? parsed.topicTag : 'daily_chatter';
   const post: ForumPost = {
     id: db.createForumPostId(),
-    authorAccountId: sharedAccountId,
+    authorAccountId: account.id,
     postKind: 'organic',
     topicTag,
     title: String(parsed?.title || '').slice(0, 100),
@@ -1112,20 +1176,24 @@ ${buildSharedForumHardRules()}
     lastActivityAt: now,
     isCollected: false,
     involvesCharInteraction: false,
-    isOwnedByUserSide: true, // [交接5 4.9] 系统自动生成的专属动态同样 isOwnedByUserSide=true
+    // [用户确认] TA 用哪个号发的都永久保留，小号也一样——小号那几条往往正是你最想
+    // 回头翻的（"它当时用那个号说了什么"），被三天水线清掉就找不回来了。
+    isOwnedByUserSide: true,
     likes: [],
-    // [用户确认·覆盖交接5 4.9] 原本只在共管号自己主页可见，现在跟用户手动用共管号
-    // 发的帖走同一条路进公共 feed——否则同一个号会出现"你发的全论坛可见、它发的
-    // 只有主页看得到"这种割裂。
+    // [用户确认·覆盖交接5 4.9] 原本只在共管号自己主页可见，现在跟用户手动发的帖走
+    // 同一条路进公共 feed——否则同一个号会出现"你发的全论坛可见、它发的只有主页
+    // 看得到"这种割裂。
     visibility: 'public',
   };
   await feed.createPost(post);
 
-  // 共管账号的自动动态同样算"用户方内容"，写一条便利贴给绑定的那个角色。
-  if (account.charId) {
+  // 便利贴：让 TA 在聊天里记得自己刚发过什么。
+  // 小号的帖子不写——那是它瞒着用户的一面，写进便利贴等于给了它一个在聊天里
+  // 顺嘴说漏的由头，互相猜小号的玩法就废了。它自己知道有这个号（见 forumIdentityMask）。
+  if (chosen.kind !== 'alt') {
     const { upsertForumPostPin } = await import('./forumMemory');
-    await upsertForumPostPin(account.charId, post).catch(e =>
-      console.warn('[ForumAi] 共管动态便利贴写入失败:', e?.message || String(e)));
+    await upsertForumPostPin(charId, post).catch(e =>
+      console.warn('[ForumAi] 发帖便利贴写入失败:', e?.message || String(e)));
   }
 
   const comments = Array.isArray(parsed?.comments) ? parsed.comments : [];
