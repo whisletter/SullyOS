@@ -224,6 +224,25 @@ export function describeAccountLanguageStyle(handle: string): string {
   return getAccountLanguageStyle(handle) === 'english' ? '【全英文】' : '【全中文】';
 }
 
+export const FORUM_NEWS_AUTHENTICITY_RULE = `### 新闻贴 vs 原创贴的真实性边界
+这次生成会同时给你：一批真实热点新闻条目（标题/来源/链接）、一批 NPC 人设、一份用户偏好标签。
+产出的每条帖子必须用 postKind 字段标注属于下面哪一种：
+
+【postKind: 'news'】
+- 正文必须锚定在给你的某一条真实新闻条目上，只做"转述 + 带人设口吻的配文"式加工
+  （例如"XX说了个事，笑不活了：[新闻要点]"），不允许编造该新闻里没有的具体事实、数据、当事人细节。
+- 必须原样带上这条新闻对应的 url 和标题（写入 sourceNewsUrl / sourceNewsTitle），
+  不能编一个不存在的链接，也不能改写真实链接。
+- 这条帖子下面的评论不受真实性约束——评论是路人对这条新闻的虚构反应
+  （附和/抬杠/歪楼/引战），可以完全编。
+
+【postKind: 'organic'】
+- 跟任何新闻无关，纯粹由 NPC 人设、圈子、用户偏好标签驱动的自发内容
+  （日常吐槽、圈子八卦、脑洞、玄学等），内容可以完全虚构。
+
+两种帖子都可以打任意 topicTag（包括"脑洞幻想""神秘玄学"），postKind 和 topicTag
+两个字段完全独立，不互相限制搭配。`;
+
 /** 层1（批量生成）+ 层2（Char Turn/单独互动）共享的三条硬约束，按顺序拼接。 */
 export function buildSharedForumHardRules(): string {
   return [FORUM_SAFETY_HARD_RULE, FORUM_BILINGUAL_RULE].join('\n\n');
