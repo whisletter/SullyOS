@@ -72,6 +72,19 @@ const NAV_ITEMS: { id: ForumSection['kind']; icon: React.ElementType; label: str
 ];
 
 /**
+ * 论坛专用 API：开关打开且三项都填全才算数。
+ * 只填了一半就退回主 API——半套配置发出去只会一直 401，还不如用能用的那套。
+ */
+function readForumApiOverride(settings: db.ForumSettings): { baseUrl: string; apiKey: string; model: string } | null {
+  if (!settings.apiOverrideEnabled) return null;
+  const baseUrl = (settings.apiOverrideBaseUrl || '').trim();
+  const apiKey = (settings.apiOverrideApiKey || '').trim();
+  const model = (settings.apiOverrideModel || '').trim();
+  if (!baseUrl || !apiKey || !model) return null;
+  return { baseUrl, apiKey, model };
+}
+
+/**
  * 读一个角色今天"有空上网"的时段，给共管号发帖的档位做闸门。
  *
  * 返回值三态，跟 forumScheduler.findDueSharedAccountBand 的约定一致：
@@ -112,6 +125,8 @@ const ForumApp: React.FC = () => {
   const [dmUnreadByAccount, setDmUnreadByAccount] = useState<Map<string, number>>(new Map());
   /** 通知未读条数。通知列表不分账号，所以这里只有一个数，不像私信要按号分开。 */
   const [notifUnread, setNotifUnread] = useState(0);
+  /** 论坛专用 API（设置页里填的）。null = 没开或没填全，走主 API。 */
+  const [forumApiOverride, setForumApiOverride] = useState<{ baseUrl: string; apiKey: string; model: string } | null>(null);
   /** 后台任务（比如 TA 挑明）发来新私信后 +1，触发红点重新统计。 */
   const [unreadRefreshKey, setUnreadRefreshKey] = useState(0);
   const [feedRefreshKey, setFeedRefreshKey] = useState(0);
@@ -134,7 +149,18 @@ const ForumApp: React.FC = () => {
     });
   }, [closeApp]);
 
-  const hasApiConfig = !!(apiConfig?.baseUrl && apiConfig?.apiKey && apiConfig?.model);
+  /**
+   * 论坛实际用的 API。设置页里开了论坛专用 API 且三项都填了就用那一套，
+   * 否则退回聊天那个主 API。生图配置（imageGenApi）永远跟着主配置走——
+   * 那本来就是另一个独立的 API，没必要在论坛里再配一次。
+   */
+  const forumApiConfig = useMemo(() => (
+    forumApiOverride
+      ? { ...apiConfig, ...forumApiOverride }
+      : apiConfig
+  ), [apiConfig, forumApiOverride]);
+
+  const hasApiConfig = !!(forumApiConfig?.baseUrl && forumApiConfig?.apiKey && forumApiConfig?.model);
   /** 当前身份是已注销的号：只能翻以前的记录，不能发帖、评论、私信、加好友。 */
   const readOnly = activeAccount?.status === 'deactivated';
 
@@ -186,6 +212,7 @@ const ForumApp: React.FC = () => {
         if (cancelled) return;
         setHeatLevel(settings.heatLevel || FORUM_DEFAULTS.defaultHeatLevel);
         setDarkMode(!!settings.darkMode);
+        setForumApiOverride(readForumApiOverride(settings));
 
         // 打开App顺手做的免费维护：物理清扫过期内容（失败不影响进入）
         await feed.sweepExpiredContent().catch(e => console.warn('[Forum] 清扫失败:', e));
@@ -236,7 +263,7 @@ const ForumApp: React.FC = () => {
           if (needsBatch) {
             if (!cancelled) setGeneratingFirstBatch(true);
             const hotNewsItems = await fetchHotNewsItems();
-            const posts = await runQuotaBatch({ apiConfig, hotNewsItems });
+            const posts = await runQuotaBatch({ apiConfig: forumApiConfig, hotNewsItems });
             // 只有真的生成出内容才推进水位。生成失败还把这个 slot 标记成"已生成"，
             // 等于白白浪费掉这 4 小时的机会。
             if (posts.length > 0) {
@@ -255,7 +282,7 @@ const ForumApp: React.FC = () => {
       // 失败就跳过，下次进 App 再试，不拿随机名字把这个号定死。
       for (const char of characters || []) {
         if (!char.id || cancelled) continue;
-        await ensureCharAltAccount(apiConfig, {
+        await ensureCharAltAccount(forumApiConfig, {
           id: char.id, name: char.name,
           systemPrompt: (char as any).systemPrompt, worldview: (char as any).worldview,
         }).catch(e => console.warn('[Forum] 角色小号建号失败:', e));
@@ -285,7 +312,7 @@ const ForumApp: React.FC = () => {
           const due = scheduler.findDueSharedAccountBand(cid, dateKey, minutesOfDay, freeWindows);
           if (!due) continue;
           const post = await ai.runSharedAccountExclusivePost({
-            apiConfig, charId: cid, bandLabel: due.band.label,
+            apiConfig: forumApiConfig, charId: cid, bandLabel: due.band.label,
           });
           scheduler.markSharedAccountBandFired(cid, dateKey, due.bandIndex);
           if (post && !cancelled) setFeedRefreshKey(k => k + 1);
@@ -316,7 +343,7 @@ const ForumApp: React.FC = () => {
         // 用主号还是小号去问，由 TA 在这次调用里自己选
         if (candidate && !cancelled && await claimSlot('lastConfrontationSlotId')) {
           const result = await ai.runCharConfrontation({
-            apiConfig,
+            apiConfig: forumApiConfig,
             charId: candidate.charId,
             targetAccountId: candidate.targetAccountId,
             userDisplayName: userProfile?.name,
@@ -342,7 +369,7 @@ const ForumApp: React.FC = () => {
         }
         if (request && !cancelled && await claimSlot('lastFriendDecisionSlotId')) {
           const accepted = await ai.runFriendRequestDecision({
-            apiConfig,
+            apiConfig: forumApiConfig,
             requesterAccountId: request.from,
             targetAccountId: request.to,
             userDisplayName: userProfile?.name,
@@ -366,7 +393,7 @@ const ForumApp: React.FC = () => {
     setRefreshing(true);
     try {
       const hotNewsItems = await fetchHotNewsItems();
-      const posts = await runQuotaBatch({ apiConfig, hotNewsItems });
+      const posts = await runQuotaBatch({ apiConfig: forumApiConfig, hotNewsItems });
       if (posts.length === 0) {
         // 以前这里无论如何都弹"刷出新帖了"，生成 0 条时也照弹，等于骗人。
         addToast('这次一条都没生成出来，可以再试一次', 'error');
@@ -379,7 +406,7 @@ const ForumApp: React.FC = () => {
     } finally {
       setRefreshing(false);
     }
-  }, [apiConfig, hasApiConfig, refreshing, fetchHotNewsItems, addToast]);
+  }, [forumApiConfig, hasApiConfig, refreshing, fetchHotNewsItems, addToast]);
 
   /** 分区页🔄：只刷当前这一个分区。返回新增条数，交给分区页自己决定怎么提示/重载。 */
   const handleTopicRefresh = useCallback(async (topicTag: string): Promise<number> => {
@@ -390,7 +417,7 @@ const ForumApp: React.FC = () => {
     try {
       const hotNewsItems = await fetchHotNewsItems();
       const posts = await runTopicRefresh({
-        apiConfig, hotNewsItems, topicTag: topicTag as ForumTopicTag,
+        apiConfig: forumApiConfig, hotNewsItems, topicTag: topicTag as ForumTopicTag,
       });
       if (posts.length === 0) {
         addToast('这次一条都没生成出来，可以再试一次', 'error');
@@ -402,7 +429,7 @@ const ForumApp: React.FC = () => {
       addToast(`刷新失败: ${e?.message?.slice(0, 60) || '未知错误'}`, 'error');
       return 0;
     }
-  }, [apiConfig, hasApiConfig, fetchHotNewsItems, addToast]);
+  }, [forumApiConfig, hasApiConfig, fetchHotNewsItems, addToast]);
 
   const themeTokens = darkMode ? FORUM_THEME.dark : FORUM_THEME.light;
 
@@ -485,7 +512,7 @@ const ForumApp: React.FC = () => {
             postId={section.postId}
             activeAccount={activeAccount}
             heatLevel={heatLevel}
-            apiConfig={apiConfig}
+            apiConfig={forumApiConfig}
             readOnly={readOnly}
             onDeleted={() => { setSection({ kind: 'home' }); setHistory([]); setFeedRefreshKey(k => k + 1); }}
           />
@@ -517,7 +544,7 @@ const ForumApp: React.FC = () => {
         return (
           <ForumDm
             activeAccount={activeAccount}
-            apiConfig={apiConfig}
+            apiConfig={forumApiConfig}
             readOnly={readOnly}
             onActiveAccountDeactivated={() => { handleSwitchIdentity(userMainAccountId()); }}
             onUnreadChanged={refreshUnread}
@@ -541,6 +568,8 @@ const ForumApp: React.FC = () => {
             onHeatLevelChange={handleHeatLevelChange}
             darkMode={darkMode}
             onDarkModeToggle={handleDarkModeToggle}
+            activeAccountId={activeAccount.id}
+            onApiOverrideChange={setForumApiOverride}
           />
         );
       case 'compose':
@@ -549,7 +578,7 @@ const ForumApp: React.FC = () => {
         return null;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, activeAccount, section, feedRefreshKey, heatLevel, apiConfig, darkMode, handleTopicRefresh, readOnly, handleSwitchIdentity, refreshUnread]);
+  }, [ready, activeAccount, section, feedRefreshKey, heatLevel, forumApiConfig, darkMode, handleTopicRefresh, readOnly, handleSwitchIdentity, refreshUnread]);
 
   return (
     <div
@@ -673,7 +702,10 @@ const ForumApp: React.FC = () => {
           正在发布页时隐藏，免得挡住工具条；
           在帖子详情页也隐藏——那里底部有一条常驻的评论输入栏，这颗按钮正好压在
           「发送」上面，点不到。看帖子时该做的事是评论，要发新帖退一步就有。 */}
-      {ready && activeAccount && !readOnly && section.kind !== 'compose' && section.kind !== 'post' && (
+      {/* [用户确认] 只在主页和「我的」出现。以前是除了发布页哪儿都有——
+          在搜索、通知、私信、好友、收藏、设置这些页面上，它跟当前在做的事毫无关系，
+          纯粹是挡视线。帖子详情页更是会压住评论的发送键。 */}
+      {ready && activeAccount && !readOnly && (section.kind === 'home' || section.kind === 'profile') && (
         <div className="absolute right-5 z-30 pointer-events-none" style={{ bottom: 'calc(var(--safe-bottom, 0px) + 22px)' }}>
           <div
             className="absolute -inset-3 rounded-full"
