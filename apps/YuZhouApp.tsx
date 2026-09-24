@@ -5,6 +5,7 @@ import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
 import { processImage } from '../utils/file';
 import { GAMES } from './games/registry';
+import { loadWallet, type Wallet, type WalletEntry } from './games/shared/wallet';
 import YuZhouNoteBoard from './yuzhou/YuZhouNoteBoard';
 import {
   YUZHOU_MOOD_EVENT,
@@ -273,10 +274,102 @@ const DashedCircle: React.FC<{ children: React.ReactNode }> = ({ children }) => 
   </span>
 );
 
+
+/** 流水里那一行的来源标签。 */
+const GAME_LABELS: Record<string, string> = {
+  turtle_soup: '海龟汤',
+  monopoly: '大富翁',
+  witch_poison: '女巫的毒药',
+  tarot: '塔罗',
+  other: '其他',
+};
+
+/**
+ * 苹果币钱包页。
+ *
+ * 两个钱包**并排**是这一屏的重点：你一眼看到"我 128、它 64"，才会去想
+ * "它攒的钱会拿来干嘛"。分开放两处就没有这个效果了。
+ *
+ * 🍏 绿苹果是你，🍎 红苹果是 TA。商店还没上架，先把钱和流水摆出来。
+ */
+const YuZhouWalletPage: React.FC<{ wallet: Wallet; taName: string; onBack: () => void }> = ({ wallet, taName, onBack }) => (
+  <div className="absolute inset-0 z-[65] bg-[#fff7f5] text-slate-800">
+    <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_15%_10%,rgba(255,190,205,.42),transparent_28%),radial-gradient(circle_at_90%_25%,rgba(255,220,224,.5),transparent_30%),linear-gradient(180deg,#fffafa_0%,#fff4f1_100%)]" />
+    <div className="relative h-full overflow-y-auto overscroll-none" style={{ paddingTop: 'var(--safe-top)' }}>
+      <header className="h-14 px-4 flex items-center justify-between">
+        <button onClick={onBack} className="w-9 h-9 rounded-full bg-white/80 shadow-sm text-rose-400 text-xl active:scale-90 transition-transform">‹</button>
+        <div className="text-center">
+          <div className="font-black tracking-[.18em] text-rose-500 text-base">兑换商店</div>
+          <div className="text-[8px] tracking-[.22em] text-rose-300 mt-0.5">APPLE COINS</div>
+        </div>
+        <div className="w-9 h-9" />
+      </header>
+
+      <main className="px-5 pb-10">
+        {/* 两个钱包并排 */}
+        <div className="grid grid-cols-2 gap-3 max-w-md mx-auto mt-2">
+          {([['🍏', '我', wallet.user], ['🍎', taName, wallet.ta]] as const).map(([icon, who, amount]) => (
+            <div key={who} className="rounded-[22px] bg-white/85 border border-white shadow-[0_8px_24px_rgba(172,88,108,.10)] px-4 py-5 text-center">
+              <div className="text-[34px] leading-none">{icon}</div>
+              <div className="text-[28px] font-black text-slate-700 mt-2 leading-none">{amount}</div>
+              <div className="text-[11px] text-rose-300 mt-1.5 font-bold truncate">{who}</div>
+            </div>
+          ))}
+        </div>
+
+        <div className="max-w-md mx-auto mt-6 rounded-[22px] bg-white/70 border border-white px-4 py-5 text-center">
+          <div className="text-[13px] font-bold text-slate-600">商店还没上架</div>
+          <div className="text-[11px] text-rose-300 mt-1.5 leading-relaxed">
+            先把币攒起来。家务券、点歌券、惊喜礼物这些等清单定好就能兑。
+          </div>
+        </div>
+
+        {/* 流水：让你看得见钱是怎么来的 */}
+        <div className="max-w-md mx-auto mt-6">
+          <div className="text-[12px] font-bold text-rose-400 mb-2 px-1">最近的收支</div>
+          {wallet.ledger.length === 0 ? (
+            <div className="text-[11px] text-rose-300 px-1 py-4 text-center">还没有任何收支。去玩一局吧。</div>
+          ) : (
+            <div className="space-y-1.5">
+              {[...wallet.ledger].reverse().slice(0, 30).map((e: WalletEntry) => (
+                <div key={e.id} className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white/75 border border-white">
+                  <span className="text-[14px] shrink-0">{e.side === 'user' ? '🍏' : '🍎'}</span>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-[12px] text-slate-700 truncate">{e.reason}</div>
+                    <div className="text-[10px] text-rose-300">
+                      {GAME_LABELS[e.game] || e.game} · {new Date(e.at).toLocaleDateString()}
+                    </div>
+                  </div>
+                  <span className="text-[13px] font-black shrink-0"
+                        style={{ color: e.amount >= 0 ? '#e0767e' : '#94a3b8' }}>
+                    {e.amount >= 0 ? '+' : ''}{e.amount}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </main>
+    </div>
+  </div>
+);
+
 const YuZhouGamePage: React.FC<{ onBack: () => void }> = ({ onBack }) => {
+  const { activeCharacterId, characters } = useOS();
+  const charId = activeCharacterId || '';
+  const taName = characters.find(c => c.id === charId)?.name || 'TA';
+
   const [openId, setOpenId] = useState<string | null>(null);
+  const [showWallet, setShowWallet] = useState(false);
+  const [wallet, setWallet] = useState<Wallet>(() => loadWallet(charId));
   const opened = GAMES.find(game => game.id === openId);
   const OpenedGame = opened?.component;
+
+  // 从某个游戏退回大厅时重读钱包：那一局刚发的币要立刻反映在顶上那个横条里。
+  // 游戏是各自往 localStorage 写的，没有事件通知，所以靠"回到大厅"这个时机重读。
+  useEffect(() => {
+    if (openId === null) setWallet(loadWallet(charId));
+  }, [openId, charId, showWallet]);
 
   return (
     <div className="absolute inset-0 z-[60] bg-[#fff7f5] text-slate-800">
@@ -288,7 +381,18 @@ const YuZhouGamePage: React.FC<{ onBack: () => void }> = ({ onBack }) => {
             <div className="font-black tracking-[.18em] text-rose-500 text-base">游戏</div>
             <div className="text-[8px] tracking-[.22em] text-rose-300 mt-0.5">PLAY TOGETHER</div>
           </div>
-          <div className="w-9 h-9" />
+          {/* 两个钱包并排放在这里，点进去是兑换商店。
+              并排是关键：一眼看到"我多少、它多少"，才会去想它攒的钱要拿来干嘛。 */}
+          <button
+            onClick={() => setShowWallet(true)}
+            className="h-9 px-2.5 rounded-full bg-white/80 shadow-sm flex items-center gap-1.5 active:scale-95 transition-transform"
+          >
+            <span className="text-[13px] leading-none">🍏</span>
+            <span className="text-[12px] font-black text-slate-600 leading-none">{wallet.user}</span>
+            <span className="text-rose-200 text-[10px] leading-none">·</span>
+            <span className="text-[13px] leading-none">🍎</span>
+            <span className="text-[12px] font-black text-slate-600 leading-none">{wallet.ta}</span>
+          </button>
         </header>
 
         <main className="px-5 pt-4 pb-10">
@@ -314,6 +418,10 @@ const YuZhouGamePage: React.FC<{ onBack: () => void }> = ({ onBack }) => {
           </div>
         </main>
       </div>
+
+      {showWallet && (
+        <YuZhouWalletPage wallet={wallet} taName={taName} onBack={() => setShowWallet(false)} />
+      )}
 
       {OpenedGame && (
         <React.Suspense fallback={<div className="absolute inset-0 z-[70] bg-[#fff7f5] flex items-center justify-center text-[12px] text-rose-300">加载中…</div>}>
