@@ -657,6 +657,26 @@ export async function saveForumDmMessage(msg: ForumDmMessage): Promise<void> {
   return txDone(tx);
 }
 
+/**
+ * 删一条私信。[用户确认新增]
+ *
+ * 只删这一条，不动会话里别的消息。删掉自己发的那条之后，TA 下次读这个会话时
+ * 就看不到它了——等于你把话收回去了，它不会知道你说过。
+ */
+export async function deleteForumDmMessage(id: string): Promise<void> {
+  const db = await openDb();
+  const tx = db.transaction(STORE_DM_MESSAGES, 'readwrite');
+  tx.objectStore(STORE_DM_MESSAGES).delete(id);
+  return txDone(tx);
+}
+
+/** 按 id 取一条私信。改内容时要先读出来再整条写回。 */
+export async function getForumDmMessage(id: string): Promise<ForumDmMessage | undefined> {
+  const db = await openDb();
+  const tx = db.transaction(STORE_DM_MESSAGES, 'readonly');
+  return reqResult<ForumDmMessage | undefined>(tx.objectStore(STORE_DM_MESSAGES).get(id));
+}
+
 /** 某个会话（身份+对方）的完整消息，按时间升序。 */
 export async function getDmThreadMessages(
   viewerIdentityAccountId: string,
