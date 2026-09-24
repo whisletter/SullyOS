@@ -4048,6 +4048,11 @@ export interface FullBackupData {
     // 眠光（独立 IndexedDB 库 SullyOS_MingLight 的全量快照）
     mingLight?: import('./utils/mingLightDb').MingLightBackupData;
 
+    // 论坛「杂波频段」（独立 IndexedDB 库 SullyOS_Forum 的全量快照）。
+    // 账号 / 帖子 / 评论 / 私信 / 好友关系 / 怀疑记录 / 小号配额都在这一份里。
+    // 跟眠光一样属于隐私内容，media_only（可分享档）不带。
+    forum?: import('./utils/forumDb').ForumBackupData;
+
     // 独立协同工作数据库。二进制文件放在 ZIP 的 collaboration/assets/，JSON 只存索引。
     collaborationBackupVersion?: 1;
     collaborationBackupMode?: 'text_only' | 'media_only' | 'full';
