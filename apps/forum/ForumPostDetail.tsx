@@ -51,6 +51,8 @@ const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, ap
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   /** 正在确认删除的那条评论 id。null = 没在确认。 */
   const [confirmingDeleteComment, setConfirmingDeleteComment] = useState<string | null>(null);
+  /** 点开看大图时，当前看的是第几张。null = 没在看。 */
+  const [viewingImageIndex, setViewingImageIndex] = useState<number | null>(null);
   const [deletingComment, setDeletingComment] = useState(false);
 
   const load = useCallback(async () => {
@@ -224,16 +226,17 @@ const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, ap
             {post.images && post.images.length > 0 && (
               <div className={post.images.length === 1 ? 'mt-2' : 'mt-2 grid grid-cols-3 gap-1.5'}>
                 {post.images.map((img, i) => (
-                  <div
+                  <button
                     key={`${img}-${i}`}
-                    className={`overflow-hidden rounded-xl ${post.images!.length === 1 ? 'max-w-[70%]' : 'aspect-square'}`}
+                    onClick={() => setViewingImageIndex(i)}
+                    className={`overflow-hidden rounded-xl block active:scale-[0.98] transition-transform ${post.images!.length === 1 ? 'max-w-[70%]' : 'aspect-square w-full'}`}
                     style={{ background: 'rgba(127,127,127,0.12)' }}
                   >
                     <TokenImg
                       value={img}
                       className={post.images!.length === 1 ? 'w-full h-auto object-contain' : 'w-full h-full object-cover'}
                     />
-                  </div>
+                  </button>
                 ))}
               </div>
             )}
@@ -369,6 +372,55 @@ const ForumPostDetail: React.FC<Props> = ({ postId, activeAccount, heatLevel, ap
         />
         <button onClick={handleSubmitComment} disabled={readOnly} className="text-sm font-bold px-3 shrink-0 disabled:opacity-30">发送</button>
       </div>
+
+      {/* 看大图：点配图打开，点任意处关闭；多张时左右可以翻。
+          用的还是 TokenImg，令牌解析和 objectURL 回收都由它自己管，这里不碰 blob。 */}
+      {viewingImageIndex !== null && post.images && post.images[viewingImageIndex] && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center"
+          style={{ background: 'rgba(0,0,0,0.92)' }}
+          onClick={() => setViewingImageIndex(null)}
+        >
+          <TokenImg
+            value={post.images[viewingImageIndex]}
+            className="max-w-full max-h-full object-contain"
+            style={{ maxHeight: 'calc(100vh - var(--safe-top, 0px) - var(--safe-bottom, 0px) - 80px)' }}
+          />
+
+          {post.images.length > 1 && (
+            <>
+              <button
+                onClick={e => {
+                  e.stopPropagation();
+                  setViewingImageIndex(i => ((i ?? 0) - 1 + post.images!.length) % post.images!.length);
+                }}
+                className="absolute left-2 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full text-white text-xl"
+                style={{ background: 'rgba(255,255,255,0.12)' }}
+                aria-label="上一张"
+              >
+                ‹
+              </button>
+              <button
+                onClick={e => {
+                  e.stopPropagation();
+                  setViewingImageIndex(i => ((i ?? 0) + 1) % post.images!.length);
+                }}
+                className="absolute right-2 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full text-white text-xl"
+                style={{ background: 'rgba(255,255,255,0.12)' }}
+                aria-label="下一张"
+              >
+                ›
+              </button>
+              <div
+                className="absolute left-0 right-0 text-center text-white/70 text-[12px]"
+                style={{ bottom: 'calc(var(--safe-bottom, 0px) + 16px)' }}
+              >
+                {viewingImageIndex + 1} / {post.images.length}
+              </div>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 };
