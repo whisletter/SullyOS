@@ -35,7 +35,7 @@ import { maskAccountForChar, describeMaskedAccount, getCharForumIdentity } from 
 import * as suspicion from './forumSuspicion';
 import { userMainAccountId } from './forumBootstrap';
 import { getForumCharContext, loadForumUserProfile, type ForumCharContext } from './forumCharContext';
-import type { HotNewsItem } from '../types';
+import type { CharacterProfile, HotNewsItem, ImageGenApiConfig } from '../types';
 
 // ==================== 调用约定 ====================
 
@@ -43,6 +43,12 @@ export interface ForumApiConfig {
   baseUrl: string;
   apiKey: string;
   model: string;
+  /**
+   * 全局「生图 API」。ForumApp 传进来的本来就是整个 apiConfig 对象，这个字段一直在，
+   * 只是以前论坛用不上所以没写进类型。TA 发帖配图要用它。
+   * 没配 / 没开时整条配图链路静默跳过，TA 照常发纯文字帖。
+   */
+  imageGenApi?: ImageGenApiConfig;
 }
 
 const AI_MAX_RETRIES = 2;
@@ -1169,6 +1175,86 @@ export interface RunSharedAccountExclusivePostParams {
   bandLabel: string;
 }
 
+
+/** TA 发帖时能挑的歌。跟朋友圈那套同源：它自己歌单 + 用户网易云"喜欢的音乐"。 */
+interface ForumMusicCandidate {
+  id: number;
+  name: string;
+  artists: string;
+  albumPic: string;
+  source: 'ta' | 'user';
+}
+
+/**
+ * 攒一份真实的歌曲候选池给 TA 挑。
+ *
+ * 为什么不让它直接写歌名：它编出来的歌可能根本不存在，封面和歌手也只能一起编，
+ * 点开还播不了。给一份真名单让它挑，挑出来的一定是真歌——这也是朋友圈的做法。
+ *
+ * 用户那半需要网易云 cookie 有效，而且这个角色被允许读用户音乐（canReadUserMusic）。
+ * 拿不到就只剩 TA 自己歌单里的歌，再拿不到就返回空池，发帖时干脆不提配歌这回事。
+ */
+async function buildForumMusicCandidates(char: CharacterProfile): Promise<ForumMusicCandidate[]> {
+  const out: ForumMusicCandidate[] = [];
+  const seen = new Set<number>();
+
+  for (const song of (char.musicProfile?.playlists || []).flatMap(pl => pl.songs || [])) {
+    if (!song?.id || seen.has(song.id)) continue;
+    seen.add(song.id);
+    out.push({
+      id: song.id,
+      name: song.name || '',
+      artists: song.artists || '未知歌手',
+      albumPic: song.albumPic || '',
+      source: 'ta',
+    });
+  }
+
+  try {
+    const { loadMusicCfgStandalone, musicApi, toHttps } = await import('../context/MusicContext');
+    const musicCfg = loadMusicCfgStandalone();
+    const canReadUser = char.musicProfile?.canReadUserMusic ?? true;
+    if (musicCfg?.cookie && canReadUser) {
+      const likeRes = await musicApi.call(musicCfg, 'likelist', {});
+      const likedIds: number[] = (likeRes?.ids || likeRes?.data?.ids || []).slice(0, 8);
+      if (likedIds.length > 0) {
+        const detail = await musicApi.call(musicCfg, 'song/detail', { ids: likedIds });
+        for (const song of (detail?.songs || [])) {
+          if (!song?.id || seen.has(song.id)) continue;
+          seen.add(song.id);
+          out.push({
+            id: song.id,
+            name: song.name || '',
+            artists: (song.ar || song.artists || []).map((a: any) => a.name).filter(Boolean).join(' / ') || '未知歌手',
+            albumPic: toHttps(song.al?.picUrl || song.album?.picUrl || ''),
+            source: 'user',
+          });
+        }
+      }
+    }
+  } catch (e: any) {
+    // cookie 失效 / 网络问题：静默降级成"只有 TA 自己歌单"，不影响发帖
+    console.warn('[ForumAi] 读取用户网易云喜欢列表失败，跳过:', e?.message || String(e));
+  }
+  return out;
+}
+
+/** 候选池渲染成提示词里的清单，两边分开列，让 TA 知道哪些是对方的歌。 */
+function formatForumMusicCandidates(candidates: ForumMusicCandidate[]): string {
+  const taSongs = candidates.filter(c => c.source === 'ta').slice(0, 8);
+  const userSongs = candidates.filter(c => c.source === 'user').slice(0, 8);
+  const lines: string[] = [];
+  if (taSongs.length > 0) {
+    lines.push('你自己歌单里的：');
+    lines.push(...taSongs.map(s => `  [id=${s.id}] ${s.name} - ${s.artists}`));
+  }
+  if (userSongs.length > 0) {
+    lines.push('对方网易云"喜欢的音乐"里的（你能看到，因为对方允许你读）：');
+    lines.push(...userSongs.map(s => `  [id=${s.id}] ${s.name} - ${s.artists}`));
+  }
+  return lines.join('\n');
+}
+
 /** 把一个账号的档案渲染成提示词里的几行。签名每次现读，你在界面上改完下一条就按新的来。 */
 function describeOwnAccountForPrompt(account: ForumAccount, kindLabel: string, userName: string): string {
   const lines = [`【${kindLabel}】@${account.handle}（${account.displayName}）`];
@@ -1210,6 +1296,15 @@ export async function runSharedAccountExclusivePost(params: RunSharedAccountExcl
   const ctx = await getForumCharContext(charId);
   const user = ctx?.user || await loadForumUserProfile();
 
+  // 生图能力：没配 / 没开「生图 API」时，提示词里连"可以配图"这件事都不提，
+  // 免得 TA 写了 imagePrompt 却出不了图，白白多一段废字段。
+  const { isImageGenApiReady } = await import('./imageGenApi');
+  const canMakeImage = isImageGenApiReady(apiConfig.imageGenApi);
+
+  // 配歌：给它一份真实歌单挑，没歌可挑就不提这回事。
+  const musicCandidates = ctx?.char ? await buildForumMusicCandidates(ctx.char) : [];
+  const canShareMusic = musicCandidates.length > 0;
+
   // 每个号的档案都是现读的，所以你在界面上改完签名，下一条帖子立刻按新的来。
   const accountBlock = candidates
     .map(c => describeOwnAccountForPrompt(c.account, c.label, user.name))
@@ -1234,7 +1329,27 @@ ${accountBlock}
 按你自己的性格、你们现在的关系、以及那个号本身的调性来写——不要写成一篇谁都能发的通用帖子。
 也不要在正文里写论坛上没人该知道的事（你们私下聊过的细节、你另外那个号之类），
 更不要在小号的帖子里暗示"其实我是某某"。
+${canMakeImage ? `
+=== 要不要配一张图 ===
+你可以给这条帖子配**一张**图——就当是你自己随手拍的，或者顺手存的一张图。
+要配就填 imagePrompt，不配就把这个字段留空或者干脆不写。**多数帖子是不配图的**，
+只有当你此刻确实看到/做了什么值得拍下来的事，才配。别为了配而配。
 
+imagePrompt 写成一句画面描述（中文英文都行），只描述**画面里有什么**：
+场景、主体、光线、氛围、构图。不要写"发一张…的图"这种指令句，也不要在里面写人名。
+它不是给人看的文案，是给画图的模型看的。
+` : ''}${canShareMusic ? `
+=== 要不要配一首歌 ===
+你也可以给这条帖子配**一首**歌。只能从下面这份名单里挑，填 musicSongId（那个 id 数字），
+不配就留空或者不写这个字段。**多数帖子是不配歌的**——只有当此刻确实在听、
+或者这条帖子想说的话正好有首歌能替你说，才配。
+
+${formatForumMusicCandidates(musicCandidates)}
+
+名单之外的歌不要写，编一个 id 出来只会是一首点不开的歌。
+挑对方歌单里的歌是有意味的——那等于在说"我听了你在听的"，你自己掂量要不要这么做。
+图和歌只能选一样，不要同时配。
+` : ''}
 === 可用的装饰性评论/点赞账号池（路人，随便谁来留两句）===
 ${roster.map(describeAccountForPrompt).join('\n')}
 
@@ -1245,7 +1360,9 @@ ${buildSharedForumHardRules()}
   "accountHandle": "你决定用哪个号发（必须是上面列出的 handle 之一）",
   "topicTag": "话题tag",
   "title": "标题",
-  "content": "正文",
+  "content": "正文",${canMakeImage ? `
+  "imagePrompt": "要配图就写一句画面描述，不配就留空或省略这个字段",` : ''}${canShareMusic ? `
+  "musicSongId": 要配歌就填上面名单里的那个 id 数字，不配就留空或省略,` : ''}
   "comments": [{ "authorHandle": "handle", "content": "评论内容" }]
 }
 `.trim();
@@ -1264,6 +1381,52 @@ ${buildSharedForumHardRules()}
     || candidates[0];
   const account = chosen.account;
 
+  // 配图：TA 自己决定要不要配（没写 imagePrompt 就是它判断这条不用配，不是故障）。
+  // 一张封顶——九宫格对一条随手发的帖子来说太夸张，生图也是按张计费的。
+  // 出图失败只退化成纯文字，绝不因此让整条帖子发不出去。
+  let images: string[] | undefined;
+  const imagePrompt = String(parsed?.imagePrompt || '').trim();
+  if (canMakeImage && imagePrompt && apiConfig.imageGenApi) {
+    try {
+      const { generateImage } = await import('./imageGenApi');
+      const results = await generateImage(apiConfig.imageGenApi, imagePrompt, {
+        n: 1,
+        meta: {
+          appId: 'forum', appName: '杂波频段', purpose: 'TA 论坛发帖配图',
+          charId, charName: ctx?.char.name,
+        } as any,
+      });
+      const first = results[0];
+      if (first?.src) {
+        const { migrateDataUrlToRef } = await import('./blobRef');
+        images = [first.src.startsWith('data:') ? await migrateDataUrlToRef(first.src) : first.src];
+      }
+    } catch (e: any) {
+      console.warn(
+        '[ForumAi] 发帖配图失败，退化成纯文字:',
+        '\nprompt:', imagePrompt,
+        '\nmessage:', e?.message || String(e),
+      );
+    }
+  }
+
+  // 配歌：只认名单里的 id，编出来的一律丢掉。图和歌只留一样，图优先。
+  let music: db.ForumMusicCard | undefined;
+  if (canShareMusic && !images) {
+    const wantedId = Number(parsed?.musicSongId);
+    const picked = Number.isFinite(wantedId) ? musicCandidates.find(c => c.id === wantedId) : undefined;
+    if (picked) {
+      music = {
+        songId: picked.id,
+        songName: picked.name || '未知歌曲',
+        artists: picked.artists || '未知歌手',
+        albumPic: picked.albumPic || '',
+      };
+    } else if (parsed?.musicSongId) {
+      console.warn('[ForumAi] TA 给的 musicSongId 不在候选名单里，忽略:', parsed.musicSongId);
+    }
+  }
+
   const now = Date.now();
   const topicTag = FORUM_TOPIC_TAGS.some(t => t.tag === parsed?.topicTag) ? parsed.topicTag : 'daily_chatter';
   const post: ForumPost = {
@@ -1273,6 +1436,8 @@ ${buildSharedForumHardRules()}
     topicTag,
     title: String(parsed?.title || '').slice(0, 100),
     content: content.slice(0, 5000),
+    images,
+    music,
     createdAt: now,
     lastActivityAt: now,
     isCollected: false,
