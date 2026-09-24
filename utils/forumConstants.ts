@@ -18,7 +18,8 @@ export type ForumTopicTag =
   | 'social_affairs' | 'film_reading' | 'tech' | 'finance' | 'gaming'
   | 'relationships' | 'school_work' | 'humor' | 'gossip' | 'daily_chatter'
   | 'hobbies' | 'fitness' | 'wellness' | 'food' | 'imagination'
-  | 'mystic' | 'science_pop';
+  | 'mystic' | 'science_pop'
+  | 'couples';
 
 /**
  * [用户确认新增] 每个分区的**评论区风气**。
@@ -48,6 +49,11 @@ export const FORUM_TOPIC_COMMENT_STYLES: Record<ForumTopicTag, string> = {
   imagination: '顺着楼主的设定往下接，比谁的脑洞更离谱；很少有人质疑设定，那样没意思。',
   mystic: '认真讨论的区，不是胡闹。谈的是命理、易理、星象、民俗信仰这类有自己一套体系的东西，大家在各自的框架里认真推演。常见"按这个说法应该是…"的援引，也有人温和表示自己不信但尊重。不要写成装神弄鬼或者装模作样。',
   science_pop: '爱补充和纠正，语气比科技区客气；常见"顺便一提"式的延伸，也常有人问很基础的问题而不会被嘲。',
+  couples: '三种帖子混在一起：两性相处的讨论、情侣日常的吐槽、还有认真写的成人nsfw内容的经验/教学帖。'
+    + '吐槽帖底下是"我家那位也这样"的接龙和起哄，语气轻；讨论帖底下会有人认真给不同视角，'
+    + '也会有人现身说法；教学帖底下是提问和补充，偶尔有人说"这套对我没用"。'
+    + '甜的帖子会有人喊"狗粮"但不带恶意。吵架的帖子会有人劝和也有人劝分，两边都不算越界。'
+    + '成人nsfw内容的经验/教学帖底下有没经验认真问的，也有抖机灵开黄腔的，只是一种多样性评论的体现。',
 };
 
 export const FORUM_TOPIC_TAGS: { tag: ForumTopicTag; label: string }[] = [
@@ -57,6 +63,7 @@ export const FORUM_TOPIC_TAGS: { tag: ForumTopicTag; label: string }[] = [
   { tag: 'finance', label: '财经' },
   { tag: 'gaming', label: '游戏' },
   { tag: 'relationships', label: '情感人际' },
+  { tag: 'couples', label: '情侣恋爱' },
   { tag: 'school_work', label: '校园职场' },
   { tag: 'humor', label: '搞笑玩梗' },
   { tag: 'gossip', label: '吃瓜综合' },
@@ -239,6 +246,29 @@ export function buildSharedForumHardRules(): string {
 
 // ==================== 五、默认参数 [交接4 一/二/三，交接5 三] ====================
 
+/**
+ * 热度滑动条 → 这次刷新产出多少评论。
+ *
+ * [用户确认] 以前热度只管"垫底楼最多接几条"，新增评论是另一个写死的随机范围，
+ * 跟滑动条毫无关系——所以你把它拉到 5 也不会得到 5 条评论，这是那个困惑的由来。
+ * 现在统一由它决定：**滑动条的数字 = 这次新开几楼**。
+ *
+ * 楼中楼是在这个基础上多出来的，所以实际总数会比滑动条的数字大：
+ *   热度 5 → 5 楼，其中 2 楼有人接，每楼接 1-3 句 → 一共 7-11 条。
+ */
+export function resolveRefreshCommentPlan(heatLevel: number): {
+  /** 这次新开几楼（= 热度值）。 */
+  newFloors: number;
+  /** 这几楼里有几楼会有人接话。 */
+  repliedFloors: number;
+} {
+  const heat = Math.max(1, Math.floor(heatLevel) || 1);
+  return {
+    newFloors: heat,
+    repliedFloors: Math.min(FORUM_DEFAULTS.postRefreshRepliedFloorCap, Math.floor(heat / 2)),
+  };
+}
+
 export const FORUM_DEFAULTS = {
   /** 自然触发（slot 缺批次时）一次产出的帖子数区间 [交接5 三]。 */
   naturalBatchPostRange: [6, 10] as [number, number],
@@ -246,13 +276,11 @@ export const FORUM_DEFAULTS = {
   manualRefreshPostRange: [4, 6] as [number, number],
   /** 单条帖子生成时，配的装饰性评论数区间（无论自然触发还是手动刷新）[交接4 一]。 */
   postCommentRange: [0, 4] as [number, number],
-  /** 帖子右上角"刷新"按钮：这次顺手生成的新**主楼**评论数（不含垫底回复、不含楼中楼）。
-   *  [用户确认] 从原来的 2-5 条提到固定 5 条——一次刷新只出三两句太冷清。 */
-  postRefreshNewCommentRange: [5, 5] as [number, number],
-  /** 这 5 条主楼里，有几条底下会有人接话（随机挑，不是每条都有，那样太整齐）。 */
-  postRefreshRepliedFloorRange: [2, 3] as [number, number],
-  /** 有人接话的那几条主楼，各自带几条楼中楼回复。 */
+  /** 有人接话的那几条主楼，各自带几条楼中楼回复。这一档不跟着热度变——
+   *  一条评论底下有人接一两句，冷清的论坛和热闹的论坛本来就一样自然。 */
   postRefreshSubCommentRange: [1, 3] as [number, number],
+  /** 有人接话的主楼数上限。十楼里八楼都有人接，那不像论坛像群聊。 */
+  postRefreshRepliedFloorCap: 4,
   /** 刷新评论区时，最多把帖子的几张配图一起送给模型看。
    *  [用户确认] 全给——帖子本来就最多 9 张。嫌慢或嫌贵就把这个数字调小。 */
   postRefreshMaxImages: 9,

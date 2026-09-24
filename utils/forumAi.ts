@@ -30,6 +30,7 @@ import {
   buildSharedForumHardRules, FORUM_NEWS_AUTHENTICITY_RULE,
   FORUM_DEFAULTS,
   describeAccountLanguageStyle, getTopicCommentStyle, getTopicLabel,
+  resolveRefreshCommentPlan,
 } from './forumConstants';
 import { pickRosterWithRegulars, getRelationState } from './forumSocial';
 import { maskAccountForChar, describeMaskedAccount, getCharForumIdentity } from './forumIdentityMask';
@@ -546,13 +547,10 @@ export async function runPostRefresh(params: RunPostRefreshParams): Promise<void
     ].join('\n'));
   }
 
-  const newCommentCount = pickInRange(FORUM_DEFAULTS.postRefreshNewCommentRange);
-  // [用户确认] 主楼底下要有人接话，评论区才像评论区。随机挑几条主楼带楼中楼，
-  // 不是每条都带——每条都有人接反而显得假。
-  const repliedFloorCount = Math.min(
-    newCommentCount,
-    pickInRange(FORUM_DEFAULTS.postRefreshRepliedFloorRange),
-  );
+  // [用户确认] 评论产量统一由热度滑动条决定：滑动条的数字 = 这次新开几楼。
+  // 楼中楼是在这个基础上多出来的（每楼 1-3 句），所以实际总数会比滑动条的数字大。
+  const { newFloors: newCommentCount, repliedFloors: repliedFloorCount } =
+    resolveRefreshCommentPlan(heatLevel);
   const subCommentRange = FORUM_DEFAULTS.postRefreshSubCommentRange;
 
   // 评论区全貌：TA 看到的就是一个普通网友看到的样子——一堆网名和话，没有"用户"这种标签。
@@ -647,9 +645,9 @@ ${buildSharedForumHardRules()}
 
 === 产出数量 ===
 - 新增主楼评论：${newCommentCount} 条（每条都是新开的一楼）。
-- 这 ${newCommentCount} 条里挑 ${repliedFloorCount} 条，底下各带 ${subCommentRange[0]}-${subCommentRange[1]} 条楼中楼回复
+${repliedFloorCount > 0 ? `- 这 ${newCommentCount} 条里挑 ${repliedFloorCount} 条，底下各带 ${subCommentRange[0]}-${subCommentRange[1]} 条楼中楼回复
   （写进那条主楼的 replies 数组里）。挑哪几条你自己定——挑最容易引起反应的那种，
-  别机械地挑前几条。剩下的主楼 replies 留空数组或者不写。
+  别机械地挑前几条。剩下的主楼 replies 留空数组或者不写。` : `- 这次不要楼中楼，每条主楼的 replies 都留空数组或者不写。`}
 - 楼中楼要像真的在接话：可以是附和、抬杠、歪楼、追问，回的是**这一楼说的内容**，
   不是重新对帖子发表一遍看法。同一楼里的几条也可以互相呛。
 - 垫底楼回复：上面列出几条就产出几条，threadRootId 必须精确对应。
