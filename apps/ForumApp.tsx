@@ -8,6 +8,10 @@ import { RealtimeContextManager } from '../utils/realtimeContext';
 import * as db from '../utils/forumDb';
 import * as feed from '../utils/forumFeed';
 import * as scheduler from '../utils/forumScheduler';
+import { isScheduleFeatureOn } from '../utils/scheduleFeature';
+import { getDailyScheduleForChar } from '../utils/dailySchedule';
+import { getMomentsWindowRecord } from '../utils/momentsWindow';
+import type { MomentsWindow } from '../types';
 import { resolveActiveIdentityAccount, ensureCharMainAccount, userMainAccountId } from '../utils/forumBootstrap';
 import { ensureNpcPool } from '../utils/forumNpcSeed';
 import { runQuotaBatch, runTopicRefresh } from '../utils/forumBatch';
@@ -66,6 +70,33 @@ const NAV_ITEMS: { id: ForumSection['kind']; icon: React.ElementType; label: str
   { id: 'profile', icon: UserCircle, label: '我的' },
   { id: 'settings', icon: GearSix, label: '设置' },
 ];
+
+/**
+ * 读一个角色今天"有空上网"的时段，给共管号发帖的档位做闸门。
+ *
+ * 返回值三态，跟 forumScheduler.findDueSharedAccountBand 的约定一致：
+ *   null   —— 不知道作息（没传 charId / 角色没了 / 日程功能没开 / 今天还没生成日程）
+ *             → 调度器退回按钟点发，不会因为没日程就哑掉；
+ *   []     —— 有日程，但 AI 判断今天太忙、不适合发 → 今天这个号一条都不发；
+ *   [窗口] —— 只在这些时段里发。
+ *
+ * dateKey 特意取 schedule.date 而不是手机当天：日程是按角色自己的时区存的，
+ * 窗口也是跟它同一次写进去的，用手机的日期去查，给角色设了自定义时区时会差一天。
+ */
+async function loadCharFreeWindows(charId: string | undefined, characters: any[]): Promise<MomentsWindow[] | null> {
+  if (!charId) return null;
+  try {
+    const char = (characters || []).find((c: any) => c?.id === charId);
+    if (!char || !isScheduleFeatureOn(char)) return null;
+    const schedule = await getDailyScheduleForChar(char);
+    if (!schedule) return null;
+    const record = getMomentsWindowRecord(charId, schedule.date);
+    return record.generated ? record.windows : null;
+  } catch (e: any) {
+    console.warn('[Forum] 读取角色作息窗口失败:', e?.message || String(e));
+    return null; // 读不到就当不知道，退回原行为
+  }
+}
 
 const ForumApp: React.FC = () => {
   const { closeApp, apiConfig, characters, userProfile, realtimeConfig, addToast, memoryPalaceConfig } = useOS();
@@ -231,6 +262,9 @@ const ForumApp: React.FC = () => {
       }
 
       // 共管账号：一天 6 档，每档在窗口内用哈希算出一个当天固定的触发分钟。
+      // [用户确认新增] 每档还要跟 TA 今天"有空上网"的时段取交集——上班/睡觉那几档
+      // 今天直接跳过，不再是不看人在干嘛、按钟点硬发。作息判断复用日程生成时
+      // AI 顺带给出的那个字段，不额外调 LLM。
       // 一次最多补发一档——长时间没打开也不会一口气刷出好几条。
       try {
         const now = new Date();
@@ -239,7 +273,8 @@ const ForumApp: React.FC = () => {
         const sharedAccounts = (await db.getAllForumAccounts())
           .filter(a => a.ownerType === 'shared' && a.status === 'active');
         for (const acc of sharedAccounts) {
-          const due = scheduler.findDueSharedAccountBand(acc.id, dateKey, minutesOfDay);
+          const freeWindows = await loadCharFreeWindows(acc.charId, characters || []);
+          const due = scheduler.findDueSharedAccountBand(acc.id, dateKey, minutesOfDay, freeWindows);
           if (!due) continue;
           const post = await ai.runSharedAccountExclusivePost({
             apiConfig, sharedAccountId: acc.id, bandLabel: due.band.label,

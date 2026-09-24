@@ -64,6 +64,9 @@ import { generateImage, isImageGenApiReady } from '../utils/imageGenApi';
 import { migrateDataUrlToRef } from '../utils/blobRef';
 import { deleteMomentPin } from '../utils/momentsMemory';
 import { MomentsScheduler, toMomentsTickEntries } from '../utils/momentsScheduler';
+import { getMomentsWindowRecord, pickFireMinute } from '../utils/momentsWindow';
+import { isScheduleFeatureOn } from '../utils/scheduleFeature';
+import { getDailyScheduleForChar } from '../utils/dailySchedule';
 import { startMomentTaskQueue, enqueuePublishedMomentTasks, deletePublishedMomentTasks, triggerDormancySweep } from '../utils/momentsTaskQueue';
 
 // ==================== 样式常量 ====================
@@ -113,6 +116,16 @@ const MomentsApp: React.FC = () => {
   const [posts, setPosts] = useState<MomentPost[]>([]);
   const [settings, setSettings] = useState<MomentSettings | null>(null);
   const [loading, setLoading] = useState(true);
+  /**
+   * 「异步延时互动」今天到底会不会动 —— 这个开关最大的问题是静默失效：
+   * 触发时刻来自当天日程顺带判断的"有空上网时段"，没日程 / AI 说今天太忙时，
+   * 调度器按设计直接静默跳过（见 momentsScheduler.ts 文件头第 4 条），
+   * 开关亮着却永远没动静，界面上一个字的解释都没有。这里把状态摆出来。
+   */
+  const [asyncStatus, setAsyncStatus] = useState<
+    { kind: 'no_feature' | 'no_schedule' | 'busy' } | { kind: 'ok'; times: string[] } | null
+  >(null);
+
   const [generating, setGenerating] = useState(false);
   const [secretSpaceRefreshing, setSecretSpaceRefreshing] = useState(false);
   const [secretSpaceEditing, setSecretSpaceEditing] = useState(false);
@@ -1716,6 +1729,32 @@ const MomentsApp: React.FC = () => {
     );
   };
 
+  // 进设置页时算一次「今天会不会触发」。纯读 localStorage + 一次 IndexedDB 取日程，
+  // 不调 LLM。settings 变化（比如刚切了开关）也重算。
+  useEffect(() => {
+    if (view !== 'settings' || !char) { setAsyncStatus(null); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        if (!isScheduleFeatureOn(char)) { if (!cancelled) setAsyncStatus({ kind: 'no_feature' }); return; }
+        const schedule = await getDailyScheduleForChar(char);
+        if (cancelled) return;
+        if (!schedule) { setAsyncStatus({ kind: 'no_schedule' }); return; }
+        const record = getMomentsWindowRecord(char.id, schedule.date);
+        if (!record.generated) { setAsyncStatus({ kind: 'no_schedule' }); return; }
+        if (record.windows.length === 0) { setAsyncStatus({ kind: 'busy' }); return; }
+        const times = record.windows.map((w, i) => {
+          const minute = pickFireMinute(char.id, schedule.date, i, w);
+          return `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`;
+        });
+        setAsyncStatus({ kind: 'ok', times });
+      } catch {
+        if (!cancelled) setAsyncStatus(null); // 算不出来就不显示，不拿错误信息吓人
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [view, char, settings?.asyncInteraction]);
+
   // ==================== 渲染：设置页 ====================
 
   const renderSettings = () => {
@@ -1836,7 +1875,9 @@ const MomentsApp: React.FC = () => {
           <div className="flex items-center justify-between">
             <div>
               <div className="text-sm text-white/80">异步延时互动</div>
-              <div className="text-xs text-white/40 mt-0.5">TA 的点赞和评论会延迟随机触发</div>
+              {/* 原来只写了"点赞和评论"，漏了一半：后台这一轮跑的是完整生成
+                  （runScheduledMomentsTick → generateMoments），TA 自己的新动态也会出。 */}
+              <div className="text-xs text-white/40 mt-0.5">TA 会在自己有空的时候发动态、给你点赞评论</div>
             </div>
             <button
               onClick={() => setSettings({ ...settings, asyncInteraction: !settings.asyncInteraction })}
@@ -1849,6 +1890,22 @@ const MomentsApp: React.FC = () => {
               />
             </button>
           </div>
+
+          {/* 今天会不会触发。开着才显示——没开的时候说这些只是噪音。 */}
+          {settings.asyncInteraction && asyncStatus && (
+            <div
+              className="text-[11px] leading-relaxed -mt-1 px-2.5 py-2 rounded-lg"
+              style={{
+                background: asyncStatus.kind === 'ok' ? 'rgba(59,130,246,0.12)' : 'rgba(234,179,8,0.12)',
+                color: asyncStatus.kind === 'ok' ? '#93c5fd' : '#fcd34d',
+              }}
+            >
+              {asyncStatus.kind === 'ok' && <>今天大约 {asyncStatus.times.join('、')} 会触发。</>}
+              {asyncStatus.kind === 'busy' && <>TA 今天的日程排得很满，判断下来今天不适合发，所以今天不会触发。明天的日程出来后会重新算。</>}
+              {asyncStatus.kind === 'no_schedule' && <>今天的日程还没生成，所以还算不出触发时刻。去日程那边生成一次今天的日程，这个开关才会开始工作。</>}
+              {asyncStatus.kind === 'no_feature' && <>这个角色没有开启「日程」功能。触发时刻是从日程里算出来的，不开日程的话这个开关不会有任何动静。</>}
+            </div>
+          )}
 
           {/* 保存按钮 */}
           <button
