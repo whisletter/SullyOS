@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import * as db from '../../utils/forumDb';
 import * as feed from '../../utils/forumFeed';
 import { FORUM_DEFAULTS } from '../../utils/forumConstants';
@@ -10,16 +10,75 @@ interface Props {
   onHeatLevelChange: (level: number) => void;
   darkMode: boolean;
   onDarkModeToggle: () => void;
+  /** 当前身份账号 id。论坛设置是按这个 id 存的，读写都要用。 */
+  activeAccountId: string;
+  /** 论坛专用 API 存好之后回传给外壳，让它立刻换用，不用退出重进。 */
+  onApiOverrideChange?: (override: { baseUrl: string; apiKey: string; model: string } | null) => void;
 }
 
 /** [交接5 4.12] 论坛热度滑动条(1-10) + 温和清空(需二次确认，一键清空全部本轮不做)。 */
-const ForumSettingsPanel: React.FC<Props> = ({ heatLevel, onHeatLevelChange, darkMode, onDarkModeToggle }) => {
+const ForumSettingsPanel: React.FC<Props> = ({ heatLevel, onHeatLevelChange, darkMode, onDarkModeToggle, activeAccountId, onApiOverrideChange }) => {
   const { addToast } = useOS();
   const [confirmingClear, setConfirmingClear] = useState(false);
   const [clearing, setClearing] = useState(false);
   /** 图片清理的二次确认：null=没在确认，'posts'=只清帖子配图，'all'=连头像背景一起清。 */
   const [confirmingImagePurge, setConfirmingImagePurge] = useState<null | 'posts' | 'all'>(null);
   const [purgingImages, setPurgingImages] = useState(false);
+
+  // 论坛专用 API
+  const [apiEnabled, setApiEnabled] = useState(false);
+  const [apiBaseUrl, setApiBaseUrl] = useState('');
+  const [apiKey, setApiKey] = useState('');
+  const [apiModel, setApiModel] = useState('');
+  const [apiSaving, setApiSaving] = useState(false);
+  const [apiLoaded, setApiLoaded] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const settings = await db.getForumSettings(activeAccountId);
+        if (cancelled) return;
+        setApiEnabled(!!settings.apiOverrideEnabled);
+        setApiBaseUrl(settings.apiOverrideBaseUrl || '');
+        setApiKey(settings.apiOverrideApiKey || '');
+        setApiModel(settings.apiOverrideModel || '');
+      } finally {
+        if (!cancelled) setApiLoaded(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [activeAccountId]);
+
+  const apiComplete = !!(apiBaseUrl.trim() && apiKey.trim() && apiModel.trim());
+
+  const handleSaveApi = async () => {
+    setApiSaving(true);
+    try {
+      const settings = await db.getForumSettings(activeAccountId);
+      await db.saveForumSettings({
+        ...settings,
+        apiOverrideEnabled: apiEnabled,
+        apiOverrideBaseUrl: apiBaseUrl.trim(),
+        apiOverrideApiKey: apiKey.trim(),
+        apiOverrideModel: apiModel.trim(),
+        updatedAt: Date.now(),
+      });
+      onApiOverrideChange?.(
+        apiEnabled && apiComplete
+          ? { baseUrl: apiBaseUrl.trim(), apiKey: apiKey.trim(), model: apiModel.trim() }
+          : null,
+      );
+      addToast(
+        apiEnabled && apiComplete ? '已保存，论坛从现在起用这套 API' : '已保存，论坛继续用聊天那套 API',
+        'success',
+      );
+    } catch (e: any) {
+      addToast(`保存失败: ${e?.message?.slice(0, 60) || '未知错误'}`, 'error');
+    } finally {
+      setApiSaving(false);
+    }
+  };
 
   const handleGentleClear = async () => {
     setClearing(true);
@@ -99,6 +158,69 @@ const ForumSettingsPanel: React.FC<Props> = ({ heatLevel, onHeatLevelChange, dar
             </div>
           </div>
         )}
+      </div>
+
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-sm font-bold">论坛专用 API</div>
+          <button
+            onClick={() => setApiEnabled(v => !v)}
+            className="relative w-11 h-6 rounded-full shrink-0 transition-colors"
+            style={{ background: apiEnabled ? '#3b82f6' : 'rgba(127,127,127,0.25)' }}
+            aria-label="启用论坛专用 API"
+          >
+            <span
+              className="absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all"
+              style={{ left: apiEnabled ? '22px' : '2px' }}
+            />
+          </button>
+        </div>
+        <div className="text-[12px] opacity-50 mb-2">
+          关着的时候论坛跟聊天共用同一套 API。论坛这边调用很密集（批量发帖、评论区刷新、
+          TA 发帖），换一个便宜模型跑就够，不用占着聊天那个好模型的额度。
+          <b>三项要填全</b>，缺一项就自动退回聊天那套。
+        </div>
+
+        {apiEnabled && (
+          <div className="space-y-2">
+            <input
+              value={apiBaseUrl}
+              onChange={e => setApiBaseUrl(e.target.value)}
+              placeholder="Base URL（例：https://api.openai.com/v1）"
+              className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+              style={{ background: 'rgba(127,127,127,0.1)' }}
+            />
+            <input
+              value={apiKey}
+              onChange={e => setApiKey(e.target.value)}
+              type="password"
+              placeholder="API Key"
+              className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+              style={{ background: 'rgba(127,127,127,0.1)' }}
+            />
+            <input
+              value={apiModel}
+              onChange={e => setApiModel(e.target.value)}
+              placeholder="Model（例：gpt-4o-mini）"
+              className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+              style={{ background: 'rgba(127,127,127,0.1)' }}
+            />
+            {!apiComplete && (
+              <div className="text-[12px]" style={{ color: '#f59e0b' }}>
+                还没填全，现在保存的话论坛仍然走聊天那套 API。
+              </div>
+            )}
+          </div>
+        )}
+
+        <button
+          onClick={handleSaveApi}
+          disabled={apiSaving || !apiLoaded}
+          className="mt-2 text-sm px-4 py-2 rounded-full disabled:opacity-40"
+          style={{ background: '#3b82f6', color: '#fff' }}
+        >
+          {apiSaving ? '保存中…' : '保存'}
+        </button>
       </div>
 
       <div>
