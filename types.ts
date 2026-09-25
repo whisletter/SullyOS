@@ -3833,7 +3833,7 @@ export interface GameSession {
     lastPlayedAt: number;
 }
 
-export type MessageType = 'text' | 'image' | 'emoji' | 'voice' | 'collaboration_file' | 'interaction' | 'transfer' | 'system' | 'social_card' | 'chat_forward' | 'xhs_card' | 'score_card' | 'music_card' | 'mcd_card' | 'luckin_card' | 'html_card' | 'news_card' | 'vr_card' | 'trpg_card' | 'novel_card' | 'world_card' | 'sim_card' | 'phone_card' | 'webpage_card' | 'theater_card' | 'room_card' | 'life_card' | 'group_topic_card' | 'moment_card';
+export type MessageType = 'text' | 'image' | 'emoji' | 'voice' | 'collaboration_file' | 'interaction' | 'transfer' | 'system' | 'social_card' | 'chat_forward' | 'xhs_card' | 'score_card' | 'music_card' | 'mcd_card' | 'luckin_card' | 'html_card' | 'news_card' | 'vr_card' | 'trpg_card' | 'novel_card' | 'world_card' | 'sim_card' | 'phone_card' | 'webpage_card' | 'theater_card' | 'room_card' | 'life_card' | 'group_topic_card' | 'moment_card' | 'coupon_card';
 
 export interface Message {
     id: number;
@@ -4056,6 +4056,10 @@ export interface FullBackupData {
     // 朋友圈（独立 IndexedDB 库 SullyOS_Moments 的全量快照）。
     // 动态 / 评论 / 每个角色的朋友圈设置都在这一份里。同样 media_only 不带。
     moments?: import('./utils/momentsDb').MomentsBackupData;
+
+    // 与昼（宇宙）App 的 localStorage：在一起多少天、今天的心情和表情、
+    // 游戏自己的配置。按 `yuzhou_` 前缀收，加新游戏沿用这个前缀就自动带上。
+    yuzhouLocal?: import('./utils/yuzhouBackup').YuZhouLocalBackup;
 
     // 独立协同工作数据库。二进制文件放在 ZIP 的 collaboration/assets/，JSON 只存索引。
     collaborationBackupVersion?: 1;
