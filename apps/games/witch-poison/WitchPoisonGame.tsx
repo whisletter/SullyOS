@@ -186,7 +186,44 @@ const WitchPoisonGame: React.FC<WitchPoisonGameProps> = ({ onBack }) => {
   // ── 开局：让 char 自己代入人设「决定」毒药藏在哪一颗 ──────────────────────
   //   只在这里问一次 AI，拿到编号后用 setCharPoison 锁死；resolvePick 等其余
   //   所有地方都只读这个 state、再也不会重新调 AI 问这件事——AI 没有回头改答案的入口。
+
+  /**
+   * 最近几局 TA 选过的毒药位置。
+   *
+   * 为什么需要它：让模型"随便说个 1-16 的数字"，答案会高度集中在 7 和 13——
+   * 这是语言模型众所周知的数字偏好，不是随机。不挡的话 TA 的毒药可能每一局都是
+   * 同一颗，玩两局你就知道该躲哪儿了，这个游戏就没了。
+   *
+   * 只存在 localStorage，丢了最多是某一局重复一次，无所谓。
+   */
+  const recentKey = `yuzhou_witch_recent_poison_${charId || 'default'}`;
+  const AVOID_RECENT = 2;
+
+  function loadRecentPoisons(): number[] {
+    try {
+      const v = JSON.parse(localStorage.getItem(recentKey) || '[]');
+      return Array.isArray(v) ? v.filter((n: unknown) => typeof n === 'number') : [];
+    } catch { return []; }
+  }
+
+  function rememberPoison(idx: number) {
+    try {
+      const next = [idx, ...loadRecentPoisons()].slice(0, AVOID_RECENT);
+      localStorage.setItem(recentKey, JSON.stringify(next));
+    } catch { /* 存不了就算了 */ }
+  }
+
+  /** 从候选里随机挑一颗，尽量避开最近几局用过的。 */
+  function randomPoison(avoid: number[]): number {
+    const all = Array.from({ length: TOTAL_CANDIES }, (_, i) => i);
+    const pool = all.filter(i => !avoid.includes(i));
+    const from = pool.length > 0 ? pool : all;
+    return from[Math.floor(Math.random() * from.length)];
+  }
+
   async function decideCharPoison(): Promise<number> {
+    const recent = loadRecentPoisons();
+    let picked: number | null = null;
     try {
       const reply = await callGameAI({
         api: apiConfig,
@@ -196,13 +233,20 @@ const WitchPoisonGame: React.FC<WitchPoisonGameProps> = ({ onBack }) => {
         messages: [{ role: 'user', content: POISON_PICK_USER_PROMPT }],
         meta: { appName: '女巫的毒药', charId: charId || undefined, charName: names.ta, purpose: '女巫的毒药 · 选毒药' },
       });
-      const m = (reply || '').match(/\d{1,2}/);
-      if (m) {
-        const n = parseInt(m[0], 10);
-        if (n >= 1 && n <= TOTAL_CANDIES) return n - 1;
-      }
+      // 把所有数字都抠出来，取**最后一个落在 1-16 里的**。
+      // 原来是取第一个，遇到"在 16 颗里我选 7"就会抓成 16——模型习惯把答案放句尾，
+      // 取最后一个更稳。范围外的（16 颗、3 秒之类）自然被过滤掉。
+      const nums = ((reply || '').match(/\d{1,2}/g) || [])
+        .map(x => parseInt(x, 10))
+        .filter(n => n >= 1 && n <= TOTAL_CANDIES);
+      if (nums.length > 0) picked = nums[nums.length - 1] - 1;
     } catch (e) { console.warn('[witch_poison] AI 选毒药失败，改用随机', e); }
-    return Math.floor(Math.random() * TOTAL_CANDIES);
+
+    // 模型给不出、或者又报了最近用过的那颗 → 重掷。
+    // 重掷时也避开最近那几颗，不然可能随机到同一个位置。
+    const final = (picked === null || recent.includes(picked)) ? randomPoison(recent) : picked;
+    rememberPoison(final);
+    return final;
   }
 
   const startGame = async () => {
