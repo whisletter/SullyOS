@@ -15,7 +15,7 @@
  * 而且这是要长期留着的东西——跟心情月历、留言板一个待遇。
  */
 
-import { DB } from '../../../utils/db';
+import { DB } from '../../utils/db';
 
 export type GiftWrap = 'box' | 'ribbon' | 'bottle';
 export type GiftSide = 'user' | 'ta';
