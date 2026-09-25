@@ -3537,6 +3537,38 @@ const MessageItem = React.memo(({
 
     }
 
+    /**
+     * 兑换券卡片。
+     *
+     * 跟商店里那张票用同一套形：两侧半圆缺口 + 中间虚线撕口 + 分类色。
+     * 一张券在商店、券夹、聊天里长得一样，才有"同一张票被递过来"的感觉。
+     *
+     * content 本身就是可读文本（`【插队券】手上的事放一放…`），所以即使某个
+     * 上下文格式化没认这个 type，喂给模型的也还是这句话——卡片只影响显示。
+     */
+    if (m.type === 'coupon_card') {
+        const meta: any = m.metadata || {};
+        const name = String(meta.couponName || m.content || '一张券');
+        const desc = String(meta.couponDesc || '');
+        const accent = String(meta.couponAccent || '#e0767e');
+        return commonLayout(
+            <div className="relative max-w-[240px] rounded-2xl px-4 py-3"
+                 style={{ background: 'rgba(255,255,255,.95)', border: `1px solid ${accent}33`,
+                          boxShadow: '0 6px 18px rgba(172,88,108,.12)' }}>
+                <span className="absolute w-3.5 h-3.5 rounded-full"
+                      style={{ background: 'var(--chat-bubble-notch, #f4f1f0)', left: -7, top: '50%', transform: 'translateY(-50%)' }} />
+                <span className="absolute w-3.5 h-3.5 rounded-full"
+                      style={{ background: 'var(--chat-bubble-notch, #f4f1f0)', right: -7, top: '50%', transform: 'translateY(-50%)' }} />
+                <div className="text-[14px] font-black" style={{ color: accent }}>{name}</div>
+                {desc && <div className="text-[11.5px] leading-relaxed mt-1 text-slate-500">{desc}</div>}
+                <div style={{ borderTop: `1px dashed ${accent}33`, margin: '10px -16px 8px' }} />
+                <div className="text-[10px]" style={{ color: `${accent}aa` }}>
+                    {isUser ? '你用了这张券' : `${charName}用了这张券`}
+                </div>
+            </div>
+        );
+    }
+
     if (m.type === 'transfer') {
         return <TransferCard m={m} isUser={isUser} charName={charName} commonLayout={commonLayout} selectionMode={selectionMode} onResolveTransfer={onResolveTransfer} />;
     }
