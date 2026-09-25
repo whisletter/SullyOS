@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Sparkle, Image as ImageIcon, X, Trash } from '@phosphor-icons/react';
+import { Sparkle, Image as ImageIcon, X, Trash, ArrowClockwise, Ticket, PaperPlaneTilt } from '@phosphor-icons/react';
 import { useOS } from '../../context/OSContext';
 import TokenImg from '../../components/os/TokenImg';
 import { processImage } from '../../utils/file';
@@ -10,6 +10,12 @@ import {
   WRAPS, addGift, loadGifts, openGift, deleteGift, giftsFrom, buildGiftImagePrompt,
   type Gift, type GiftWrap,
 } from './gifts';
+import { checkGiftGate, runTaGift } from './giftAi';
+import {
+  loadCoupons, useCoupon, couponById, categoryOf,
+  type CouponItem, type CouponWallet,
+} from '../games/shared/coupons';
+import { DB } from '../../utils/db';
 
 interface Props {
   charId: string;
@@ -17,7 +23,7 @@ interface Props {
   onBack: () => void;
 }
 
-type Tab = 'make' | 'shelf';
+type Tab = 'make' | 'shelf' | 'coupon';
 
 /**
  * 礼物。两栏：制作台 / 藏柜。
@@ -72,7 +78,8 @@ const GiftColumn: React.FC<{
 );
 
 const YuZhouGiftPage: React.FC<Props> = ({ charId, taName, onBack }) => {
-  const { apiConfig, addToast } = useOS();
+  const { apiConfig, addToast, characters, userProfile } = useOS();
+  const char = characters.find(c => c.id === charId) || null;
   const [tab, setTab] = useState<Tab>('make');
   const [gifts, setGifts] = useState<Gift[]>([]);
 
@@ -90,11 +97,18 @@ const YuZhouGiftPage: React.FC<Props> = ({ charId, taName, onBack }) => {
   // 藏柜
   const [viewing, setViewing] = useState<Gift | null>(null);
   const [openingId, setOpeningId] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+  /** 它没送东西时说的那句话。显示一会儿就淡掉。 */
+  const [taLine, setTaLine] = useState('');
+
+  // 券夹
+  const [coupons, setCoupons] = useState<CouponWallet>({ items: [] });
 
   const canGen = isImageGenApiReady(apiConfig?.imageGenApi);
 
   const refresh = useCallback(async () => setGifts(await loadGifts(charId)), [charId]);
   useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => { setCoupons(loadCoupons(charId)); }, [charId, tab]);
 
   // ── 制作 ──
 
@@ -164,6 +178,55 @@ const YuZhouGiftPage: React.FC<Props> = ({ charId, taName, onBack }) => {
     }, 780);
   };
 
+  /**
+   * 去看看它有没有留下什么。
+   *
+   * 不是"送我一个"——它自己判断此刻想不想送，可能有也可能没有。
+   * 冷却 12 小时，超过 7 天没送过会保底必给，纪念日整百天也必给。
+   */
+  const checkTaGift = async () => {
+    if (checking) return;
+    const gate = checkGiftGate(charId);
+    if (!gate.can) {
+      const t = new Date(gate.nextAt);
+      addToast(`下次可以去看看：${t.getMonth() + 1}月${t.getDate()}日 ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`, 'info');
+      return;
+    }
+    if (!apiConfig?.baseUrl || !apiConfig?.apiKey) { addToast('请先配置 API', 'info'); return; }
+
+    setChecking(true);
+    setTaLine('');
+    try {
+      const r = await runTaGift({ charId, char: char || null, apiConfig, userName: userProfile?.name || '我', gate });
+      setGifts(r.gifts);
+      if (r.gift) { setTab('shelf'); addToast(`${taName}留了个东西给你`, 'success'); }
+      else setTaLine(r.line || '');
+    } catch (e: any) {
+      addToast(`没看成：${e?.message?.slice(0, 40) || '未知错误'}`, 'error');
+    } finally { setChecking(false); }
+  };
+
+  /**
+   * 把券发进聊天框 = 用掉 [用户确认]。
+   *
+   * 以你的身份发一条普通文字消息，不打 source 标记——这条**要**出现在聊天气泡流里，
+   * TA 读到之后自然会接。发出去就作废，不能反悔。
+   */
+  const playCoupon = async (item: CouponItem) => {
+    const def = couponById(item.defId);
+    if (!def) return;
+    try {
+      await DB.saveMessage({
+        charId, role: 'user', type: 'text',
+        content: `【${def.name}】${def.desc}`,
+      } as any);
+      setCoupons(useCoupon(charId, item.id));
+      addToast(`「${def.name}」已经发给${taName}了`, 'success');
+    } catch (e: any) {
+      addToast(`发失败：${e?.message?.slice(0, 40) || '未知错误'}`, 'error');
+    }
+  };
+
   const remove = async (g: Gift) => {
     await deleteGift(charId, g.id);
     setViewing(null);
@@ -175,6 +238,17 @@ const YuZhouGiftPage: React.FC<Props> = ({ charId, taName, onBack }) => {
 
   return (
     <div className="absolute inset-0 z-[62] bg-[#fdf3f2] text-slate-700">
+      {/* 券的票形。礼物页是独立覆盖层，YuZhouApp 挂的那份样式在它的子树里，
+          这里自带一份，免得券夹里的票缺了缺口和撕线。 */}
+      <style>{`
+        .yz-ticket{position:relative;background:rgba(255,255,255,.88);border:1px solid;
+          border-radius:16px;padding:13px 15px;box-shadow:0 6px 18px rgba(172,88,108,.08)}
+        .yz-notch{position:absolute;width:14px;height:14px;border-radius:50%;
+          background:#fdf3f2;top:50%;transform:translateY(-50%)}
+        .yz-notch.left{left:-8px}
+        .yz-notch.right{right:-8px}
+        .yz-tear{border-top:1px dashed;margin:11px -15px 9px;padding:0}
+      `}</style>
       <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_12%_8%,rgba(255,214,224,.55),transparent_30%),radial-gradient(circle_at_88%_20%,rgba(255,228,232,.6),transparent_32%),linear-gradient(180deg,#fff9f8_0%,#fdf1f0_100%)]" />
       <div className="relative h-full overflow-y-auto overscroll-none" style={{ paddingTop: 'var(--safe-top)' }}>
         <header className="h-14 px-4 flex items-center justify-between">
@@ -188,7 +262,7 @@ const YuZhouGiftPage: React.FC<Props> = ({ charId, taName, onBack }) => {
 
         <div className="px-5 max-w-md mx-auto">
           <div className="flex gap-2 mb-5">
-            {([['make', '制作台'], ['shelf', '藏柜']] as const).map(([id, label]) => (
+            {([['make', '制作台'], ['shelf', '藏柜'], ['coupon', '券夹']] as const).map(([id, label]) => (
               <button
                 key={id}
                 onClick={() => setTab(id)}
@@ -298,8 +372,25 @@ const YuZhouGiftPage: React.FC<Props> = ({ charId, taName, onBack }) => {
                 {sealing ? '封装中…' : '封装'}
               </button>
             </div>
-          ) : (
+          ) : tab === 'shelf' ? (
             <div className="pb-10">
+              {/* 不是"送我一个"，是"去看看它有没有留下什么"——可能有，也可能没有 */}
+              <button
+                onClick={checkTaGift}
+                disabled={checking}
+                className="w-full mb-4 py-2.5 rounded-2xl text-[12px] font-bold flex items-center justify-center gap-1.5 active:scale-95 transition disabled:opacity-50"
+                style={{ background: '#fff', color: '#e0767e', boxShadow: '0 4px 14px rgba(172,88,108,.10)' }}
+              >
+                <ArrowClockwise size={14} className={checking ? 'animate-spin' : ''} />
+                {checking ? `${taName}那边看看…` : `去看看${taName}有没有留下什么`}
+              </button>
+
+              {taLine && (
+                <div className="mb-4 px-4 py-3 rounded-2xl bg-white/70 text-[12.5px] leading-relaxed text-slate-600">
+                  <span className="text-rose-400 font-bold">{taName}：</span>{taLine}
+                </div>
+              )}
+
               <div className="flex gap-3">
                 <GiftColumn title="我送的" list={mine} empty={`还没送过${taName}东西`} openingId={openingId} onOpen={handleOpen} />
                 <div className="w-px bg-rose-200/50" />
@@ -308,6 +399,80 @@ const YuZhouGiftPage: React.FC<Props> = ({ charId, taName, onBack }) => {
               <div className="text-[10px] text-rose-300 leading-relaxed mt-8 px-1 text-center">
                 点一下盒子拆开。拆开只有一次，之后随时能重看里面。
               </div>
+            </div>
+          ) : (
+            <div className="pb-10">
+              {(() => {
+                const unused = coupons.items.filter(i => i.owner === 'user' && !i.usedAt);
+                const used = coupons.items.filter(i => i.owner === 'user' && i.usedAt)
+                  .sort((a, b) => (b.usedAt || 0) - (a.usedAt || 0));
+                return (
+                  <>
+                    {unused.length === 0 ? (
+                      <div className="text-center py-10">
+                        <Ticket size={34} className="mx-auto text-rose-200" />
+                        <div className="text-[12px] text-rose-300 mt-3 leading-relaxed">
+                          还没有券。<br />去「游戏 → 🏪」用苹果币换。
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        {unused.map(item => {
+                          const def = couponById(item.defId);
+                          if (!def) return null;
+                          const meta = categoryOf(def.category);
+                          return (
+                            <div key={item.id} className="yz-ticket" style={{ borderColor: `${meta.accent}33` }}>
+                              <span className="yz-notch left" />
+                              <span className="yz-notch right" />
+                              <div className="text-[14px] font-black" style={{ color: meta.accent }}>{def.name}</div>
+                              <div className="text-[11px] text-slate-500 mt-1 leading-relaxed">{def.desc}</div>
+                              <div className="yz-tear" style={{ borderColor: `${meta.accent}33` }} />
+                              <div className="flex items-center">
+                                <span className="text-[10px] text-slate-400">
+                                  {new Date(item.boughtAt).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })} 换的
+                                </span>
+                                <button
+                                  onClick={() => playCoupon(item)}
+                                  className="ml-auto text-[12px] font-bold px-3.5 py-1.5 rounded-full flex items-center gap-1 active:scale-95 transition"
+                                  style={{ background: meta.soft, color: meta.accent }}
+                                >
+                                  <PaperPlaneTilt size={12} weight="fill" /> 发给{taName}
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {used.length > 0 && (
+                      <div className="mt-8">
+                        <div className="text-[11px] font-bold text-rose-300 mb-2 px-1">用过的</div>
+                        <div className="space-y-1.5">
+                          {used.map(item => {
+                            const def = couponById(item.defId);
+                            if (!def) return null;
+                            return (
+                              <div key={item.id} className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white/50">
+                                <span className="text-[12px] text-slate-400 line-through">{def.name}</span>
+                                <span className="ml-auto text-[10px] text-rose-200">
+                                  {new Date(item.usedAt!).toLocaleDateString()}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="text-[10px] text-rose-300 leading-relaxed mt-8 px-1 text-center">
+                      发进聊天框就算用掉了，不能反悔。<br />
+                      券是你拿着用的权利，跟藏柜里那些"对方给的东西"是两回事。
+                    </div>
+                  </>
+                );
+              })()}
             </div>
           )}
         </div>
