@@ -11,6 +11,9 @@ import {
   type CouponCategory, type CouponWallet,
 } from './games/shared/coupons';
 import YuZhouNoteBoard from './yuzhou/YuZhouNoteBoard';
+import YuZhouGiftPage from './yuzhou/YuZhouGiftPage';
+import { GIFT_PACKAGE_CSS } from './yuzhou/GiftPackage';
+import { loadGifts, unopenedFromTa } from './yuzhou/gifts';
 import {
   YUZHOU_MOOD_EVENT,
   loadDayMood,
@@ -816,6 +819,18 @@ const YuZhouApp: React.FC = () => {
   const [showGamePage, setShowGamePage] = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
   const [showNotes, setShowNotes] = useState(false);
+  const [showGifts, setShowGifts] = useState(false);
+  /** TA 送的里面还没拆的个数，首页那个礼物入口上点红点用。 */
+  const [giftUnread, setGiftUnread] = useState(0);
+
+  // 礼物入口上的红点：TA 送的里面还没拆的个数。关掉礼物页时重算。
+  useEffect(() => {
+    let cancelled = false;
+    loadGifts(activeCharacterId || '')
+      .then(list => { if (!cancelled) setGiftUnread(unopenedFromTa(list)); })
+      .catch(() => { /* 读不到就不点红点 */ });
+    return () => { cancelled = true; };
+  }, [activeCharacterId, showGifts]);
   const [taMood, setTaMood] = useState<MoodSide | null>(null);
   const [generatingTa, setGeneratingTa] = useState(false);
   const [pokeCount, setPokeCount] = useState(0);
@@ -1027,7 +1042,7 @@ const YuZhouApp: React.FC = () => {
 
   return (
     <div className="relative h-full w-full overflow-hidden bg-[#fdf3f2] text-slate-700">
-      <style>{POKE_CSS + TICKET_CSS}</style>
+      <style>{POKE_CSS + TICKET_CSS + GIFT_PACKAGE_CSS}</style>
       <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_12%_8%,rgba(255,214,224,.55),transparent_30%),radial-gradient(circle_at_88%_20%,rgba(255,228,232,.6),transparent_32%),radial-gradient(circle_at_50%_100%,rgba(250,225,230,.7),transparent_45%),linear-gradient(180deg,#fff9f8_0%,#fdf1f0_100%)]" />
       <div className="relative h-full overflow-y-auto overscroll-none pb-[124px]" style={{ paddingTop: 'var(--safe-top)' }}>
 
@@ -1188,6 +1203,7 @@ const YuZhouApp: React.FC = () => {
             const onClick = () => {
               if (key === 'game') setShowGamePage(true);
               else if (key === 'note') setShowNotes(true);
+              else if (key === 'gift') setShowGifts(true);
               else if (!isHome) addToast?.(`${label}入口已预留，之后继续做`, 'info');
             };
             return (
@@ -1210,6 +1226,13 @@ const YuZhouApp: React.FC = () => {
 
       {showGamePage && <YuZhouGamePage onBack={() => setShowGamePage(false)} />}
       {showNotes && <YuZhouNoteBoard todayKey={todayKey} onBack={() => setShowNotes(false)} />}
+      {showGifts && (
+        <YuZhouGiftPage
+          charId={activeCharacterId || ''}
+          taName={char?.name || "TA"}
+          onBack={() => setShowGifts(false)}
+        />
+      )}
       {showCalendar && (
         <YuZhouMonthCalendar
           charId={moodCharId}
