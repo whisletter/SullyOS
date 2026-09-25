@@ -11,6 +11,7 @@ import { FreeDraw, FREE_DRAW_CSS } from './FreeDraw';
 import { Workshop, WORKSHOP_CSS } from './Workshop';
 import { DuoTable, DUO_CSS, DuoRequest } from './DuoTable';
 import { DuoRecords, DUO_RECORDS_CSS } from './DuoRecords';
+import TarotTitles, { TAROT_TITLES_CSS } from './TarotTitles';
 import { loadDuoSession, loadDuoApi, saveDuoApi, introSeen, markIntroSeen, DuoApiSetting } from './duoStore';
 import { useOS } from '../../../context/OSContext';
 // 房间图和代码放在同一个文件夹，由 Vite 打包。想换背景，直接用同名图片覆盖即可。
@@ -51,7 +52,7 @@ export interface TarotAppProps {
   characterAvatar?: string;
 }
 
-type Phase = 'room' | 'spread' | 'needDeck' | 'shuffle' | 'fan' | 'result' | 'book' | 'workshop' | 'free' | 'records';
+type Phase = 'room' | 'spread' | 'needDeck' | 'shuffle' | 'fan' | 'result' | 'book' | 'workshop' | 'free' | 'records' | 'titles';
 
 /** 按工坊里桌上正在用的牌组，拼出这副牌的抽牌池 */
 function buildPool(data: WorkshopData, kind: DeckKind): PoolCard[] {
@@ -94,7 +95,7 @@ const HOTSPOTS_TABLET: Hotspot[] = [
   { key: 'oracle', label: '神谕卡', left: '0%', top: '71.5%', width: '11%', height: '10%', ready: true },
   { key: 'book', label: '牌意之书', left: '72%', top: '70%', width: '28%', height: '19%', ready: true },
   { key: 'lamp', label: '煤油灯', left: '0%', top: '36%', width: '11%', height: '22%', ready: true },
-  { key: 'orrery', label: '称号', left: '76%', top: '47%', width: '13%', height: '14%', ready: false },
+  { key: 'orrery', label: '称号', left: '76%', top: '47%', width: '13%', height: '14%', ready: true },
   { key: 'phone', label: '电话', left: '87%', top: '54%', width: '13%', height: '14%', ready: true },
   { key: 'painting', label: '牌组工坊', left: '51%', top: '2%', width: '26%', height: '24%', ready: true },
   { key: 'moon', label: '接口设置', left: '12%', top: '4%', width: '14%', height: '11%', ready: true },
@@ -115,7 +116,7 @@ const HOTSPOTS_PHONE_EMPTY: Hotspot[] = [
   { key: 'oracle', label: '神谕卡', left: '0%', top: '69%', width: '12%', height: '7%', ready: true },
   { key: 'book', label: '牌意之书', left: '73%', top: '65%', width: '27%', height: '17%', ready: true },
   { key: 'lamp', label: '煤油灯', left: '0%', top: '42%', width: '12%', height: '16%', ready: true },
-  { key: 'orrery', label: '称号', left: '76%', top: '51%', width: '12%', height: '11%', ready: false },
+  { key: 'orrery', label: '称号', left: '76%', top: '51%', width: '12%', height: '11%', ready: true },
   { key: 'phone', label: '电话', left: '88%', top: '53%', width: '12%', height: '12%', ready: true },
   { key: 'painting', label: '牌组工坊', left: '51%', top: '18%', width: '26%', height: '18%', ready: true },
   { key: 'moon', label: '接口设置', left: '12%', top: '19%', width: '14%', height: '9%', ready: true },
@@ -130,7 +131,7 @@ const HOTSPOTS_PHONE_OCCUPIED: Hotspot[] = [
   { key: 'oracle', label: '神谕卡', left: '0%', top: '65.8%', width: '12%', height: '7%', ready: true },
   { key: 'book', label: '牌意之书', left: '73%', top: '63%', width: '27%', height: '16%', ready: true },
   { key: 'lamp', label: '煤油灯', left: '0%', top: '40%', width: '12%', height: '17%', ready: true },
-  { key: 'orrery', label: '称号', left: '76%', top: '49%', width: '12%', height: '11%', ready: false },
+  { key: 'orrery', label: '称号', left: '76%', top: '49%', width: '12%', height: '11%', ready: true },
   { key: 'phone', label: '电话', left: '88%', top: '52%', width: '12%', height: '11%', ready: true },
   { key: 'painting', label: '牌组工坊', left: '52%', top: '16%', width: '25%', height: '17%', ready: true },
   { key: 'moon', label: '接口设置', left: '12%', top: '18%', width: '14%', height: '9%', ready: true },
@@ -467,6 +468,8 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
     }
     else if (spot.key === 'book') { setBookReturn('room'); setPhase('book'); }
     else if (spot.key === 'shelf') setPhase('records');
+    // 桌上那个铜色浑天仪 = 称号页
+    else if (spot.key === 'orrery') setPhase('titles');
     else if (spot.key === 'lamp') setLampBright((v) => !v);
     // 电话：拨过去 TA 就坐到对面，再点一次 TA 离席；占卜进行中点不动
     else if (spot.key === 'phone') {
@@ -593,7 +596,7 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
 
   return (
     <div ref={rootRef} style={styles.root}>
-      <style>{CSS + WORKSHOP_CSS + FREE_DRAW_CSS + DUO_CSS + DUO_RECORDS_CSS}</style>
+      <style>{CSS + WORKSHOP_CSS + FREE_DRAW_CSS + DUO_CSS + DUO_RECORDS_CSS + TAROT_TITLES_CSS}</style>
 
       {/* ── 房间 ─────────────────────────────── */}
       <div style={roomBox}>
@@ -974,6 +977,16 @@ export function TarotApp({ characterName, onBack }: TarotAppProps) {
       )}
 
       {/* ── 占卜记录（壁炉边的书架）──────────────── */}
+      {phase === 'titles' && (
+        <TarotTitles
+          charId={charId}
+          taName={who}
+          userName={userProfile?.name || ''}
+          onClose={() => setPhase('room')}
+          onToast={setToast}
+        />
+      )}
+
       {phase === 'records' && (
         <DuoRecords
           charId={charId}
