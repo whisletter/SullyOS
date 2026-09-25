@@ -10,6 +10,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useOS } from '../../../context/OSContext';
 import { callGameAI } from '../shared/ai';
 import { createChatMirror } from '../shared/chatMirror';
+import { award } from '../shared/wallet';
 import { readNames, readPersona } from '../shared/profile';
 import {
   ENDING_FALLBACK, FALLBACK_POISON_CHOICE_NOTES, FALLBACK_POISON_LINES, FALLBACK_SAFE_LINES, NARRATOR_EAT,
@@ -295,6 +296,17 @@ const WitchPoisonGame: React.FC<WitchPoisonGameProps> = ({ onBack }) => {
 
     if (hit) {
       setLoser(who);
+      // 苹果币 [用户确认]：赢的一方 5 个，输的没有。
+      // 挂在这里而不是结果页渲染时——这个分支一局只会走到一次，
+      // 不需要额外记"这局发过没有"，重进结果页也不会再发。
+      // 注意 Who 是 'user'|'char'，而钱包和 names 用的是 'user'|'ta'，差一个字，别搞混
+      const winnerSide: 'user' | 'ta' = who === 'user' ? 'ta' : 'user';
+      award(charId, [{
+        side: winnerSide,
+        amount: 5,
+        game: 'witch_poison',
+        reason: `女巫的毒药 · ${names[winnerSide]}赢了`,
+      }]);
       const closing = await getEndingLine(who === 'user');
       addBubble('char', closing);
       setPhase('result');
