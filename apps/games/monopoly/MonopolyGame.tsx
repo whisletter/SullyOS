@@ -802,18 +802,19 @@ const MonopolyGame: React.FC<{ onBack: () => void }> = ({ onBack }) => {
     }
     if (!CHAT_MIRROR.milestones || prev.phase === next.phase) return;
     if (next.phase === 'stopped') mirrorSystem('有人按了飞鸟，游戏停下了。');
-    if (next.phase === 'over') {
-      mirrorSystem(`这局结束了：${nm.user} ${next.players.user.coins} 币，${nm.ta} ${next.players.ta.coins} 币。`);
-      settleApplecoins(next);
-    }
+    if (next.phase === 'over') mirrorSystem(`这局结束了：${nm.user} ${next.players.user.coins} 币，${nm.ta} ${next.players.ta.coins} 币。`);
   }
 
   /**
    * 苹果币结算 [用户确认]：只奖励赢的一方 15 个，输的没有。
    *
-   * 挂在 phase 跃迁到 'over' 这一刻，而不是渲染结果页时——大富翁没有"每局唯一 id"，
-   * 靠跃迁这个时机天然就是一次性的：这个函数只在 prev.phase !== 'over' 时才走到，
-   * 重新打开 App 时读到的已经是 'over'，不会再跃迁一次，所以不会重复发。
+   * 挂在 execCmd 里"刚跃迁到 over"那个判断上（跟 saveSeen 并排），而不是渲染结果页时——
+   * 大富翁没有"每局唯一 id"，靠跃迁这个时机天然就是一次性的：重新打开 App 时读到的
+   * 已经是 'over'，不会再跃迁一次，所以不会重复发。
+   *
+   * ⚠️ 一开始我放在 mirrorGameEvents 里，那是个 bug：那个函数开头有
+   * `if (!CHAT_MIRROR.milestones || ...) return;`，"要不要写聊天记录"这个开关一关，
+   * 钱就永远发不出来。发钱不该受日志开关管，所以挪到这里。
    *
    * 平局不发：游戏本身给了「加掷决胜」按钮，让胜负分出来再说。
    */
@@ -866,7 +867,10 @@ const MonopolyGame: React.FC<{ onBack: () => void }> = ({ onBack }) => {
     const next = runCommand(prev, cmd, by);
     commitGame(next);
     mirrorGameEvents(prev, next);
-    if (prev.phase !== 'over' && next.phase === 'over') saveSeen(charId, next);
+    if (prev.phase !== 'over' && next.phase === 'over') {
+      saveSeen(charId, next);
+      settleApplecoins(next);
+    }
     const fresh = next.log.filter(l => l.id > prev.seq);
     const errors = fresh.filter(l => l.kind === 'error').map(l => l.text);
     const engineText = fresh.filter(l => l.kind === 'engine').map(l => l.text).join('\n\n');
