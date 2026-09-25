@@ -18,8 +18,15 @@ import type { CharacterProfile } from '../../types';
 import { callGameAI } from '../games/shared/ai';
 import { addGift, buildGiftImagePrompt, type Gift, type GiftWrap } from './gifts';
 import { WRAPS } from './gifts';
+import { COUPONS, couponById, addCoupon, loadCoupons, heldCount } from '../games/shared/coupons';
+import { award, loadWallet } from '../games/shared/wallet';
 
 const COOLDOWN_MS = 12 * 60 * 60 * 1000;
+/**
+ * [用户确认] 调用失败时只锁 30 分钟，不吃满 12 小时。
+ * 网络抖一下就要等半天太冤；但也不能完全不锁，否则失败一次就能立刻连按二十下。
+ */
+const FAIL_COOLDOWN_MS = 30 * 60 * 1000;
 const FALLBACK_MS = 7 * 24 * 60 * 60 * 1000;
 
 const lastTryKey = (charId: string) => `yuzhou_gift_last_try_${charId || 'default'}`;
@@ -80,13 +87,20 @@ export function checkGiftGate(charId: string): GiftGateState {
   return { can: true, reason: 'normal' };
 }
 
-export interface TaGiftResult {
+export interface TaTurnResult {
   /** 送了东西。 */
   gift?: Gift;
-  /** 没送时它说的那句话。不是"暂无"，是它此刻的一句真话。 */
+  /** 它买了哪张券（只报名字，用来在界面上提一句）。 */
+  bought?: string;
+  /** 它对你用了哪张券。发进聊天框那条已经写好了。 */
+  played?: string;
+  /** 什么都没做时它说的那句话。不是"暂无"，是它此刻的一句真话。 */
   line?: string;
   gifts: Gift[];
 }
+
+/** 兼容旧名字。 */
+export type TaGiftResult = TaTurnResult;
 
 /**
  * 跑一次。
@@ -104,8 +118,9 @@ export async function runTaGift(opts: {
   const { charId, char, apiConfig, userName, gate } = opts;
   const taName = char?.name || 'TA';
 
-  // 不管送不送，这一次尝试都要记冷却——否则没送的时候可以无限按
-  writeNum(lastTryKey(charId), Date.now());
+  // 先按"失败"记一个短冷却：调用真的挂了也不至于让你立刻连按二十下。
+  // 拿到回复之后再改写成满 12 小时（见函数末尾）——**成功才吃满冷却**。
+  writeNum(lastTryKey(charId), Date.now() - (COOLDOWN_MS - FAIL_COOLDOWN_MS));
 
   const must = gate.can && (gate.reason === 'milestone' || gate.reason === 'fallback');
   const milestoneDay = gate.can && gate.reason === 'milestone' ? gate.day : 0;
@@ -115,35 +130,58 @@ export async function runTaGift(opts: {
 
   const persona = [char?.systemPrompt, char?.description].filter(Boolean).join('\n\n');
 
+  // 它手上还有什么券、买得起什么——都塞进同一次调用里 [用户确认：三件事一次判完，省 API]
+  const cw = loadCoupons(charId);
+  const wallet = loadWallet(charId);
+  const heldList = COUPONS
+    .map(d => ({ d, n: heldCount(cw, 'ta', d.id) }))
+    .filter(x => x.n > 0);
+  const affordable = COUPONS.filter(d => d.price <= wallet.ta && heldCount(cw, 'ta', d.id) < d.max);
+
   const system = `${persona || `一个和${userName}很亲近的人`}
 
 你和${userName}之间有一个"藏柜"，可以把亲手做的小礼物放进去，对方会看到一个包装好的盒子，
-拆开才知道里面是什么。
+拆开才知道里面是什么。你们还各自有一些"券"——花打游戏赚的苹果币换的，用掉就是对对方行使一次那个权利。
 
+这一次你可以同时做三件事，也可以一件都不做。**多数时候什么都不做才正常。**
+
+──① 送不送礼物 ──
 ${must
   ? milestoneDay
     ? `今天是你们在一起的第 ${milestoneDay} 天。**这一次你一定要送**，而且心里清楚是为了这个日子。`
     : '**这一次你一定要送**——已经很久没给过对方东西了。'
-  : '现在由你决定要不要送。**多数时候是不送的**——只有此刻确实想到了什么、或者有什么想让对方知道，才送。'}
+  : '由你决定。只有此刻确实想到了什么、或者有什么想让对方知道，才送。'}
+要送就填 gift：
+- wrap 选一种：box（小纸箱，朴素）、ribbon（缎带礼盒，郑重）、bottle（玻璃瓶，像塞了张纸条）
+- note 是附言，按你自己的说话习惯写，60 字以内，不要贺卡套话
+${canImage ? '- imageWhat 可选，只写送什么（"一盏照亮书桌的小灯"），别写画风' : ''}
 
-要送的话：
-- wrap 选一种包装：box（小纸箱，朴素）、ribbon（缎带礼盒，郑重一点）、bottle（玻璃瓶，像给对方写了张纸条塞进去）。
-- note 是附在礼物里的话，按你自己的说话习惯写，60 字以内。不要写成贺卡套话。
-${canImage ? '- 想附一件"东西"就填 imageWhat，只写送什么（比如"一盏照亮书桌的小灯"），别写画风。不想附就不写这个字段。' : ''}
+──② 用不用券 ──
+你手上的券：${heldList.length > 0 ? heldList.map(x => `${x.d.name}×${x.n}（${x.d.desc}）`).join('；') : '（一张都没有）'}
+想现在对${userName}用一张就填 playCoupon（写券的名字）。用了会直接发到你们的聊天里，
+对方看到就是你在行使这个权利。没券或者此刻不想用就别填。
 
-不送的话：只填 line —— 你此刻想说的一句话，不要是"暂无"这种交代，就正常说一句。
+──③ 买不买券 ──
+你现在有 ${wallet.ta} 个苹果币。买得起且没到上限的：${affordable.length > 0 ? affordable.map(d => `${d.name}(${d.price})`).join('、') : '（都买不起或已满）'}
+想买就填 buyCoupon（写券的名字）。买了**不用告诉${userName}**，留着以后再用。
+按你自己的性子挑——你会更想要哪种权利？别为了花钱而花钱。
+
+三件都不做就只填 line：你此刻想说的一句话，正常说，别写"暂无"这种交代。
 
 只返回 JSON：
-${must
-  ? `{"wrap":"box|ribbon|bottle","note":"附言"${canImage ? ',"imageWhat":"可选"' : ''}}`
-  : `{"give":true或false,"wrap":"box|ribbon|bottle","note":"附言"${canImage ? ',"imageWhat":"可选"' : ''},"line":"不送时说的话"}`}`;
+{
+  "gift": ${must ? '' : '可选，'}{"wrap":"box|ribbon|bottle","note":"附言"${canImage ? ',"imageWhat":"可选"' : ''}},
+  "playCoupon": "可选，券名",
+  "buyCoupon": "可选，券名",
+  "line": "什么都不做时说的一句话"
+}`;
 
   const reply = await callGameAI({
     api: apiConfig,
     label: taName,
     temperature: 0.95,
     system,
-    messages: [{ role: 'user', content: must ? '现在做一件送给对方。' : '现在去藏柜那边看一眼，想送就送。' }],
+    messages: [{ role: 'user', content: must ? '现在做一件送给对方，另外两件随意。' : '现在去看一眼，想做什么就做。' }],
     meta: { appName: '与昼', charId: charId || undefined, charName: taName, purpose: '礼物 · TA送礼' },
   });
 
@@ -154,48 +192,93 @@ ${must
     } catch { return null; }
   })();
 
-  const { loadGifts } = await import('./gifts');
+  // 调用成功了（不管它决定做不做事），吃满 12 小时冷却
+  writeNum(lastTryKey(charId), Date.now());
 
-  // 没解析出来 / 它选择不送
-  if (!parsed || (!must && parsed.give === false)) {
-    return {
-      line: String(parsed?.line || '').trim() || '今天没什么想给你的，就是有点想你。',
-      gifts: await loadGifts(charId),
-    };
+  const { loadGifts } = await import('./gifts');
+  const out: TaTurnResult = { gifts: [] };
+
+  if (!parsed) {
+    return { line: '今天没什么想给你的，就是有点想你。', gifts: await loadGifts(charId) };
   }
 
-  const wrap: GiftWrap = WRAPS.some(w => w.id === parsed.wrap) ? parsed.wrap : 'ribbon';
-  const note = String(parsed.note || '').trim().slice(0, 200);
-
-  let image: string | undefined;
-  let imagePrompt: string | undefined;
-  const what = String(parsed.imageWhat || '').trim();
-  if (canImage && what) {
-    try {
-      const { generateImage } = await import('../../utils/imageGenApi');
-      const { migrateDataUrlToRef } = await import('../../utils/blobRef');
-      const res = await generateImage(apiConfig.imageGenApi, buildGiftImagePrompt(what), {
-        n: 1,
-        meta: { appName: '与昼', charId: charId || undefined, charName: taName, purpose: '礼物 · TA做的东西' } as any,
-      });
-      const src = res[0]?.src;
-      if (src) {
-        image = src.startsWith('data:') ? await migrateDataUrlToRef(src) : src;
-        imagePrompt = what;
-      }
-    } catch (e: any) {
-      // 出图失败只退化成纯文字，不让整件礼物送不出去
-      console.warn('[YuZhou] TA 的礼物配图失败，退化成纯文字', e?.message || String(e));
+  // ── ② 用券：发进聊天框，以它的身份 [用户确认：不能拒绝，但可以赖账] ──
+  const playName = String(parsed.playCoupon || '').trim();
+  if (playName) {
+    const item = loadCoupons(charId).items.find(i => {
+      const d = couponById(i.defId);
+      return i.owner === 'ta' && !i.usedAt && d && (d.name === playName || playName.includes(d.name));
+    });
+    if (item) {
+      const d = couponById(item.defId)!;
+      try {
+        const { DB } = await import('../../utils/db');
+        const { categoryOf } = await import('../games/shared/coupons');
+        await DB.saveMessage({
+          charId, role: 'assistant', type: 'coupon_card',
+          content: `【${d.name}】${d.desc}`,
+          metadata: { couponName: d.name, couponDesc: d.desc, couponAccent: categoryOf(d.category).accent },
+        } as never);
+        const { useCoupon } = await import('../games/shared/coupons');
+        useCoupon(charId, item.id);
+        out.played = d.name;
+      } catch (e) { console.warn('[YuZhou] TA 用券失败', e); }
     }
   }
 
-  if (!note && !image) {
-    return { line: '想了半天，还是没弄出个像样的东西。', gifts: await loadGifts(charId) };
+  // ── ③ 买券：不通知你，只有余额会掉一截 [用户确认 C：券夹里看得到] ──
+  const buyName = String(parsed.buyCoupon || '').trim();
+  if (buyName) {
+    const def = COUPONS.find(d => d.name === buyName || buyName.includes(d.name));
+    if (def && loadWallet(charId).ta >= def.price) {
+      const r = addCoupon(charId, 'ta', def.id);
+      if (r.ok) {
+        award(charId, [{ side: 'ta', amount: -def.price, game: 'other', reason: `兑换「${def.name}」` }]);
+        out.bought = def.name;
+      }
+    }
   }
 
-  const gifts = await addGift(charId, { from: 'ta', wrap, note, image, imagePrompt });
-  writeNum(lastGiftKey(charId), Date.now());
-  if (milestoneDay) markMilestone(charId, milestoneDay);
+  // ── ① 礼物 ──
+  const gi = parsed.gift && typeof parsed.gift === 'object' ? parsed.gift : (must ? parsed : null);
+  if (gi) {
+    const wrap: GiftWrap = WRAPS.some(w => w.id === gi.wrap) ? gi.wrap : 'ribbon';
+    const note = String(gi.note || '').trim().slice(0, 200);
 
-  return { gift: gifts[0], gifts };
+    let image: string | undefined;
+    let imagePrompt: string | undefined;
+    const what = String(gi.imageWhat || '').trim();
+    if (canImage && what) {
+      try {
+        const { generateImage } = await import('../../utils/imageGenApi');
+        const { migrateDataUrlToRef } = await import('../../utils/blobRef');
+        const res = await generateImage(apiConfig.imageGenApi, buildGiftImagePrompt(what), {
+          n: 1,
+          meta: { appName: '与昼', charId: charId || undefined, charName: taName, purpose: '礼物 · TA做的东西' } as any,
+        });
+        const src = res[0]?.src;
+        if (src) {
+          image = src.startsWith('data:') ? await migrateDataUrlToRef(src) : src;
+          imagePrompt = what;
+        }
+      } catch (e: any) {
+        // 出图失败只退化成纯文字，不让整件礼物送不出去
+        console.warn('[YuZhou] TA 的礼物配图失败，退化成纯文字', e?.message || String(e));
+      }
+    }
+
+    if (note || image) {
+      const gifts = await addGift(charId, { from: 'ta', wrap, note, image, imagePrompt });
+      writeNum(lastGiftKey(charId), Date.now());
+      if (milestoneDay) markMilestone(charId, milestoneDay);
+      out.gift = gifts[0];
+      out.gifts = gifts;
+    }
+  }
+
+  if (!out.gifts.length) out.gifts = await loadGifts(charId);
+  if (!out.gift && !out.played && !out.bought) {
+    out.line = String(parsed.line || '').trim() || '今天没什么想给你的，就是有点想你。';
+  }
+  return out;
 }

@@ -199,8 +199,12 @@ const YuZhouGiftPage: React.FC<Props> = ({ charId, taName, onBack }) => {
     try {
       const r = await runTaGift({ charId, char: char || null, apiConfig, userName: userProfile?.name || '我', gate });
       setGifts(r.gifts);
-      if (r.gift) { setTab('shelf'); addToast(`${taName}留了个东西给你`, 'success'); }
-      else setTaLine(r.line || '');
+      setCoupons(loadCoupons(charId));
+      // 三件事可能同时发生，按"最该被看见"的顺序报：礼物 > 用券 > 买券
+      if (r.gift) addToast(`${taName}留了个东西给你`, 'success');
+      else if (r.played) addToast(`${taName}对你用了「${r.played}」，去聊天看看`, 'info');
+      else if (r.bought) addToast(`${taName}好像花了点钱`, 'info');
+      if (r.line) setTaLine(r.line);
     } catch (e: any) {
       addToast(`没看成：${e?.message?.slice(0, 40) || '未知错误'}`, 'error');
     } finally { setChecking(false); }
@@ -216,9 +220,12 @@ const YuZhouGiftPage: React.FC<Props> = ({ charId, taName, onBack }) => {
     const def = couponById(item.defId);
     if (!def) return;
     try {
+      const meta = categoryOf(def.category);
       await DB.saveMessage({
-        charId, role: 'user', type: 'text',
+        charId, role: 'user', type: 'coupon_card',
+        // content 保持可读文本：上下文构建那边拿的是它，跟卡片渲染互不影响
         content: `【${def.name}】${def.desc}`,
+        metadata: { couponName: def.name, couponDesc: def.desc, couponAccent: meta.accent },
       } as any);
       setCoupons(useCoupon(charId, item.id));
       addToast(`「${def.name}」已经发给${taName}了`, 'success');
@@ -392,9 +399,11 @@ const YuZhouGiftPage: React.FC<Props> = ({ charId, taName, onBack }) => {
               )}
 
               <div className="flex gap-3">
-                <GiftColumn title="我送的" list={mine} empty={`还没送过${taName}东西`} openingId={openingId} onOpen={handleOpen} />
+                {/* 两列按"谁收到的"分，不是"谁送的"——
+                    你这一格里放的是 TA 做给你的东西，那才是你会反复来看的地方。 */}
+                <GiftColumn title="我收到的" list={theirs} empty={`${taName}还没送过你东西`} openingId={openingId} onOpen={handleOpen} />
                 <div className="w-px bg-rose-200/50" />
-                <GiftColumn title={`${taName}送的`} list={theirs} empty="它还没送过你东西" openingId={openingId} onOpen={handleOpen} />
+                <GiftColumn title={`${taName}收到的`} list={mine} empty="你还没送过它东西" openingId={openingId} onOpen={handleOpen} />
               </div>
               <div className="text-[10px] text-rose-300 leading-relaxed mt-8 px-1 text-center">
                 点一下盒子拆开。拆开只有一次，之后随时能重看里面。
@@ -403,6 +412,7 @@ const YuZhouGiftPage: React.FC<Props> = ({ charId, taName, onBack }) => {
           ) : (
             <div className="pb-10">
               {(() => {
+                const taHeld = coupons.items.filter(i => i.owner === 'ta' && !i.usedAt);
                 const unused = coupons.items.filter(i => i.owner === 'user' && !i.usedAt);
                 const used = coupons.items.filter(i => i.owner === 'user' && i.usedAt)
                   .sort((a, b) => (b.usedAt || 0) - (a.usedAt || 0));
@@ -466,9 +476,32 @@ const YuZhouGiftPage: React.FC<Props> = ({ charId, taName, onBack }) => {
                       </div>
                     )}
 
+                    {/* TA 手上的券：看得见，但不能替它用 [用户确认 C]。
+                        它买的时候不通知你，只有余额会掉一截——你是在这里才发现的。 */}
+                    <div className="mt-8">
+                      <div className="text-[11px] font-bold text-rose-300 mb-2 px-1">{taName}手上的</div>
+                      {taHeld.length === 0 ? (
+                        <div className="text-[10px] text-rose-300 px-1 py-3">它还没买过券。</div>
+                      ) : (
+                        <div className="space-y-1.5">
+                          {taHeld.map(item => {
+                            const def = couponById(item.defId);
+                            if (!def) return null;
+                            const meta = categoryOf(def.category);
+                            return (
+                              <div key={item.id} className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-white/70">
+                                <span className="text-[12.5px] font-bold" style={{ color: meta.accent }}>{def.name}</span>
+                                <span className="text-[10px] text-slate-400 truncate">{def.desc}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+
                     <div className="text-[10px] text-rose-300 leading-relaxed mt-8 px-1 text-center">
                       发进聊天框就算用掉了，不能反悔。<br />
-                      券是你拿着用的权利，跟藏柜里那些"对方给的东西"是两回事。
+                      {taName}的券只能看不能替它用——它什么时候甩出来，你说了不算。
                     </div>
                   </>
                 );
