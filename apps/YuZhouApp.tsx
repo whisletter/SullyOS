@@ -5,7 +5,11 @@ import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
 import { processImage } from '../utils/file';
 import { GAMES } from './games/registry';
-import { loadWallet, type Wallet, type WalletEntry } from './games/shared/wallet';
+import { loadWallet, award, type Wallet, type WalletEntry } from './games/shared/wallet';
+import {
+  COUPONS, COUPON_CATEGORIES, categoryOf, addCoupon, loadCoupons, heldCount,
+  type CouponCategory, type CouponWallet,
+} from './games/shared/coupons';
 import YuZhouNoteBoard from './yuzhou/YuZhouNoteBoard';
 import {
   YUZHOU_MOOD_EVENT,
@@ -29,6 +33,24 @@ const USER_MOOD_MIGRATED_KEY = 'yuzhou_user_mood_migrated';
 const DEFAULT_USER_EMOJI = ''; // 空 = 今天还没选，显示虚线圆圈 +
 
 // 戳一下 TA 的 emoji：只播动画，不改内容
+/**
+ * 券的票形。
+ *
+ * 两侧一对半圆缺口 + 中间一道虚线撕口——这是整个商店唯一值得花视觉的地方。
+ * 缺口用背景同色的小圆盖在边框上做出来（不是 mask），因为页面背景是渐变的，
+ * mask 抠出来的透明洞会露出渐变的另一段，看着像脏点。这里的 #fff6f4 跟卡片
+ * 所在位置的背景色接近，肉眼分不出来。
+ */
+const TICKET_CSS = `
+.yz-ticket{position:relative;background:rgba(255,255,255,.88);border:1px solid;
+  border-radius:16px;padding:13px 15px;box-shadow:0 6px 18px rgba(172,88,108,.08)}
+.yz-notch{position:absolute;width:14px;height:14px;border-radius:50%;
+  background:#fff6f4;top:50%;transform:translateY(-50%)}
+.yz-notch.left{left:-8px}
+.yz-notch.right{right:-8px}
+.yz-tear{border-top:1px dashed;margin:11px -15px 9px;padding:0}
+`;
+
 const POKE_CSS = `
 @keyframes yz-poke {
   0% { transform: scale(1) rotate(0); }
@@ -354,6 +376,131 @@ const YuZhouWalletPage: React.FC<{ wallet: Wallet; taName: string; onBack: () =>
   </div>
 );
 
+
+/**
+ * 兑换商店。
+ *
+ * 券做成票的样子——两侧一对半圆缺口 + 中间一道虚线撕口。这是整个商店唯一值得
+ * 花视觉的地方：商品本身就是内容，做得像票才有"拿到一张"的感觉。
+ *
+ * 买不起 / 到上限的直接变灰并在按钮上写明原因，不做弹窗报错——
+ * 一眼看出能不能买，比点了才告诉你好。
+ *
+ * 兑换没有二次确认：券不贵，买错了也一直躺在券夹里，多一步很烦。
+ * 流水里记一笔负数，反悔了看得见。
+ *
+ * 这一版**只有你能买**。TA 自己花钱那条（它判断时机、调 API、有自己的券夹）
+ * 是另一摊，先让它的余额涨着——你会看着那个数字，等它哪天出手。
+ */
+const YuZhouStorePage: React.FC<{
+  charId: string;
+  wallet: Wallet;
+  coupons: CouponWallet;
+  onBought: (w: Wallet, c: CouponWallet) => void;
+  onToast: (text: string) => void;
+  onBack: () => void;
+}> = ({ charId, wallet, coupons, onBought, onToast, onBack }) => {
+  const [tab, setTab] = useState<CouponCategory | 'all'>('all');
+  const list = COUPONS.filter(c => tab === 'all' || c.category === tab);
+
+  const buy = (defId: string) => {
+    const def = COUPONS.find(c => c.id === defId)!;
+    const r = addCoupon(charId, 'user', defId);
+    if (!r.ok) {
+      onToast(r.reason === 'max_reached' ? `「${def.name}」已经到上限了` : '兑换失败');
+      return;
+    }
+    // 扣钱走 award 记负数，这样商店消费和游戏收入在同一条流水里看得到
+    const w = award(charId, [{
+      side: 'user', amount: -def.price, game: 'other', reason: `兑换「${def.name}」`,
+    }]);
+    onBought(w, r.wallet!);
+    onToast(`换到一张「${def.name}」`);
+  };
+
+  return (
+    <div className="absolute inset-0 z-[66] bg-[#fff7f5] text-slate-800">
+      <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_15%_10%,rgba(255,190,205,.42),transparent_28%),radial-gradient(circle_at_90%_25%,rgba(255,220,224,.5),transparent_30%),linear-gradient(180deg,#fffafa_0%,#fff4f1_100%)]" />
+      <div className="relative h-full overflow-y-auto overscroll-none" style={{ paddingTop: 'var(--safe-top)' }}>
+        <header className="h-14 px-4 flex items-center justify-between">
+          <button onClick={onBack} className="w-9 h-9 rounded-full bg-white/80 shadow-sm text-rose-400 text-xl active:scale-90 transition-transform">‹</button>
+          <div className="text-center">
+            <div className="font-black tracking-[.18em] text-rose-500 text-base">兑换商店</div>
+            <div className="text-[8px] tracking-[.22em] text-rose-300 mt-0.5">COUPON SHOP</div>
+          </div>
+          <div className="h-9 px-2.5 rounded-full bg-white/80 shadow-sm flex items-center gap-1">
+            <span className="text-[13px] leading-none">🍏</span>
+            <span className="text-[12px] font-black text-slate-600 leading-none">{wallet.user}</span>
+          </div>
+        </header>
+
+        <main className="px-4 pb-10 max-w-md mx-auto">
+          <div className="flex gap-1.5 mb-4">
+            {([['all', '全部'], ...COUPON_CATEGORIES.map(c => [c.id, c.label] as const)] as const).map(([id, label]) => (
+              <button
+                key={id}
+                onClick={() => setTab(id as CouponCategory | 'all')}
+                className="text-[12px] px-3 py-1.5 rounded-full font-bold transition"
+                style={tab === id
+                  ? { background: '#e0767e', color: '#fff' }
+                  : { background: 'rgba(255,255,255,.75)', color: '#c4788a' }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          <div className="space-y-3">
+            {list.map(def => {
+              const meta = categoryOf(def.category);
+              const held = heldCount(coupons, 'user', def.id);
+              const full = held >= def.max;
+              const poor = wallet.user < def.price;
+              const disabled = full || poor;
+              return (
+                <div key={def.id} className="yz-ticket" style={{ borderColor: `${meta.accent}33` }}>
+                  {/* 两侧缺口：用背景色的小圆盖在边上，做出票被撕开的豁口 */}
+                  <span className="yz-notch left" />
+                  <span className="yz-notch right" />
+                  <div className="flex items-start gap-2">
+                    <div className="flex-1 min-w-0">
+                      <div className="text-[14px] font-black" style={{ color: meta.accent }}>{def.name}</div>
+                      <div className="text-[11px] text-slate-500 mt-1 leading-relaxed">{def.desc}</div>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <div className="text-[17px] font-black text-slate-700 leading-none">{def.price}</div>
+                      <div className="text-[9px] text-rose-300 mt-0.5">🍏</div>
+                    </div>
+                  </div>
+                  <div className="yz-tear" style={{ borderColor: `${meta.accent}33` }} />
+                  <div className="flex items-center">
+                    <span className="text-[10px] text-slate-400">持有 {held}/{def.max}</span>
+                    <button
+                      onClick={() => buy(def.id)}
+                      disabled={disabled}
+                      className="ml-auto text-[12px] font-bold px-4 py-1.5 rounded-full transition active:scale-95 disabled:active:scale-100"
+                      style={disabled
+                        ? { background: 'rgba(0,0,0,.05)', color: '#b6b0ae' }
+                        : { background: meta.soft, color: meta.accent }}
+                    >
+                      {full ? '已达上限' : poor ? `还差 ${def.price - wallet.user}` : '兑换'}
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="text-[11px] text-rose-300 leading-relaxed mt-6 px-1">
+            券换来的是一份<b>权利</b>，不是礼物——礼物是亲手做了送对方的，券是你拿着用的。
+            <br />用券的地方在「礼物」里的券夹，那边还没做好，先攒着。
+          </div>
+        </main>
+      </div>
+    </div>
+  );
+};
+
 const YuZhouGamePage: React.FC<{ onBack: () => void }> = ({ onBack }) => {
   const { activeCharacterId, characters } = useOS();
   const charId = activeCharacterId || '';
@@ -361,6 +508,9 @@ const YuZhouGamePage: React.FC<{ onBack: () => void }> = ({ onBack }) => {
 
   const [openId, setOpenId] = useState<string | null>(null);
   const [showWallet, setShowWallet] = useState(false);
+  const [showStore, setShowStore] = useState(false);
+  const [coupons, setCoupons] = useState<CouponWallet>(() => loadCoupons(charId));
+  const [toast, setToast] = useState('');
   const [wallet, setWallet] = useState<Wallet>(() => loadWallet(charId));
   const opened = GAMES.find(game => game.id === openId);
   const OpenedGame = opened?.component;
@@ -368,8 +518,15 @@ const YuZhouGamePage: React.FC<{ onBack: () => void }> = ({ onBack }) => {
   // 从某个游戏退回大厅时重读钱包：那一局刚发的币要立刻反映在顶上那个横条里。
   // 游戏是各自往 localStorage 写的，没有事件通知，所以靠"回到大厅"这个时机重读。
   useEffect(() => {
-    if (openId === null) setWallet(loadWallet(charId));
-  }, [openId, charId, showWallet]);
+    if (openId === null) { setWallet(loadWallet(charId)); setCoupons(loadCoupons(charId)); }
+  }, [openId, charId, showWallet, showStore]);
+
+  // toast 自己消失，不用点
+  useEffect(() => {
+    if (!toast) return;
+    const t = window.setTimeout(() => setToast(''), 2200);
+    return () => window.clearTimeout(t);
+  }, [toast]);
 
   return (
     <div className="absolute inset-0 z-[60] bg-[#fff7f5] text-slate-800">
@@ -383,16 +540,27 @@ const YuZhouGamePage: React.FC<{ onBack: () => void }> = ({ onBack }) => {
           </div>
           {/* 两个钱包并排放在这里，点进去是兑换商店。
               并排是关键：一眼看到"我多少、它多少"，才会去想它攒的钱要拿来干嘛。 */}
-          <button
-            onClick={() => setShowWallet(true)}
-            className="h-9 px-2.5 rounded-full bg-white/80 shadow-sm flex items-center gap-1.5 active:scale-95 transition-transform"
-          >
-            <span className="text-[13px] leading-none">🍏</span>
-            <span className="text-[12px] font-black text-slate-600 leading-none">{wallet.user}</span>
-            <span className="text-rose-200 text-[10px] leading-none">·</span>
-            <span className="text-[13px] leading-none">🍎</span>
-            <span className="text-[12px] font-black text-slate-600 leading-none">{wallet.ta}</span>
-          </button>
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => setShowWallet(true)}
+              className="h-9 px-2.5 rounded-full bg-white/80 shadow-sm flex items-center gap-1.5 active:scale-95 transition-transform"
+            >
+              <span className="text-[13px] leading-none">🍏</span>
+              <span className="text-[12px] font-black text-slate-600 leading-none">{wallet.user}</span>
+              <span className="text-rose-200 text-[10px] leading-none">·</span>
+              <span className="text-[13px] leading-none">🍎</span>
+              <span className="text-[12px] font-black text-slate-600 leading-none">{wallet.ta}</span>
+            </button>
+            {/* 商店单独一个入口 [用户确认]：钱包横条只是"看有多少钱"，
+                进商店是另一件事，混在一个按钮里两个目的都不清楚。 */}
+            <button
+              onClick={() => setShowStore(true)}
+              className="w-9 h-9 rounded-full bg-white/80 shadow-sm flex items-center justify-center text-[15px] active:scale-90 transition-transform"
+              aria-label="兑换商店"
+            >
+              🏪
+            </button>
+          </div>
         </header>
 
         <main className="px-5 pt-4 pb-10">
@@ -421,6 +589,25 @@ const YuZhouGamePage: React.FC<{ onBack: () => void }> = ({ onBack }) => {
 
       {showWallet && (
         <YuZhouWalletPage wallet={wallet} taName={taName} onBack={() => setShowWallet(false)} />
+      )}
+
+      {showStore && (
+        <YuZhouStorePage
+          charId={charId}
+          wallet={wallet}
+          coupons={coupons}
+          onBought={(w, c) => { setWallet(w); setCoupons(c); }}
+          onToast={setToast}
+          onBack={() => setShowStore(false)}
+        />
+      )}
+
+      {toast && (
+        <div className="absolute left-1/2 -translate-x-1/2 z-[80] px-4 py-2 rounded-full text-[12px] font-bold
+                        bg-slate-800/85 text-white shadow-lg pointer-events-none"
+             style={{ bottom: 'calc(var(--safe-bottom, 0px) + 28px)' }}>
+          {toast}
+        </div>
       )}
 
       {OpenedGame && (
@@ -840,7 +1027,7 @@ const YuZhouApp: React.FC = () => {
 
   return (
     <div className="relative h-full w-full overflow-hidden bg-[#fdf3f2] text-slate-700">
-      <style>{POKE_CSS}</style>
+      <style>{POKE_CSS + TICKET_CSS}</style>
       <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_12%_8%,rgba(255,214,224,.55),transparent_30%),radial-gradient(circle_at_88%_20%,rgba(255,228,232,.6),transparent_32%),radial-gradient(circle_at_50%_100%,rgba(250,225,230,.7),transparent_45%),linear-gradient(180deg,#fff9f8_0%,#fdf1f0_100%)]" />
       <div className="relative h-full overflow-y-auto overscroll-none pb-[124px]" style={{ paddingTop: 'var(--safe-top)' }}>
 
